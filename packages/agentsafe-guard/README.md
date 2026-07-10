@@ -124,6 +124,25 @@ Local evaluation is the cooperative-mode pre-check; the gate still owns the stat
 (single-use nonce, atomic spend-cap reservation, evidence anchoring), so value-bearing actions should
 still settle through the gate / `capture` flow.
 
+## 5. Mutual handshake with a Service (§8.2)
+
+Before transacting with a Service (an MCP), the agent and Service prove control of their DIDs
+to each other — no issuer calls, because the keys are embedded in the DIDs (§4.1.2). The agent
+drives the initiator side:
+
+```js
+const hs = guard.handshake();
+const { nonceA, message } = hs.hello();              // → send HELLO to the Service
+// Service replies with CHALLENGE { toDid, nonceB, sigB(nonceA) }
+const { sigA, handshakeId } = hs.prove({ nonceA, challenge });  // verifies the Service, → send PROVE
+// Service replies READY { channelId }
+```
+
+`prove()` throws `HandshakeFailed` if the Service's CHALLENGE does not verify against the key in
+its DID. The Service side uses [`agentsafe-mcp-guard`](../agentsafe-mcp-guard), which also
+re-evaluates the agent's signed request trustlessly (§9.6). Discover a Service's endpoint and
+confirm its key via the public resolver `GET /did/:did` (§4.4).
+
 ## Trust model
 
 The gate is a **checkpoint** — enforcement is real when it's actually called.
