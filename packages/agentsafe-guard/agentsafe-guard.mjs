@@ -221,5 +221,22 @@ export function createGuard({ api, agentDid, agentKey }) {
     };
   }
 
-  return { authorize, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, agentDid };
+  /**
+   * Poll the outcome of an escalated action (spec §9a). When authorize() returns
+   * `escalate`, its `escalationId` parks the action for the Owner to approve/deny.
+   * The agent polls this until the status is terminal; on `approved` the returned
+   * `authorizationId` carries into the §7a capture/pay flow. Fails soft (never throws).
+   * @returns {Promise<{status:string,reasonCode:string,authorizationId:string|null,expiresAt:string|null}>}
+   */
+  async function escalationStatus(escalationId) {
+    try {
+      const res = await fetch(`${base}/policy/escalations/${encodeURIComponent(escalationId)}/status`);
+      const body = await res.json().catch(() => null);
+      return body?.data ?? { status: 'unknown', reasonCode: `GATE_HTTP_${res.status}`, authorizationId: null, expiresAt: null };
+    } catch (err) {
+      return { status: 'unreachable', reasonCode: 'GATE_UNREACHABLE', authorizationId: null, expiresAt: null, error: String(err?.message ?? err) };
+    }
+  }
+
+  return { authorize, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, agentDid };
 }
