@@ -73,6 +73,51 @@ cd integrations\agentsafe-mcp-guard
 node mcp-guard.smoke.mjs   # PASS when every case matches
 ```
 
+## 3. Payment binding (x402, §7a)
+
+MAGP authorizes and reserves budget; it never custodies funds (§7a.5). Value moves over
+**x402**, and this guard **binds each settlement to exactly one authorization** so a payment
+can't be reused, can't exceed the authorized amount, and can't settle without a governance
+authorization behind it. The order is **authorize-before-pay** (§7a.1):
+
+```
+1. authorize   agent → gate: reserve amount → authorizationId (allow)
+2. request     agent → Service tool call
+3. 402         Service → agent: guard.requirePayment(...) — bound to authorizationId
+4. verify      guard.verifyRequest(...) re-checks the authorization trustlessly (§2)
+5. pay         agent → Service: X-PAYMENT; guard.settle(...) verifies + settles
+6. fulfil      Service performs the action → PNR + tx hash
+7. capture     agent → gate: capture(authorizationId, amountCharged, settlementTxHash)
+```
+
+```js
+// 3 — demand payment bound to the MAGP authorization (§7a.2):
+const requirements = guard.requirePayment({
+  authorizationId, agentDid, amount: 150, payTo: SERVICE_ADDR, asset: 'USDC', resource: '/book-flight',
+});
+
+// 5 — verify the binding, then settle via your x402 facilitator (injected):
+const { settled, txHash, reasonCode } = await guard.settle({
+  requirements, authorizationId, paidAmountMinor, xPayment,
+  settleFn: async ({ xPayment }) => facilitator.settle(xPayment),  // returns { settled, txHash }
+});
+```
+
+`settle` returns `AMOUNT_MISMATCH` for an overpayment (§7a.2.2), `SETTLEMENT_REUSED` if the
+authorization already settled (anti-reuse), and `SETTLEMENT_FAILED` if the facilitator can't
+settle — all fail-closed. `requirePayment` / `settle` don't move money; the injected facilitator
+does. On the agent side, `guard.preparePayment(requirements, authorizationId)` refuses an
+**unbound** 402 and one whose authorization doesn't match the agent's own hold.
+
+Holds carry an expiry (§7a.4): if not captured, the reservation auto-voids and the budget returns
+to the cap; a party can also void explicitly via `POST /policy/mandate/authorize/:id/void`.
+
+Run the self-check:
+
+```powershell
+node pay.smoke.mjs   # bound / exact / single-use / fail-closed
+```
+
 ## Where this fits
 
 MetaMynd is the **control plane** (issuer/anchor): it exposes the public DID resolver

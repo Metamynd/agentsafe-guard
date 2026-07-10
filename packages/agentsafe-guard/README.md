@@ -86,8 +86,11 @@ const gatedBookFlight = guard.guardTool(
 - **`context`** is what the Standard/SOP atoms read (jurisdiction, model, tool, PII, risk, …). Each
   atom declares what it needs — fetch the catalog at `GET /api/v1/standards/atoms` to see the exact
   fields (`requiredContext`) for the rules your agent is bound to.
-- For **payment** tools, after the real charge succeeds call
-  `await guard.capture(decision.authorizationId, amountCharged, bookingRef)` to settle the two-phase hold.
+- For **payment** tools (x402, §7a): after `authorize` allows, the Service returns a 402 bound to
+  your `authorizationId`. Call `guard.preparePayment(requirements, authorizationId)` — it refuses an
+  unbound or mismatched 402 — pay via x402, then reconcile the hold with
+  `await guard.capture(authorizationId, amountCharged, bookingRef, settlementTxHash)`. An
+  uncaptured hold auto-voids at its expiry (`POST /policy/mandate/authorize/:id/void` to release early).
 
 ## 4. Evaluate locally (no network)
 
