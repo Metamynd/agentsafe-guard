@@ -14,6 +14,7 @@
 import crypto from 'node:crypto';
 import { evaluate, buildAuthMessage, applySignedLast } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
+import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 
 /** Freshness window for signed requests and handshake nonces (spec §7.7). */
 const FRESHNESS_MS = 5 * 60 * 1000;
@@ -154,7 +155,44 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle 
     };
   }
 
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, serviceDid };
+  // --- x402 payment binding (spec §7a). MAGP authorizes; x402 moves the money;
+  //     this binds a settlement to exactly one authorization. No custody (§7a.5). ---
+  const settledAuthIds = new Set();
+
+  /**
+   * Build the 402 PaymentRequirements bound to a MAGP authorization (§7a.2). The
+   * Service returns this after a value-bearing tool call whose authorization it has
+   * verified (step 4 of §7a.1), before it will settle.
+   * @param {{authorizationId,agentDid,amount,payTo,asset,resource,network?,decimals?}} p
+   */
+  function requirePayment(p) {
+    return buildPaymentRequirements(p);
+  }
+
+  /**
+   * Verify a presented settlement is bound to the authorization, then settle via the
+   * injected facilitator (§7a.3). Enforces the amount binding (§7a.2.2) and anti-reuse
+   * (one settlement per authorizationId). `settleFn` performs the actual x402
+   * verify+settle and MUST return { settled:true, txHash } on success.
+   * @returns {Promise<{settled:boolean, txHash?:string, reasonCode:string}>}
+   */
+  async function settle({ requirements, authorizationId, paidAmountMinor, xPayment, settleFn } = {}) {
+    const binding = checkSettlementBinding(requirements, { authorizationId, paidAmountMinor });
+    if (!binding.ok) return { settled: false, reasonCode: binding.reasonCode };
+    if (settledAuthIds.has(authorizationId)) return { settled: false, reasonCode: 'SETTLEMENT_REUSED' };
+    if (typeof settleFn !== 'function') return { settled: false, reasonCode: 'NO_FACILITATOR' };
+    let result;
+    try {
+      result = await settleFn({ requirements, authorizationId, paidAmountMinor, xPayment });
+    } catch (err) {
+      return { settled: false, reasonCode: 'SETTLEMENT_FAILED', error: String(err?.message ?? err) };
+    }
+    if (!result?.settled || !result?.txHash) return { settled: false, reasonCode: 'SETTLEMENT_FAILED' };
+    settledAuthIds.add(authorizationId); // this authorization is now spent — cannot settle again
+    return { settled: true, txHash: result.txHash, reasonCode: 'SETTLED' };
+  }
+
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, serviceDid };
 }
 
 /**

@@ -11,6 +11,7 @@
 import crypto from 'node:crypto';
 import { evaluate, buildAuthMessage, applySignedLast } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
+import { checkSettlementBinding } from './x402.mjs';
 
 /**
  * @param {{ api: string, agentDid: string, agentKey: string }} cfg
@@ -185,5 +186,40 @@ export function createGuard({ api, agentDid, agentKey }) {
     };
   }
 
-  return { authorize, capture, guardTool, evaluateLocally, guardToolLocal, handshake, agentDid };
+  /**
+   * Read a Service's 402 PaymentRequirements and prepare to pay (spec §7a.1 step 5).
+   * Refuses a 402 that is NOT bound to a MAGP authorization (§7a.2.1) — the agent
+   * must never pay for an ungoverned request — and refuses one whose authorization
+   * does not match the `authorizationId` the agent holds from its own authorize
+   * (allow) step, so a swapped 402 can't redirect the payment.
+   *
+   * @param {object} requirements  the x402 PaymentRequirements from the 402 response
+   * @param {string} [expectedAuthorizationId]  the authorizationId from guard.authorize()
+   * @returns {{authorizationId:string, amountMinor:string, payTo:string, asset:string, network:string, resource:string}}
+   */
+  function preparePayment(requirements, expectedAuthorizationId) {
+    const a = requirements?.accepts?.[0];
+    if (!a?.extra?.magpAuthorizationId) {
+      const e = new Error('402 is not bound to a MAGP authorization — refusing to pay');
+      e.name = 'UnboundPayment';
+      throw e;
+    }
+    if (expectedAuthorizationId && a.extra.magpAuthorizationId !== expectedAuthorizationId) {
+      const e = new Error('402 authorization does not match the agent authorization');
+      e.name = 'AuthorizationMismatch';
+      throw e;
+    }
+    // Pay exactly the authorized amount; the binding check guards against overpay.
+    checkSettlementBinding(requirements, { authorizationId: a.extra.magpAuthorizationId, paidAmountMinor: a.maxAmountRequired });
+    return {
+      authorizationId: a.extra.magpAuthorizationId,
+      amountMinor: a.maxAmountRequired,
+      payTo: a.payTo,
+      asset: a.asset,
+      network: a.network,
+      resource: a.resource,
+    };
+  }
+
+  return { authorize, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, agentDid };
 }
