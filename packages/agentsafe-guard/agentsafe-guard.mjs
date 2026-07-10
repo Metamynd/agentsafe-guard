@@ -10,6 +10,7 @@
 // The agent's private key is a Hedera Ed25519 DER key (the AGENT_KEY the seed prints).
 import crypto from 'node:crypto';
 import { evaluate, buildAuthMessage, applySignedLast } from './policy-core.mjs';
+import { verifyDidSignature } from './magp-did.mjs';
 
 /**
  * @param {{ api: string, agentDid: string, agentKey: string }} cfg
@@ -156,5 +157,33 @@ export function createGuard({ api, agentDid, agentKey }) {
     };
   }
 
-  return { authorize, capture, guardTool, evaluateLocally, guardToolLocal, agentDid };
+  /**
+   * Mutual-handshake INITIATOR (spec §8.2). Prove control of this agent's DID to a
+   * Service and verify the Service controls its DID — no issuer calls (keys are in
+   * the DIDs, §4.1.2). Returns { hello, prove } to drive the exchange:
+   *   const hs = guard.handshake();
+   *   const { nonceA, message } = hs.hello();           // → send HELLO to the Service
+   *   const { sigA, handshakeId } = hs.prove({ nonceA, challenge });  // verifies the Service, → send PROVE
+   * `prove` throws HandshakeFailed if the Service's CHALLENGE does not verify.
+   */
+  function handshake() {
+    return {
+      hello() {
+        const nonceA = crypto.randomUUID();
+        return { nonceA, message: { fromDid: agentDid, nonceA, protoVersion: '0.4' } };
+      },
+      prove({ nonceA, challenge } = {}) {
+        const { toDid, nonceB, sigB, handshakeId } = challenge ?? {};
+        if (!toDid || !nonceB || !sigB) throw new Error('malformed CHALLENGE');
+        if (!verifyDidSignature(toDid, nonceA, sigB)) {
+          const e = new Error('Service failed to prove control of its DID');
+          e.name = 'HandshakeFailed';
+          throw e;
+        }
+        return { handshakeId, sigA: sign(nonceB), remoteDid: toDid };
+      },
+    };
+  }
+
+  return { authorize, capture, guardTool, evaluateLocally, guardToolLocal, handshake, agentDid };
 }
