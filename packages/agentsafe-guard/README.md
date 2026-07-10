@@ -146,6 +146,26 @@ its DID. The Service side uses [`agentsafe-mcp-guard`](../agentsafe-mcp-guard), 
 re-evaluates the agent's signed request trustlessly (§9.6). Discover a Service's endpoint and
 confirm its key via the public resolver `GET /did/:did` (§4.4).
 
+## 6. Escalation — human-in-the-loop (§9a)
+
+An `escalate` verdict is **not a denial** — the action is *held* pending the Owner's approval. The
+verdict carries an `escalationId`; no budget is reserved and (for payments) nothing settles until it
+is approved. The Owner resolves it in the dashboard / via `POST /policy/escalations/:id/resolve`;
+the agent polls the outcome:
+
+```js
+const d = await guard.authorize({ action: 'flight-purchase', amount: 5000, context: { riskLevel: 'high' } });
+if (d.decision === 'escalate') {
+  // parked for review — d.escalationId, d.expiresAt
+  const outcome = await guard.escalationStatus(d.escalationId);
+  // → { status: 'approved' | 'denied' | 'expired' | 'pending', authorizationId, reasonCode }
+  // on 'approved', outcome.authorizationId carries into the §7a capture/pay flow.
+}
+```
+
+On approval the budget/cap gate re-runs (§9a.3), so an approval still can't overspend; an
+unresolved escalation lapses to denied after its TTL (§9a.4).
+
 ## Trust model
 
 The gate is a **checkpoint** — enforcement is real when it's actually called.
