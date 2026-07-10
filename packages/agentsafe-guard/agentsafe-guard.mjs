@@ -1,13 +1,15 @@
 // agentsafe-guard.mjs — drop-in runtime governance for any Node agent (OpenClaw, LangChain, custom).
 //
-// ZERO dependencies: uses Node's built-in Ed25519 (node:crypto) + fetch (Node 18+).
-// Before an agent performs a governed action, call the AgentSafe authorize gate; it
-// deterministically returns allow / block / escalate after checking the agent's
-// mandate, the enforced Standards, and the assigned SOPs. The gate is the same one
-// the platform enforces — you can't bypass it, and rules change live from the UI.
+// ZERO external dependencies: uses Node's built-in Ed25519 (node:crypto) + fetch (Node 18+),
+// plus policy-core.mjs (the deterministic evaluator, itself dependency-free, generated from
+// backend/src/policy-core). Before an agent performs a governed action the guard can either
+// call the AgentSafe authorize gate (trustless fallback) OR evaluate a signed policy bundle
+// LOCALLY (spec §9.2 cooperative mode) — both compute the identical allow/block/escalate
+// verdict from the identical inputs, because they run the same policy-core.
 //
 // The agent's private key is a Hedera Ed25519 DER key (the AGENT_KEY the seed prints).
 import crypto from 'node:crypto';
+import { evaluate, buildAuthMessage, applySignedLast } from './policy-core.mjs';
 
 /**
  * @param {{ api: string, agentDid: string, agentKey: string }} cfg
@@ -33,7 +35,9 @@ export function createGuard({ api, agentDid, agentKey }) {
   async function authorize({ action, amount = 0, currency = 'USD', merchant = '', context = {} }) {
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
-    const message = `${agentDid}|${action}|${amount}|${currency}|${merchant}|${nonce}|${issuedAt}`;
+    // Build the canonical signed message with policy-core so the guard and the
+    // backend gate produce byte-identical input to Ed25519 (spec §7.3).
+    const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, nonce, issuedAt });
     try {
       const res = await fetch(`${base}/policy/mandate/authorize`, {
         method: 'POST',
@@ -60,6 +64,75 @@ export function createGuard({ api, agentDid, agentKey }) {
   }
 
   /**
+   * Evaluate a signed policy bundle LOCALLY — no network — using the same
+   * deterministic policy-core the gate runs (spec §9.2 cooperative mode). Given the
+   * same (rule packs, mandate, request), this returns the identical verdict the
+   * gate would. The stateful parts the gate owns (nonce/replay, atomic spend-cap
+   * reservation, evidence anchoring) are NOT done here — this is the local
+   * allow/block/escalate pre-check, so `authorizationId`/`remaining` are null.
+   *
+   * @param {object} p
+   * @param {Array<{standardKey:string,document:object}>} [p.standards] enforced Standards bound to the agent
+   * @param {Array<{standardKey:string,document:object}>} [p.sops]      active SOPs assigned to the agent
+   * @param {object} [p.mandate]  the ODRL mandate document (omit to skip the mandate layer)
+   * @param {{action:string,amount?:number,merchant?:string,context?:object,cumulativeSpend?:number,now?:string}} p.request
+   * @returns {{decision:'allow'|'block'|'escalate',reasonCode:string|null,authorizationId:null,remaining:null,proofRef:null}}
+   */
+  function evaluateLocally({ standards = [], sops = [], mandate, request }) {
+    const { action, amount = 0, merchant = '', context = {}, cumulativeSpend = amount, now } = request;
+    // Signed fields (action/agentDid/amount, mm:* operands) are applied LAST so an
+    // unsigned context key can never shadow them (spec §6.4.2) — the same invariant
+    // the gate enforces, via the same policy-core helper.
+    return evaluate({
+      standards,
+      sops,
+      mandate,
+      context: applySignedLast(context, { action, agentDid, amount }),
+      mandateRequest: mandate
+        ? {
+            target: action,
+            now: now ?? new Date().toISOString(),
+            values: applySignedLast(context, {
+              'mm:payAmount': amount,
+              'mm:cumulativeSpend': cumulativeSpend,
+              'mm:merchant': merchant,
+            }),
+          }
+        : undefined,
+    });
+  }
+
+  /**
+   * Like guardTool, but evaluates LOCALLY against a policy bundle instead of calling
+   * the gate — cooperative-mode, low-latency governance (spec §9.2). Fails CLOSED:
+   * any error during local evaluation throws GovernanceBlocked, never allows.
+   *
+   * @param {string} action
+   * @param {(args:any, decision:any)=>any} handler
+   * @param {(args:any)=>{amount?:number,merchant?:string,context?:object}} mapArgs
+   * @param {object|((args:any)=>object|Promise<object>)} getBundle  { standards, sops, mandate } (or a resolver)
+   */
+  function guardToolLocal(action, handler, mapArgs = (a) => a, getBundle = {}) {
+    return async (args) => {
+      let decision;
+      try {
+        const { amount, merchant, context } = mapArgs(args);
+        const bundle = typeof getBundle === 'function' ? await getBundle(args) : getBundle;
+        decision = evaluateLocally({ ...bundle, request: { action, amount, merchant, context } });
+      } catch (err) {
+        decision = { decision: 'block', reasonCode: 'LOCAL_EVAL_ERROR', error: String(err?.message ?? err) };
+      }
+      if (decision.decision !== 'allow') {
+        const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
+        err.name = 'GovernanceBlocked';
+        err.governance = decision;
+        throw err;
+      }
+      return handler(args, decision);
+    };
+  }
+
+  /**
    * Wrap a tool handler so it is gated. Returns a function you register with your agent
    * framework in place of the raw handler. On a non-allow decision it THROWS a
    * GovernanceBlocked error (with `.governance`) so the agent surfaces the reason and
@@ -83,5 +156,5 @@ export function createGuard({ api, agentDid, agentKey }) {
     };
   }
 
-  return { authorize, capture, guardTool, agentDid };
+  return { authorize, capture, guardTool, evaluateLocally, guardToolLocal, agentDid };
 }

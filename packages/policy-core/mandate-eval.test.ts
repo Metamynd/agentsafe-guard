@@ -1,0 +1,217 @@
+import { describe, it, expect } from 'vitest';
+import {
+  evaluateMandate,
+  remainingBudget,
+  canAuthorize,
+  applyHold,
+  applyCapture,
+  releaseHold,
+  sumEventField,
+} from './mandate-eval.js';
+import type { Mandate, MandateRequest } from './mandate.types.js';
+
+/** The worked "buy flights, ≤ USD 1000" mandate from design §3.2. */
+const flightMandate: Mandate = {
+  uid: 'urn:metamynd:mandate:test',
+  validFrom: '2026-07-01T00:00:00Z',
+  validUntil: '2026-08-31T23:59:59Z',
+  permission: [
+    {
+      target: 'mm:flight-purchase',
+      action: 'execute',
+      constraint: [
+        { leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 1000, unit: 'USD' },
+        { leftOperand: 'mm:cumulativeSpend', operator: 'lteq', rightOperand: 1000, unit: 'USD' },
+        { leftOperand: 'mm:merchant', operator: 'isAnyOf', rightOperand: ['amadeus'] },
+      ],
+    },
+  ],
+};
+
+function req(values: Record<string, unknown>, now = '2026-08-01T09:00:00Z'): MandateRequest {
+  return { target: 'mm:flight-purchase', now, values };
+}
+
+describe('evaluateMandate — happy path', () => {
+  it('allows a purchase within cap, budget, and merchant scope', () => {
+    const r = evaluateMandate(
+      flightMandate,
+      req({ 'mm:payAmount': 412.5, 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus' }),
+    );
+    expect(r.decision).toBe('allow');
+    expect(r.reasonCode).toBe('AUTHORIZED');
+  });
+});
+
+describe('evaluateMandate — spend limits', () => {
+  it('blocks when a single payment exceeds the per-transaction cap', () => {
+    const r = evaluateMandate(
+      flightMandate,
+      req({ 'mm:payAmount': 1200, 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus' }),
+    );
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+    expect(r.matched?.constraint?.leftOperand).toBe('mm:payAmount');
+  });
+
+  it('blocks when cumulative spend would exceed the budget', () => {
+    // payAmount ok (300) but 800 already spent -> cumulative 1100 pre-resolved by caller
+    const r = evaluateMandate(
+      flightMandate,
+      req({ 'mm:payAmount': 300, 'mm:cumulativeSpend': 1100, 'mm:merchant': 'amadeus' }),
+    );
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+  });
+
+  it('allows exactly at the cap boundary', () => {
+    const r = evaluateMandate(
+      flightMandate,
+      req({ 'mm:payAmount': 1000, 'mm:cumulativeSpend': 1000, 'mm:merchant': 'amadeus' }),
+    );
+    expect(r.decision).toBe('allow');
+  });
+});
+
+describe('evaluateMandate — scope', () => {
+  it('blocks a merchant outside the allow-list', () => {
+    const r = evaluateMandate(
+      flightMandate,
+      req({ 'mm:payAmount': 100, 'mm:cumulativeSpend': 0, 'mm:merchant': 'sabre' }),
+    );
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('MERCHANT_NOT_ALLOWED');
+  });
+
+  it('blocks an action the mandate does not cover', () => {
+    const r = evaluateMandate(flightMandate, {
+      target: 'mm:hotel-purchase',
+      now: '2026-08-01T09:00:00Z',
+      values: { 'mm:payAmount': 100 },
+    });
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('NO_PERMISSION_FOR_ACTION');
+  });
+});
+
+describe('evaluateMandate — validity window', () => {
+  it('blocks before validFrom', () => {
+    const r = evaluateMandate(
+      flightMandate,
+      req({ 'mm:payAmount': 100, 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus' }, '2026-06-01T00:00:00Z'),
+    );
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('MANDATE_NOT_YET_VALID');
+  });
+
+  it('blocks after validUntil', () => {
+    const r = evaluateMandate(
+      flightMandate,
+      req({ 'mm:payAmount': 100, 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus' }, '2026-09-15T00:00:00Z'),
+    );
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('MANDATE_EXPIRED');
+  });
+});
+
+describe('evaluateMandate — fail-closed on unresolved operands', () => {
+  it('blocks when a required operand is missing (never accidentally allows)', () => {
+    const r = evaluateMandate(flightMandate, req({ 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus' }));
+    expect(r.decision).toBe('block'); // mm:payAmount absent -> lteq NaN is false
+  });
+});
+
+describe('evaluateMandate — escalate via onFail', () => {
+  const softLimit: Mandate = {
+    permission: [
+      {
+        target: 'mm:flight-purchase',
+        constraint: [
+          { leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 500, onFail: 'escalate' },
+        ],
+      },
+    ],
+  };
+  it('escalates (not blocks) when the failing constraint says so', () => {
+    const r = evaluateMandate(softLimit, req({ 'mm:payAmount': 750 }));
+    expect(r.decision).toBe('escalate');
+    expect(r.reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+  });
+});
+
+describe('evaluateMandate — prohibitions win', () => {
+  const withProhibition: Mandate = {
+    permission: [{ target: 'mm:flight-purchase' }], // unconditional permission
+    prohibition: [
+      {
+        target: 'mm:flight-purchase',
+        constraint: [{ leftOperand: 'mm:route', operator: 'isAnyOf', rightOperand: ['KUL-DXB'] }],
+        reasonCode: 'ROUTE_DENYLISTED',
+      },
+    ],
+  };
+  it('blocks via prohibition even when a permission would allow', () => {
+    const r = evaluateMandate(withProhibition, req({ 'mm:route': 'KUL-DXB' }));
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('ROUTE_DENYLISTED');
+  });
+  it('allows when the prohibition does not fire', () => {
+    const r = evaluateMandate(withProhibition, req({ 'mm:route': 'KUL-PEN' }));
+    expect(r.decision).toBe('allow');
+  });
+});
+
+describe('budget helpers — two-phase hold/capture', () => {
+  it('computes remaining budget net of spent and holds', () => {
+    expect(remainingBudget({ cap: 1000, spent: 200, held: 100 })).toBe(700);
+    expect(remainingBudget({ cap: 1000, spent: 900, held: 200 })).toBe(0); // never negative
+  });
+
+  it('canAuthorize respects remaining and rejects negatives', () => {
+    const b = { cap: 1000, spent: 0, held: 0 };
+    expect(canAuthorize(b, 1000)).toBe(true);
+    expect(canAuthorize(b, 1001)).toBe(false);
+    expect(canAuthorize(b, -5)).toBe(false);
+  });
+
+  it('a hold reduces what a concurrent authorization can spend', () => {
+    let b = { cap: 1000, spent: 0, held: 0 };
+    b = applyHold(b, 600);
+    expect(remainingBudget(b)).toBe(400);
+    expect(canAuthorize(b, 500)).toBe(false); // second auth cannot overrun the cap
+    expect(canAuthorize(b, 400)).toBe(true);
+  });
+
+  it('capture moves held -> spent', () => {
+    let b = { cap: 1000, spent: 0, held: 600 };
+    b = applyCapture(b, 600);
+    expect(b).toEqual({ cap: 1000, spent: 600, held: 0 });
+    expect(remainingBudget(b)).toBe(400);
+  });
+
+  it('capturing less than held (cheaper final charge) frees the difference', () => {
+    let b = { cap: 1000, spent: 0, held: 600 };
+    b = applyCapture(b, 550);
+    expect(b).toEqual({ cap: 1000, spent: 550, held: 50 });
+  });
+
+  it('releaseHold returns budget when a booking fails', () => {
+    let b = { cap: 1000, spent: 0, held: 600 };
+    b = releaseHold(b, 600);
+    expect(b).toEqual({ cap: 1000, spent: 0, held: 0 });
+  });
+});
+
+describe('sumEventField — the cumulative-spend kernel', () => {
+  const events = [
+    { type: 'authorize', payload: { amount: 300 } },
+    { type: 'capture', payload: { amount: 300 } },
+    { type: 'capture', payload: { amount: 250 } },
+    { type: 'capture', payload: { note: 'no amount' } },
+  ];
+  it('sums the field only over the requested event type', () => {
+    expect(sumEventField(events, 'capture', 'amount')).toBe(550);
+    expect(sumEventField(events, 'authorize', 'amount')).toBe(300);
+    expect(sumEventField([], 'capture', 'amount')).toBe(0);
+  });
+});
