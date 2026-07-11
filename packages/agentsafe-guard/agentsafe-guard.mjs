@@ -30,6 +30,19 @@ export function createGuard({ api, agentDid, agentKey }) {
   }
 
   /**
+   * Build a signed authorize request (spec §7.2/§7.3) WITHOUT sending it — the object an
+   * agent presents to a counterparty (e.g. an MCP) so the counterparty can re-verify the
+   * agent's authorization trustlessly against the agent's policy bundle (§9.3). Same shape
+   * `authorize()` posts to the gate; a fresh nonce each call.
+   */
+  function buildSignedRequest({ action, amount = 0, currency = 'USD', merchant = '', context = {} }) {
+    const nonce = crypto.randomUUID();
+    const issuedAt = new Date().toISOString();
+    const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, nonce, issuedAt });
+    return { agentDid, action, amount, currency, merchant, itinerary: context, nonce, issuedAt, signature: sign(message) };
+  }
+
+  /**
    * Ask the gate whether an action is authorized. Never throws on a policy decision —
    * returns { decision:'allow'|'block'|'escalate', reasonCode, authorizationId, remaining }.
    * A network/gate failure returns a fail-CLOSED block so the agent can't proceed blind.
@@ -240,5 +253,5 @@ export function createGuard({ api, agentDid, agentKey }) {
     }
   }
 
-  return { authorize, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, agentDid };
+  return { authorize, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, agentDid };
 }
