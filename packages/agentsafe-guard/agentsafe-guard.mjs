@@ -55,12 +55,14 @@ export function createGuard({ api, agentDid, agentKey }) {
 
   /**
    * Settle an approved hold (two-phase). Call after the real action succeeds with the
-   * amount actually charged (≤ the authorized amount). Optional — skip for non-payment tools.
+   * amount actually charged (≤ the authorized amount). Pass the x402 `settlementTxHash`
+   * to record the on-chain payment proof against the capture (§7a.3.2). Optional —
+   * skip for non-payment tools.
    */
-  async function capture(authorizationId, amountCharged, bookingRef) {
+  async function capture(authorizationId, amountCharged, bookingRef, settlementTxHash) {
     const res = await fetch(`${base}/policy/mandate/authorize/${authorizationId}/capture`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amountCharged, bookingRef }),
+      body: JSON.stringify({ amountCharged, bookingRef, settlementTxHash }),
     });
     return res.json().catch(() => ({}));
   }
