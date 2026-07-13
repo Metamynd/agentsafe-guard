@@ -27,6 +27,7 @@ export interface EvaluationContext {
   riskLevel?: 'low' | 'medium' | 'high' | 'critical';
   consent?: boolean;
   amount?: number;
+  cumulativeSpend?: number; // SERVER-derived: already-committed spend for the mandate (never agent-supplied)
   // Compliance-atom context (supplied by the agent at authorize time; see each
   // atom's requiredContext in the atom catalog).
   jurisdiction?: string | null; // e.g. 'US', 'MY'
