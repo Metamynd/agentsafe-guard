@@ -116,8 +116,40 @@ console.log('\n— mutual handshake (§8.2) —');
   console.log(`${rejected ? 'ok  ' : 'FAIL'}  forged PROVE rejected`);
 }
 
+console.log('\n— signed policy bundle: staleness + risk-tiered fail-closed (Phase F, §5.3.2/§5.3.3) —');
+{
+  const { signBundle, rawPublicKeyHex } = await import('./magp-policy.mjs');
+  const issuer = crypto.generateKeyPairSync('ed25519');
+  const policyPublicKey = rawPublicKeyHex(issuer.publicKey);
+  const withBundle = (b) => createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => b, policyPublicKey });
+
+  const fresh = signBundle({ ...bundle, issuedAt: new Date().toISOString(), maxStaleness: 'PT10M' }, issuer.privateKey);
+  const stale = signBundle({ ...bundle, issuedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(), maxStaleness: 'PT10M' }, issuer.privateKey);
+  const tampered = JSON.parse(JSON.stringify(fresh)); tampered.sops[0].document = { molecules: [] }; // loosen after signing
+  const unsigned = { ...bundle, issuedAt: new Date().toISOString(), maxStaleness: 'PT10M' };
+
+  const req = signedRequest({ amount: 100 }); // value-bearing (amount > 0)
+  const cases = [
+    ['fresh signed bundle → allow', fresh, ['allow', 'AUTHORIZED']],
+    ['stale bundle, value action → fail closed', stale, ['block', 'POLICY_BUNDLE_STALE']],
+    ['tampered bundle → block', tampered, ['block', 'POLICY_BUNDLE_SIGNATURE_INVALID']],
+    ['unsigned bundle, value action → fail closed', unsigned, ['block', 'POLICY_BUNDLE_UNSIGNED']],
+  ];
+  for (const [label, b, [wantDecision, wantReason]] of cases) {
+    const v = await withBundle(b).verifyRequest(req);
+    const ok = v.decision === wantDecision && v.reasonCode === wantReason;
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label} (${v.decision}/${v.reasonCode})`);
+  }
+  // A non-value read tolerates a stale bundle (only value-bearing fails closed).
+  const readOk = await withBundle(stale).verifyRequest(signedRequest({ amount: 0 }));
+  const okRead = readOk.decision !== 'block' || readOk.reasonCode !== 'POLICY_BUNDLE_STALE';
+  if (!okRead) failed++;
+  console.log(`${okRead ? 'ok  ' : 'FAIL'}  non-value read tolerates a stale bundle`);
+}
+
 if (failed) {
   console.error(`\n${failed} case(s) FAILED`);
   process.exit(1);
 }
-console.log('\nPASS — MCP guard verifies trustlessly and completes the mutual handshake.');
+console.log('\nPASS — MCP guard verifies trustlessly, enforces signed-bundle freshness, and completes the handshake.');
