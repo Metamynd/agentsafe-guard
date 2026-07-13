@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import { evaluate, buildAuthMessage, applySignedLast } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
+import { verifyBundle } from './magp-policy.mjs';
 
 /** Freshness window for signed requests and handshake nonces (spec §7.7). */
 const FRESHNESS_MS = 5 * 60 * 1000;
@@ -25,8 +26,12 @@ const FRESHNESS_MS = 5 * 60 * 1000;
  * @param {string} [cfg.serviceKey] the MCP's Ed25519 private key (Hedera DER hex) — needed to sign handshakes
  * @param {string} [cfg.issuerApi]  the issuer API base (e.g. https://metamynd.ai/api/v1) to fetch policy bundles
  * @param {(agentDid:string)=>Promise<object>} [cfg.fetchBundle] override bundle loading (tests / caching)
+ * @param {string} [cfg.policyPublicKey] MetaMynd's Ed25519 policy-signing key (hex, from
+ *   GET /magp/policy/pubkey). When set, the guard VERIFIES the bundle signature + freshness (Phase F,
+ *   §5.3.2/§5.3.3) and fails closed for value-bearing actions on an unsigned/tampered/stale bundle —
+ *   so per-request enforcement needs no live MetaMynd. Omit for the legacy hash-addressed + TLS mode.
  */
-export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   const privateKey = serviceKey
@@ -130,6 +135,14 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle 
       const bundle = await loadBundle(agentDid);
       if (bundle?.subject && bundle.subject !== agentDid) {
         return { decision: 'block', reasonCode: 'BUNDLE_SUBJECT_MISMATCH' };
+      }
+      // 3b. Signed-bundle verification + risk-tiered fail-closed (Phase F, §5.3.2/§5.3.3). When a
+      // policy key is configured, a value-bearing action (amount > 0) MUST fail closed on an
+      // unsigned / tampered / stale bundle — so enforcement needs no live MetaMynd. A bad SIGNATURE
+      // is a hard fail even for non-value reads.
+      if (policyPublicKey) {
+        const v = verifyBundle(bundle, { publicKey: policyPublicKey, valueBearing: Number(amount) > 0 });
+        if (!v.ok) return { decision: 'block', reasonCode: v.reasonCode };
       }
       return verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} });
     } catch (err) {
