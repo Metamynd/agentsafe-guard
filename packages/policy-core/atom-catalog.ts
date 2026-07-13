@@ -31,9 +31,16 @@ export interface AtomSpec {
 export const ATOM_SPECS: AtomSpec[] = [
   {
     predicate: 'amount-over',
-    label: 'Amount over limit',
-    description: 'Fires when the action amount exceeds a configured limit.',
-    config: [{ key: 'limit', type: 'number', required: true, description: 'Maximum allowed amount' }],
+    label: 'Per-transaction amount over limit',
+    description: 'Fires when a single action amount exceeds a configured limit (per-transaction cap).',
+    config: [{ key: 'limit', type: 'number', required: true, description: 'Maximum allowed amount for one transaction' }],
+    requiredContext: ['amount'],
+  },
+  {
+    predicate: 'cumulative-over',
+    label: 'Total budget over limit',
+    description: 'Fires when cumulative spend (already-spent + this transaction) exceeds a configured total budget.',
+    config: [{ key: 'limit', type: 'number', required: true, description: 'Maximum total budget across all transactions' }],
     requiredContext: ['amount'],
   },
   {

@@ -22,6 +22,9 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
     return have !== undefined && need !== undefined && have >= need;
   },
   'amount-over': (c, cfg) => typeof c.amount === 'number' && c.amount > Number(cfg?.limit ?? 0),
+  // Total budget: cumulativeSpend is a SERVER-derived, signed-last context field (never
+  // shadowable by the agent's itinerary), so this compares already-spent + this amount.
+  'cumulative-over': (c, cfg) => (Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0)) > Number(cfg?.limit ?? 0),
   // Fires if any configured term appears in the prompt and/or output text.
   // Used to govern agent responses on content (prohibited claims, sensitive advice).
   'text-matches': (c, cfg) => {
