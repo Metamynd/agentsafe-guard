@@ -9,6 +9,7 @@
 //
 // The agent's private key is a Hedera Ed25519 DER key (the AGENT_KEY the seed prints).
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { evaluate, buildAuthMessage, applySignedLast } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
@@ -19,8 +20,33 @@ import { checkSettlementBinding } from './x402.mjs';
  *   agentDid the agent's did:hedera
  *   agentKey the agent's Ed25519 private key (Hedera DER hex, held only by the agent)
  */
-export function createGuard({ api, agentDid, agentKey }) {
-  if (!api || !agentDid || !agentKey) throw new Error('createGuard requires { api, agentDid, agentKey }');
+/**
+ * Async loader — build a guard from the portable config the one-call `POST /onboarding/agent`
+ * endpoint returns: a URL, a file path, or the config object itself. Overrides win over the config.
+ *   const guard = await createGuardFromConfig('./agent.metamynd.json');
+ */
+export async function createGuardFromConfig(source, overrides = {}) {
+  let cfg = source;
+  if (typeof source === 'string') {
+    cfg = /^https?:\/\//.test(source) ? await (await fetch(source)).json() : JSON.parse(readFileSync(source, 'utf8'));
+  }
+  if (cfg && cfg.data && !cfg.agentDid) cfg = cfg.data; // unwrap a { success, data } API response
+  return createGuard({ config: cfg, ...overrides });
+}
+
+export function createGuard(opts = {}) {
+  // Accept a portable agent config (from /onboarding/agent) via `config` or `configPath`, in
+  // addition to explicit { api, agentDid, agentKey }. Explicit fields win over the config.
+  let cfg = opts.config ?? null;
+  if (!cfg && opts.configPath) {
+    try { cfg = JSON.parse(readFileSync(opts.configPath, 'utf8')); }
+    catch (e) { throw new Error(`createGuard: cannot read configPath "${opts.configPath}": ${e.message}`); }
+  }
+  if (cfg && cfg.data && !cfg.agentDid) cfg = cfg.data; // unwrap a { success, data } API response
+  const api = opts.api ?? cfg?.apiBase ?? cfg?.api;
+  const agentDid = opts.agentDid ?? cfg?.agentDid;
+  const agentKey = opts.agentKey ?? cfg?.agentKey;
+  if (!api || !agentDid || !agentKey) throw new Error('createGuard requires { api, agentDid, agentKey } — directly, or via { config } / { configPath } / createGuardFromConfig()');
   const base = api.replace(/\/$/, '');
   const privateKey = crypto.createPrivateKey({ key: Buffer.from(agentKey, 'hex'), format: 'der', type: 'pkcs8' });
 
