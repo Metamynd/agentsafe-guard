@@ -30,7 +30,12 @@ ${c.output ?? ""}`.toLowerCase();
   "model-not-allowed": (c, cfg) => notInAllowList(c.model, cfg?.allowed),
   "tool-not-allowed": (c, cfg) => notInAllowList(c.tool, cfg?.allowed),
   "pii-present": (c) => c.piiPresent === true,
-  "rate-limit-exceeded": (c, cfg) => typeof c.callCount === "number" && c.callCount > Number(cfg?.max ?? 0)
+  "rate-limit-exceeded": (c, cfg) => typeof c.callCount === "number" && c.callCount > Number(cfg?.max ?? 0),
+  // Trust guidance (MetaMynd Trust Index / HCS-28). Fires when the counterparty's trust score is
+  // below a soft REVIEW line — intended to author an ESCALATE (route to a human), NOT a hard block.
+  // The score is server-derived (signed-last) so the agent's itinerary can't fake it; when no score
+  // is present (e.g. no counterparty resolved) the atom simply does not fire — no guidance.
+  "hol-trust-below-review": (c, cfg) => typeof c.holTrustScore === "number" && c.holTrustScore < Number(cfg?.reviewBelow ?? 60)
 };
 function notInAllowList(value, allowList) {
   const v = value != null ? String(value).toLowerCase().trim() : "";
@@ -133,6 +138,13 @@ var ATOM_SPECS = [
     description: "Fires when the rolling call count exceeds a configured maximum.",
     config: [{ key: "max", type: "number", required: true, description: "Maximum allowed calls" }],
     requiredContext: ["callCount"]
+  },
+  {
+    predicate: "hol-trust-below-review",
+    label: "Counterparty trust below review line",
+    description: "Routes to human review when the counterparty's MetaMynd Trust Index (HCS-28) score is below a soft review line. Guidance, not a hard block \u2014 author it with an ESCALATE decision. The score is resolved server-side; no counterparty score \u2192 the atom does not fire.",
+    config: [{ key: "reviewBelow", type: "number", required: true, description: "Trust score (0\u2013100) below which a human is asked to decide" }],
+    requiredContext: ["holTrustScore"]
   }
 ];
 var CATALOGUED_ATOMS = ATOM_SPECS.filter((s) => !!ATOM_REGISTRY[s.predicate]);

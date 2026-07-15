@@ -41,6 +41,12 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
   'tool-not-allowed': (c, cfg) => notInAllowList(c.tool, cfg?.allowed),
   'pii-present': (c) => c.piiPresent === true,
   'rate-limit-exceeded': (c, cfg) => typeof c.callCount === 'number' && c.callCount > Number(cfg?.max ?? 0),
+  // Trust guidance (MetaMynd Trust Index / HCS-28). Fires when the counterparty's trust score is
+  // below a soft REVIEW line — intended to author an ESCALATE (route to a human), NOT a hard block.
+  // The score is server-derived (signed-last) so the agent's itinerary can't fake it; when no score
+  // is present (e.g. no counterparty resolved) the atom simply does not fire — no guidance.
+  'hol-trust-below-review': (c, cfg) =>
+    typeof c.holTrustScore === 'number' && c.holTrustScore < Number(cfg?.reviewBelow ?? 60),
 };
 
 /** True when `value` is a non-empty string that is NOT in the (case-insensitive) allow-list. */
