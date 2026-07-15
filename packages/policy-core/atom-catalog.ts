@@ -123,6 +123,16 @@ export const ATOM_SPECS: AtomSpec[] = [
     config: [{ key: 'max', type: 'number', required: true, description: 'Maximum allowed calls' }],
     requiredContext: ['callCount'],
   },
+  {
+    predicate: 'hol-trust-below-review',
+    label: 'Counterparty trust below review line',
+    description:
+      "Routes to human review when the counterparty's MetaMynd Trust Index (HCS-28) score is below a " +
+      'soft review line. Guidance, not a hard block — author it with an ESCALATE decision. The score ' +
+      'is resolved server-side; no counterparty score → the atom does not fire.',
+    config: [{ key: 'reviewBelow', type: 'number', required: true, description: 'Trust score (0–100) below which a human is asked to decide' }],
+    requiredContext: ['holTrustScore'],
+  },
 ];
 
 /** All atom predicates that have both an executable implementation AND a spec (the publishable set). */
