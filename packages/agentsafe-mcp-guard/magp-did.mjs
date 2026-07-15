@@ -67,6 +67,30 @@ function parseHederaDid(did) {
   if (publicKeyBytes.length !== 32) return null;
   return { network, publicKeyMultibase, publicKeyBytes, topicId };
 }
+var ED25519_MULTICODEC = Uint8Array.of(237, 1);
+function buildDidKey(publicKeyBytes) {
+  const prefixed = new Uint8Array(ED25519_MULTICODEC.length + publicKeyBytes.length);
+  prefixed.set(ED25519_MULTICODEC, 0);
+  prefixed.set(publicKeyBytes, ED25519_MULTICODEC.length);
+  return `did:key:${multibaseBase58btc(prefixed)}`;
+}
+function parseDidKey(did) {
+  const m = /^did:key:(z[1-9A-HJ-NP-Za-km-z]+)$/.exec(did ?? "");
+  if (!m) return null;
+  const multibase = m[1];
+  let decoded;
+  try {
+    decoded = base58Decode(multibase.slice(1));
+  } catch {
+    return null;
+  }
+  if (decoded.length !== ED25519_MULTICODEC.length + 32) return null;
+  if (decoded[0] !== ED25519_MULTICODEC[0] || decoded[1] !== ED25519_MULTICODEC[1]) return null;
+  return { method: "key", publicKeyMultibase: multibase, publicKeyBytes: decoded.slice(ED25519_MULTICODEC.length) };
+}
+function didPublicKeyBytes(did) {
+  return parseHederaDid(did)?.publicKeyBytes ?? parseDidKey(did)?.publicKeyBytes ?? null;
+}
 
 // src/features/magp/did.ts
 var ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -75,31 +99,35 @@ function ed25519KeyFromRaw(raw) {
   return crypto.createPublicKey({ key: der, format: "der", type: "spki" });
 }
 function verifyDidSignature(did, message, signatureHex) {
-  const parsed = parseHederaDid(did);
-  if (!parsed) return false;
+  const publicKeyBytes = didPublicKeyBytes(did);
+  if (!publicKeyBytes) return false;
   try {
-    const key = ed25519KeyFromRaw(parsed.publicKeyBytes);
+    const key = ed25519KeyFromRaw(publicKeyBytes);
     return crypto.verify(null, Buffer.from(message, "utf8"), key, Buffer.from(signatureHex, "hex"));
   } catch {
     return false;
   }
 }
 function buildDidDocument(did, service) {
-  const parsed = parseHederaDid(did);
-  if (!parsed) return null;
+  const hedera = parseHederaDid(did);
+  const key = hedera ? null : parseDidKey(did);
+  if (!hedera && !key) return null;
+  const publicKeyMultibase = hedera ? hedera.publicKeyMultibase : key.publicKeyMultibase;
+  const fragment = hedera ? "#did-root-key" : `#${key.publicKeyMultibase}`;
+  const vmId = `${did}${fragment}`;
   const doc = {
     "@context": ["https://www.w3.org/ns/did/v1"],
     id: did,
     controller: did,
     verificationMethod: [
       {
-        id: `${did}#did-root-key`,
+        id: vmId,
         type: "Ed25519VerificationKey2020",
         controller: did,
-        publicKeyMultibase: parsed.publicKeyMultibase
+        publicKeyMultibase
       }
     ],
-    authentication: [`${did}#did-root-key`]
+    authentication: [vmId]
   };
   if (service) {
     doc.service = [
@@ -118,9 +146,12 @@ export {
   base58,
   base58Decode,
   buildDidDocument,
+  buildDidKey,
   buildHederaDid,
+  didPublicKeyBytes,
   ed25519KeyFromRaw,
   multibaseBase58btc,
+  parseDidKey,
   parseHederaDid,
   verifyDidSignature
 };

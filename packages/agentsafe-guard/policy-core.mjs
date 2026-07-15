@@ -11,6 +11,9 @@ var ATOM_REGISTRY = {
     return have !== void 0 && need !== void 0 && have >= need;
   },
   "amount-over": (c, cfg) => typeof c.amount === "number" && c.amount > Number(cfg?.limit ?? 0),
+  // Total budget: cumulativeSpend is a SERVER-derived, signed-last context field (never
+  // shadowable by the agent's itinerary), so this compares already-spent + this amount.
+  "cumulative-over": (c, cfg) => Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0) > Number(cfg?.limit ?? 0),
   // Fires if any configured term appears in the prompt and/or output text.
   // Used to govern agent responses on content (prohibited claims, sensitive advice).
   "text-matches": (c, cfg) => {
@@ -39,9 +42,16 @@ function notInAllowList(value, allowList) {
 var ATOM_SPECS = [
   {
     predicate: "amount-over",
-    label: "Amount over limit",
-    description: "Fires when the action amount exceeds a configured limit.",
-    config: [{ key: "limit", type: "number", required: true, description: "Maximum allowed amount" }],
+    label: "Per-transaction amount over limit",
+    description: "Fires when a single action amount exceeds a configured limit (per-transaction cap).",
+    config: [{ key: "limit", type: "number", required: true, description: "Maximum allowed amount for one transaction" }],
+    requiredContext: ["amount"]
+  },
+  {
+    predicate: "cumulative-over",
+    label: "Total budget over limit",
+    description: "Fires when cumulative spend (already-spent + this transaction) exceeds a configured total budget.",
+    config: [{ key: "limit", type: "number", required: true, description: "Maximum total budget across all transactions" }],
     requiredContext: ["amount"]
   },
   {
