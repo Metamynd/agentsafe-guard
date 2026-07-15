@@ -43,6 +43,20 @@ const guard = await createGuardFromConfig('./agent.metamynd.json');   // no env 
 The rest of this guide shows the manual path (seed → wire) and the advanced features
 (local eval, handshake, escalation, payments).
 
+### Bring your own key (BYOK)
+
+Provision the agent with your **own** public key so MetaMynd never sees the private key. The identity
+is issued unverified with a one-time `challenge`; the gate blocks it (`AGENT_KEY_UNVERIFIED`) until you
+prove control. The guard signs the challenge with your key and submits it:
+
+```js
+const guard = await createGuardFromConfig('./agent.metamynd.json', { agentKey: myPrivateKey });
+await guard.verifyKey({ ref: config.identityId, challenge: config.challenge, token: ownerToken }); // one-time
+```
+
+`guard.signChallenge(challenge)` returns just the hex signature if you'd rather submit verify-key
+yourself. (Fastest path: `npm create metamynd-agent@latest -- --byok` does all of this for you.)
+
 ## 1. Seed a bound agent (once)
 
 Run the seed against a running stack — it prints the agent's `DID` and `KEY`:

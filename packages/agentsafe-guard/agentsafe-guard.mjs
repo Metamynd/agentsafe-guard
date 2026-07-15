@@ -279,5 +279,38 @@ export function createGuard(opts = {}) {
     }
   }
 
-  return { authorize, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, agentDid };
+  /**
+   * BYOK proof-of-possession (onboarding proposal #4). For an agent that brought its OWN key,
+   * MetaMynd issued the identity with a one-time `challenge` and left the key UNVERIFIED — the gate
+   * blocks it with AGENT_KEY_UNVERIFIED until control is proven. This signs the challenge with the
+   * agent's private key (the same Ed25519 the gate checks) and submits it to verify-key, flipping
+   * the key to verified. A one-time SETUP step: verify-key is owner-authenticated, so pass the owner
+   * `token` you onboarded with. `ref` defaults to the identityId; `challenge` comes from the config.
+   *
+   * @param {{ ref: string, challenge: string, token?: string }} p
+   * @returns {Promise<{ verified: boolean, did?: string }>}
+   */
+  async function verifyKey({ ref, challenge, token } = {}) {
+    if (!ref || !challenge) throw new Error('verifyKey requires { ref, challenge } (from the BYOK onboarding config)');
+    const res = await fetch(`${base}/agent-identity/${encodeURIComponent(ref)}/verify-key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ signature: sign(challenge) }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const e = new Error(body?.message || `verify-key HTTP ${res.status}`);
+      e.name = 'KeyVerificationFailed';
+      throw e;
+    }
+    return body?.data ?? { verified: true };
+  }
+
+  /** Sign a BYOK challenge with the agent's key (hex) — for integrators who submit verify-key themselves. */
+  function signChallenge(challenge) {
+    if (!challenge) throw new Error('signChallenge requires the challenge nonce');
+    return sign(challenge);
+  }
+
+  return { authorize, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, verifyKey, signChallenge, agentDid };
 }
