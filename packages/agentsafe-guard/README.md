@@ -15,6 +15,34 @@ compliance team edits in the dashboard, changeable live with no redeploy.
   `policy-core` the gate runs (MAGP §9.2 cooperative mode) — identical inputs give the identical
   verdict, with no network round-trip. See §4.
 
+## Install
+
+```bash
+npm i @metamynd/agentsafe-guard
+```
+
+Requires Node ≥ 18 (built-in `fetch` + Ed25519). The package has **no dependencies**.
+
+### Fastest start — scaffold a governed agent in one command
+
+If you don't have an agent config yet, let the scaffolder log you in, provision the agent
+(identity + mandate + starter SOP + Standards in one call), write `agent.metamynd.json`, and drop a
+runnable example:
+
+```bash
+npm create metamynd-agent@latest      # or: npx create-metamynd-agent
+```
+
+Then:
+
+```js
+import { createGuardFromConfig } from '@metamynd/agentsafe-guard';
+const guard = await createGuardFromConfig('./agent.metamynd.json');   // no env vars
+```
+
+The rest of this guide shows the manual path (seed → wire) and the advanced features
+(local eval, handshake, escalation, payments).
+
 ## 1. Seed a bound agent (once)
 
 Run the seed against a running stack — it prints the agent's `DID` and `KEY`:
@@ -57,9 +85,13 @@ Wrap each governed tool's handler with `guardTool(...)`. The wrapped handler onl
 allows; otherwise it throws a `GovernanceBlocked` error your agent surfaces to the user.
 
 ```js
-import { createGuard } from './agentsafe-guard.mjs';
+import { createGuard, createGuardFromConfig } from '@metamynd/agentsafe-guard';
 
-const guard = createGuard({
+// Preferred: load the portable config the one-call onboarding endpoint returns (no env vars).
+const guard = await createGuardFromConfig('./agent.metamynd.json');
+
+// Or configure explicitly:
+const guardExplicit = createGuard({
   api: process.env.AGENTSAFE_API,
   agentDid: process.env.AGENT_DID,
   agentKey: process.env.AGENT_KEY,   // held only by the agent
