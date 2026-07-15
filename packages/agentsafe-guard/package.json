@@ -1,0 +1,59 @@
+{
+  "name": "@metamynd/agentsafe-guard",
+  "version": "0.1.0",
+  "description": "Zero-dependency runtime governance for any Node AI agent — gate tool calls through MetaMynd/AgentSafe (allow / block / escalate) against the agent's mandate, enforced Standards, and SOPs. Ed25519-signed, deterministic, fail-closed.",
+  "type": "module",
+  "main": "./agentsafe-guard.mjs",
+  "module": "./agentsafe-guard.mjs",
+  "exports": {
+    ".": "./agentsafe-guard.mjs",
+    "./policy-core": "./policy-core.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "agentsafe-guard.mjs",
+    "policy-core.mjs",
+    "magp-did.mjs",
+    "x402.mjs",
+    "example-openclaw-agent.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node local-eval.smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "ai",
+    "agent",
+    "agents",
+    "governance",
+    "ai-safety",
+    "guardrails",
+    "policy",
+    "mandate",
+    "authorization",
+    "ed25519",
+    "magp",
+    "metamynd",
+    "agentsafe",
+    "compliance"
+  ],
+  "author": "MetaMynd",
+  "license": "MIT",
+  "homepage": "https://github.com/jasimp18/AgentSafe/tree/main/integrations/agentsafe-guard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasimp18/AgentSafe.git",
+    "directory": "integrations/agentsafe-guard"
+  },
+  "bugs": {
+    "url": "https://github.com/jasimp18/AgentSafe/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
