@@ -55,6 +55,24 @@ export function createGuard(opts = {}) {
     return crypto.sign(null, Buffer.from(message, 'utf8'), privateKey).toString('hex');
   }
 
+  // --- Enforcement mode (spec §9.2 + local-first plan) --------------------------------------
+  // 'local' (DEFAULT): decide the rule layer LOCALLY against a cached signed bundle — a
+  //   block/escalate needs no network; an allowed VALUE action is still sealed by the remote
+  //   gate (two-phase hold + cumulative cap + evidence). 'remote': every call hits the gate.
+  const mode = opts.mode ?? cfg?.mode ?? 'local';
+  const bundleUrl = opts.bundleUrl ?? cfg?.bundleUrl ?? `${base}/policy/bundle/${encodeURIComponent(agentDid)}`;
+  const sealValueActions = opts.sealValueActions !== false; // default true
+  let _bundle = null;
+  let _bundleAt = 0;
+  let _bundleMaxAgeMs = 10 * 60 * 1000; // overwritten by the bundle's maxStaleness
+
+  /** Parse an ISO-8601 duration like "PT10M" / "PT30S" / "PT1H" → ms (or null). */
+  function _durationMs(s) {
+    const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(String(s ?? ''));
+    if (!m) return null;
+    return ((+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0)) * 1000 || null;
+  }
+
   /**
    * Build a signed authorize request (spec §7.2/§7.3) WITHOUT sending it — the object an
    * agent presents to a counterparty (e.g. an MCP) so the counterparty can re-verify the
@@ -145,6 +163,56 @@ export function createGuard(opts = {}) {
     });
   }
 
+  /** Fetch + cache the agent's signed policy bundle (refreshed per its maxStaleness). */
+  async function loadBundle(force = false) {
+    const now = Date.now();
+    if (!force && _bundle && now - _bundleAt < _bundleMaxAgeMs) return _bundle;
+    const res = await fetch(bundleUrl);
+    const body = await res.json().catch(() => null);
+    const b = body?.data ?? body;
+    if (!b || (!b.mandates && !b.sops && !b.standards)) throw new Error(`invalid policy bundle from ${bundleUrl}`);
+    _bundle = b;
+    _bundleAt = now;
+    _bundleMaxAgeMs = _durationMs(b.maxStaleness) ?? _bundleMaxAgeMs;
+    return b;
+  }
+
+  /** Map a fetched bundle into the shape evaluateLocally expects, for one action. */
+  function _bundleFor(b, action) {
+    return {
+      standards: (b.standards ?? []).map((s) => ({ standardKey: s.id ?? s.standardKey ?? 'standard', document: s.document })).filter((s) => s.document),
+      sops: (b.sops ?? []).map((s) => ({ standardKey: s.id ?? s.sopId ?? 'sop', document: s.document })).filter((s) => s.document),
+      mandate: ((b.mandates ?? []).find((m) => m.action === action) ?? (b.mandates ?? [])[0])?.document,
+    };
+  }
+
+  /**
+   * LOCAL-FIRST decision (the default). Evaluates the rule layer against the cached
+   * bundle with the same policy-core the gate runs — so a block/escalate is decided
+   * with NO network. An allowed VALUE action (amount > 0) is then sealed by the remote
+   * gate (two-phase hold + cumulative-spend cap + anchored evidence — the parts that
+   * MUST be server-side); set `sealValueActions:false` for pure offline. If the bundle
+   * can't be loaded, defers to the authoritative remote gate rather than blind-allow.
+   */
+  async function authorizeLocal(input) {
+    const { action, amount = 0 } = input;
+    let b;
+    try {
+      b = await loadBundle();
+    } catch {
+      return authorize(input); // no local rules → authoritative remote gate
+    }
+    const local = evaluateLocally({ ..._bundleFor(b, action), request: input });
+    if (local.decision !== 'allow') return local; // decided locally, no network
+    if (amount > 0 && sealValueActions) return authorize(input); // seal value action remotely
+    return local; // non-value allow — local is sufficient
+  }
+
+  /** Mode-aware decision used by guardTool: 'local' (default) or 'remote'. */
+  async function check(input) {
+    return mode === 'remote' ? authorize(input) : authorizeLocal(input);
+  }
+
   /**
    * Like guardTool, but evaluates LOCALLY against a policy bundle instead of calling
    * the gate — cooperative-mode, low-latency governance (spec §9.2). Fails CLOSED:
@@ -188,7 +256,7 @@ export function createGuard(opts = {}) {
    */
   function guardTool(action, handler, mapArgs = (a) => a) {
     return async (args) => {
-      const decision = await authorize({ action, ...mapArgs(args) });
+      const decision = await check({ action, ...mapArgs(args) });
       if (decision.decision !== 'allow') {
         const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
         err.name = 'GovernanceBlocked';
@@ -312,5 +380,5 @@ export function createGuard(opts = {}) {
     return sign(challenge);
   }
 
-  return { authorize, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, verifyKey, signChallenge, agentDid };
+  return { authorize, authorizeLocal, check, loadBundle, mode, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, verifyKey, signChallenge, agentDid };
 }
