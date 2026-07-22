@@ -262,6 +262,54 @@ export function createGuard(opts = {}) {
   }
 
   /**
+   * Watch for policy changes over Server-Sent Events (Build C) — ZERO-dependency (plain fetch,
+   * no socket client). On a `policy:changed` push the guard invalidates its bundle + on-chain
+   * anchor cache, so the NEXT call re-fetches (and re-verifies) the new rules — reaching the edge
+   * in ~1s instead of within maxStaleness. Push is an optimization: a dropped stream still leaves
+   * staleness (A) + the on-chain check (B) as the floor. Auto-reconnects with a short backoff.
+   * Returns a handle with `.close()`. Optional `onChange(payload)` callback.
+   */
+  function watchPolicy(onChange) {
+    let stopped = false;
+    let controller = null;
+    (async () => {
+      while (!stopped) {
+        try {
+          controller = new AbortController();
+          const res = await fetch(`${base}/policy/events/${encodeURIComponent(agentDid)}`, {
+            headers: { Accept: 'text/event-stream' },
+            signal: controller.signal,
+          });
+          if (!res.ok || !res.body) throw new Error(`policy events ${res.status}`);
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          let buf = '';
+          while (!stopped) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let i;
+            while ((i = buf.indexOf('\n\n')) >= 0) {
+              const frame = buf.slice(0, i);
+              buf = buf.slice(i + 2);
+              if (!/^event:\s*policy:changed/m.test(frame)) continue; // ignore comments/heartbeats
+              _bundle = null; _bundleAt = 0; _anchor = null; _anchorAt = 0; // invalidate → next call re-fetches
+              if (onChange) {
+                const dline = frame.split('\n').find((l) => l.startsWith('data:'));
+                try { onChange(dline ? JSON.parse(dline.slice(5).trim()) : {}); } catch { /* ignore */ }
+              }
+            }
+          }
+        } catch {
+          /* stream dropped — reconnect */
+        }
+        if (!stopped) await new Promise((r) => setTimeout(r, 2000));
+      }
+    })();
+    return { close() { stopped = true; try { controller?.abort(); } catch { /* ignore */ } } };
+  }
+
+  /**
    * Like guardTool, but evaluates LOCALLY against a policy bundle instead of calling
    * the gate — cooperative-mode, low-latency governance (spec §9.2). Fails CLOSED:
    * any error during local evaluation throws GovernanceBlocked, never allows.
@@ -428,5 +476,5 @@ export function createGuard(opts = {}) {
     return sign(challenge);
   }
 
-  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, verifyKey, signChallenge, agentDid };
+  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, verifyKey, signChallenge, agentDid };
 }

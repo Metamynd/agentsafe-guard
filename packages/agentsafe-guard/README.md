@@ -85,6 +85,20 @@ const guard = await createGuardFromConfig('./agent.metamynd.json', { verifyOnCha
 await guard.policyAnchor(); // → { sigDigest, seq } read from Hedera (or null)
 ```
 
+### Push invalidation (`watchPolicy`)
+
+By default a rule change is picked up within the bundle's `maxStaleness` (or on the
+next on-chain check). `guard.watchPolicy()` subscribes to a Server-Sent-Events stream
+(`GET /policy/events/:did`, zero-dep — plain `fetch`) so a change **invalidates the
+guard's cache in ~1s** and the next call re-fetches (and re-verifies) the new rules.
+It auto-reconnects; a dropped stream still leaves staleness + the on-chain check as the
+floor, so a missed push degrades latency, never safety.
+
+```js
+const stop = guard.watchPolicy((change) => console.log('rules changed', change));
+// … later: stop.close();
+```
+
 ### Bring your own key (BYOK)
 
 Provision the agent with your **own** public key so MetaMynd never sees the private key. The identity
