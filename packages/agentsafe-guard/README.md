@@ -67,6 +67,24 @@ const offline = await createGuardFromConfig('./agent.metamynd.json', { mode: 'lo
 `guard.authorizeLocal(...)` is the explicit local-first call; `guard.check(...)` follows
 the configured `mode`. All return `{ decision, reasonCode, authorizationId, … }`.
 
+### Trustless currency check (`verifyOnChain`)
+
+Local eval trusts a bundle fetched over TLS. With `{ verifyOnChain: true }` the guard
+additionally confirms — from a **public Hedera mirror node, with MetaMynd offline** —
+that its local bundle is the **latest one anchored on the agent's own topic**. On each
+recompile MetaMynd publishes `sha256(bundle signature)` to the topic; the guard reads
+the latest `policy-update` op and requires `sha256(bundle.proof.signature)` to match it.
+If it can't confirm (mismatch / not yet anchored / mirror down), it **defers to the
+authoritative remote gate** rather than evaluate a bundle it can't prove is current.
+Append-only Hedera consensus makes the latest op authoritative and a **rollback**
+(serving an older signed bundle) detectable; a monotonic sequence number defeats a mirror
+that hides recent updates.
+
+```js
+const guard = await createGuardFromConfig('./agent.metamynd.json', { verifyOnChain: true });
+await guard.policyAnchor(); // → { sigDigest, seq } read from Hedera (or null)
+```
+
 ### Bring your own key (BYOK)
 
 Provision the agent with your **own** public key so MetaMynd never sees the private key. The identity

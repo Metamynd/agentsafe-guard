@@ -62,9 +62,17 @@ export function createGuard(opts = {}) {
   const mode = opts.mode ?? cfg?.mode ?? 'local';
   const bundleUrl = opts.bundleUrl ?? cfg?.bundleUrl ?? `${base}/policy/bundle/${encodeURIComponent(agentDid)}`;
   const sealValueActions = opts.sealValueActions !== false; // default true
+  // Build B — trustless currency check. When on, the guard trusts its local bundle ONLY if that
+  // bundle is the LATEST one anchored on the agent's Hedera topic (read from a public mirror);
+  // otherwise it defers to the authoritative remote gate. Opt-in for now.
+  const verifyOnChain = opts.verifyOnChain ?? cfg?.verifyOnChain ?? false;
+  const _anchorTtlMs = opts.anchorTtlMs ?? 60_000;
   let _bundle = null;
   let _bundleAt = 0;
   let _bundleMaxAgeMs = 10 * 60 * 1000; // overwritten by the bundle's maxStaleness
+  let _anchor = null;
+  let _anchorAt = 0;
+  let _highestSeq = 0; // monotonic: never accept a mirror response with fewer policy ops than seen
 
   /** Parse an ISO-8601 duration like "PT10M" / "PT30S" / "PT1H" → ms (or null). */
   function _durationMs(s) {
@@ -186,6 +194,38 @@ export function createGuard(opts = {}) {
     };
   }
 
+  const _sha256 = (s) => 'sha256:' + crypto.createHash('sha256').update(String(s)).digest('hex');
+
+  /**
+   * Read the CURRENT anchored policy for this agent from its OWN Hedera topic via a public
+   * mirror node — no MetaMynd call (Build B / spec §5.3.1). Returns { sigDigest, seq } of the
+   * latest `policy-update` op, or null. Cached for `_anchorTtlMs`; monotonic on `seq`.
+   */
+  async function _currentAnchor() {
+    const now = Date.now();
+    if (_anchor && now - _anchorAt < _anchorTtlMs) return _anchor;
+    const m = /^did:hedera:([^:]+):[^_]+_(.+)$/.exec(agentDid);
+    if (!m) return _anchor;
+    const network = m[1];
+    const topicId = m[2];
+    const mbase = network === 'mainnet' ? 'https://mainnet.mirrornode.hedera.com' : 'https://testnet.mirrornode.hedera.com';
+    try {
+      // Newest-first: the latest `policy-update` op for this DID is the current policy. Its topic
+      // sequence_number is the monotonic marker (globally increasing under Hedera consensus), so a
+      // rollback / a mirror hiding recent updates shows a LOWER seq and is rejected. (A very busy
+      // topic could bury the op past one page; a per-agent topic won't — pagination is a refinement.)
+      const body = await fetch(`${mbase}/api/v1/topics/${topicId}/messages?limit=100&order=desc`).then((r) => (r.ok ? r.json() : null));
+      const hit = (body?.messages ?? [])
+        .map((x) => { try { return { seq: Number(x.sequence_number), op: JSON.parse(Buffer.from(x.message, 'base64').toString('utf8')) }; } catch { return null; } })
+        .filter((e) => e && e.op?.op === 'policy-update' && e.op.did === agentDid)
+        .sort((a, b) => b.seq - a.seq)[0];
+      if (!hit) return _anchor;
+      const a = { sigDigest: hit.op.sigDigest ?? null, seq: hit.seq };
+      if (a.seq >= _highestSeq) { _anchor = a; _anchorAt = now; _highestSeq = a.seq; }
+    } catch { /* mirror unreachable — keep the last known anchor */ }
+    return _anchor;
+  }
+
   /**
    * LOCAL-FIRST decision (the default). Evaluates the rule layer against the cached
    * bundle with the same policy-core the gate runs — so a block/escalate is decided
@@ -201,6 +241,14 @@ export function createGuard(opts = {}) {
       b = await loadBundle();
     } catch {
       return authorize(input); // no local rules → authoritative remote gate
+    }
+    // Trustless currency check (Build B): trust the local bundle only if it is the LATEST one
+    // anchored on Hedera; otherwise defer to the authoritative remote gate (never evaluate against
+    // a bundle we can't prove is current — this defeats a stale/rolled-back or forged bundle).
+    if (verifyOnChain) {
+      const anchor = await _currentAnchor();
+      const sig = b?.proof?.signature;
+      if (!anchor?.sigDigest || !sig || _sha256(sig) !== anchor.sigDigest) return authorize(input);
     }
     const local = evaluateLocally({ ..._bundleFor(b, action), request: input });
     if (local.decision !== 'allow') return local; // decided locally, no network
@@ -380,5 +428,5 @@ export function createGuard(opts = {}) {
     return sign(challenge);
   }
 
-  return { authorize, authorizeLocal, check, loadBundle, mode, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, verifyKey, signChallenge, agentDid };
+  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, verifyKey, signChallenge, agentDid };
 }
