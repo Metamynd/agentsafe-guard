@@ -43,6 +43,30 @@ const guard = await createGuardFromConfig('./agent.metamynd.json');   // no env 
 The rest of this guide shows the manual path (seed → wire) and the advanced features
 (local eval, handshake, escalation, payments).
 
+### Enforcement mode: local-first (default) or remote
+
+Since v0.2.0 the guard decides **locally by default**. `guardTool` (and the mode-aware
+`guard.check(...)`) evaluate the rule layer against the agent's cached signed policy
+bundle using the **same `policy-core` bytes the gate runs** — so a **block or escalate
+is decided with no network** (instant, works offline). An **allowed value action**
+(`amount > 0`) is still sealed by the remote gate, because the cumulative-spend cap,
+nonce/replay + atomic cap, and anchored evidence **must** be server-side. If the bundle
+can't be fetched, the guard defers to the authoritative remote gate rather than
+blind-allowing; a value action it can neither evaluate nor seal **fails closed**.
+
+```js
+// default — local-first
+const guard = await createGuardFromConfig('./agent.metamynd.json');
+// opt out — every call hits the gate
+const remote = await createGuardFromConfig('./agent.metamynd.json', { mode: 'remote' });
+// pure offline (no remote seal; drops cumulative-cap + evidence — you accept the trade)
+const offline = await createGuardFromConfig('./agent.metamynd.json', { mode: 'local', sealValueActions: false });
+```
+
+`guard.authorize(...)` is always the explicit **remote** call (unchanged);
+`guard.authorizeLocal(...)` is the explicit local-first call; `guard.check(...)` follows
+the configured `mode`. All return `{ decision, reasonCode, authorizationId, … }`.
+
 ### Bring your own key (BYOK)
 
 Provision the agent with your **own** public key so MetaMynd never sees the private key. The identity
