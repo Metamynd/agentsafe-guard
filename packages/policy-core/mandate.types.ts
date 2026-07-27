@@ -5,12 +5,16 @@
  * constraints, never a schema/code change.
  *
  * Decision vocabulary matches the policy engine and evidence rail:
- * 'allow' | 'block' | 'escalate'.
+ * 'allow' | 'block' | 'escalate' | 'suspend' | 'quarantine'. Only 'allow' permits
+ * execution; the rest deny (fail-safe). 'suspend'/'quarantine' are containment
+ * effects (a terminal deny with a distinct audit signal). A mandate prohibition or
+ * constraint can therefore be authored to CONTAIN the agent, not just block one
+ * action, via its `enforcement` / `onFail`.
  *
  * See docs/design/agent-mandates-and-standards-layer.md §3.
  */
 
-export type MandateDecision = 'allow' | 'block' | 'escalate';
+export type MandateDecision = 'allow' | 'block' | 'escalate' | 'suspend' | 'quarantine';
 
 /** The fixed operator set. New scenarios add operands/resolvers, not operators. */
 export type Operator =

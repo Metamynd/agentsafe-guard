@@ -158,7 +158,7 @@ function requiredContextFor(predicates) {
 }
 
 // src/policy-core/standards-rules.ts
-var PRECEDENCE = { allow: 0, escalate: 1, block: 2 };
+var PRECEDENCE = { allow: 0, escalate: 1, block: 2, suspend: 3, quarantine: 4 };
 function atomFires(atom, ctx) {
   const pred = ATOM_REGISTRY[atom.predicate];
   if (!pred) return false;
@@ -244,8 +244,8 @@ function validateMolecules(molecules) {
     if (!["all", "any", "none"].includes(m.combinator)) {
       issues.push({ moleculeId: m.id, message: `invalid combinator '${m.combinator}' (all|any|none)` });
     }
-    if (!["block", "escalate"].includes(m.decision)) {
-      issues.push({ moleculeId: m.id, message: `invalid decision '${m.decision}' (block|escalate)` });
+    if (!["block", "escalate", "suspend", "quarantine"].includes(m.decision)) {
+      issues.push({ moleculeId: m.id, message: `invalid decision '${m.decision}' (block|escalate|suspend|quarantine)` });
     }
     if (!m.reasonCode) issues.push({ moleculeId: m.id, message: "molecule is missing a reasonCode" });
     if (!m.atoms || m.atoms.length === 0) {
@@ -359,7 +359,7 @@ function sumEventField(events, type, field) {
 }
 
 // src/policy-core/evaluate.ts
-var PRECEDENCE2 = { allow: 0, escalate: 1, block: 2 };
+var PRECEDENCE2 = { allow: 0, escalate: 1, block: 2, suspend: 3, quarantine: 4 };
 function evaluate(input) {
   let decision = "allow";
   let reasonCode = "AUTHORIZED";
