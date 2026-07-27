@@ -20,8 +20,13 @@ import type { EvaluationContext, PolicyDecision } from './types.js';
 
 /** How a molecule combines its atoms. */
 export type Combinator = 'all' | 'any' | 'none';
-/** What a molecule fires when satisfied (never 'allow' — non-firing = allow). */
-export type FireDecision = 'block' | 'escalate';
+/**
+ * What a molecule fires when satisfied (never 'allow' — non-firing = allow).
+ * 'suspend'/'quarantine' are containment effects: a terminal deny (like 'block')
+ * carrying a distinct audit signal so an author can express "contain the agent"
+ * rather than just "deny this action".
+ */
+export type FireDecision = 'block' | 'escalate' | 'suspend' | 'quarantine';
 
 /** An atom: a reference to a code-defined predicate + its config. */
 export interface RuleAtom {
@@ -58,8 +63,13 @@ export interface StandardRuleResult {
   standardKey: string | null;
 }
 
-/** Restrictiveness ordering — higher wins, so evaluation is order-independent. */
-const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, escalate: 1, block: 2 };
+/**
+ * Restrictiveness ordering — higher wins, so evaluation is order-independent.
+ * Containment (suspend/quarantine) outranks a plain block, which outranks an
+ * escalate, which outranks allow. So the single most-restrictive firing molecule
+ * across all bound standards/SOPs determines the verdict.
+ */
+const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, escalate: 1, block: 2, suspend: 3, quarantine: 4 };
 
 /** Evaluate a single atom. An unknown predicate never fires (validation rejects it at authoring). */
 function atomFires(atom: RuleAtom, ctx: EvaluationContext): boolean {
@@ -194,8 +204,8 @@ export function validateMolecules(molecules: Molecule[] | undefined): { ok: bool
     if (!['all', 'any', 'none'].includes(m.combinator)) {
       issues.push({ moleculeId: m.id, message: `invalid combinator '${m.combinator}' (all|any|none)` });
     }
-    if (!['block', 'escalate'].includes(m.decision)) {
-      issues.push({ moleculeId: m.id, message: `invalid decision '${m.decision}' (block|escalate)` });
+    if (!['block', 'escalate', 'suspend', 'quarantine'].includes(m.decision)) {
+      issues.push({ moleculeId: m.id, message: `invalid decision '${m.decision}' (block|escalate|suspend|quarantine)` });
     }
     if (!m.reasonCode) issues.push({ moleculeId: m.id, message: 'molecule is missing a reasonCode' });
     if (!m.atoms || m.atoms.length === 0) {

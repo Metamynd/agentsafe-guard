@@ -46,6 +46,15 @@ const bundle = {
             decision: 'block',
             reasonCode: 'SOP_SPEND_CAP',
           },
+          {
+            // Containment (1C): a gross overspend doesn't just block the action,
+            // it quarantines the agent. Outranks the plain block above.
+            id: 'contain',
+            combinator: 'any',
+            atoms: [{ id: 'q', predicate: 'amount-over', config: { limit: 5000 } }],
+            decision: 'quarantine',
+            reasonCode: 'GROSS_OVERSPEND',
+          },
         ],
       },
     },
@@ -71,6 +80,8 @@ const cases = [
   { name: 'mandate merchant not allowed → block', request: { action: 'flight-purchase', amount: 100, merchant: 'sabre', context: { riskLevel: 'low' } }, expect: ['block', 'MERCHANT_NOT_ALLOWED'] },
   // §11.5: a forged unsigned context cannot shadow the signed amount/merchant.
   { name: 'forged context cannot shadow signed $600 → block', request: { action: 'flight-purchase', amount: 600, merchant: 'amadeus', context: { 'mm:payAmount': 1, riskLevel: 'low' } }, expect: ['block', 'SOP_SPEND_CAP'] },
+  // 1C: gross overspend fires a quarantine that outranks the plain block/cap.
+  { name: 'gross overspend → quarantine (contains agent, outranks block)', request: { action: 'flight-purchase', amount: 6000, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['quarantine', 'GROSS_OVERSPEND'] },
 ];
 
 let failed = 0;

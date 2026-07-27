@@ -8,8 +8,18 @@
  * identical verdict from identical inputs (spec §3.5, §6.3).
  */
 
-/** A policy decision — the same vocabulary the evidence rail records. */
-export type PolicyDecision = 'allow' | 'block' | 'escalate';
+/**
+ * A policy decision — the same vocabulary the evidence rail records.
+ *
+ * `allow` is the ONLY value that permits execution; every other value denies it
+ * (fail-safe). `escalate` additionally routes to the human-approval queue.
+ * `suspend`/`quarantine` are containment effects: a terminal deny that also marks
+ * the event as a containment-level signal in the audit trail (distinct from a
+ * plain `block`). Wiring them to a persistent agent operating-state lifecycle
+ * (deny all further actions until reinstated) is a follow-up — today they deny the
+ * action and record the containment intent.
+ */
+export type PolicyDecision = 'allow' | 'block' | 'escalate' | 'suspend' | 'quarantine';
 
 /**
  * The context an action is evaluated against (spec §6.4). It is the union of the

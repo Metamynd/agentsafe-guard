@@ -19,8 +19,9 @@ import { evaluateMandate } from './mandate-eval.js';
 import type { Mandate, MandateRequest } from './mandate.types.js';
 import type { EvaluationContext, PolicyDecision, Verdict } from './types.js';
 
-/** Restrictiveness ordering — higher wins, so combination is order-independent. */
-const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, escalate: 1, block: 2 };
+/** Restrictiveness ordering — higher wins, so combination is order-independent.
+ * Containment (suspend/quarantine) outranks block > escalate > allow. */
+const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, escalate: 1, block: 2, suspend: 3, quarantine: 4 };
 
 /** A bound rule pack: a Standard or SOP document keyed for provenance. */
 export interface RulePack {
