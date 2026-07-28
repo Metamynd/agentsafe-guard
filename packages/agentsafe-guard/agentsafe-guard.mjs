@@ -147,7 +147,16 @@ export function createGuard(opts = {}) {
    * @param {{action:string,amount?:number,merchant?:string,context?:object,cumulativeSpend?:number,now?:string}} p.request
    * @returns {{decision:'allow'|'block'|'escalate',reasonCode:string|null,authorizationId:null,remaining:null,proofRef:null}}
    */
-  function evaluateLocally({ standards = [], sops = [], mandate, request }) {
+  function evaluateLocally({ contained = null, standards = [], sops = [], mandate, request }) {
+    // Push containment (Phase 2.3): a server-CONTAINED agent is denied at the EDGE,
+    // before any rule eval. `contained` rides alongside the signed bundle as a SIBLING
+    // response field (never inside the signed payload, so the bundle signature stays
+    // valid) and is refreshed on the `policy:changed` push, reaching the guard in ~1s.
+    if (contained && contained.status) {
+      const decision = contained.status === 'quarantined' ? 'quarantine' : 'suspend';
+      const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
+      return { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
+    }
     const { action, amount = 0, merchant = '', context = {}, cumulativeSpend = amount, now } = request;
     // Signed fields (action/agentDid/amount, mm:* operands) are applied LAST so an
     // unsigned context key can never shadow them (spec §6.4.2) — the same invariant
@@ -179,6 +188,9 @@ export function createGuard(opts = {}) {
     const body = await res.json().catch(() => null);
     const b = body?.data ?? body;
     if (!b || (!b.mandates && !b.sops && !b.standards)) throw new Error(`invalid policy bundle from ${bundleUrl}`);
+    // Live containment rides as a SIBLING of the signed bundle (never inside it, so the
+    // signature stays valid); stash it on the in-memory copy for local eval.
+    b.contained = body?.contained ?? null;
     _bundle = b;
     _bundleAt = now;
     _bundleMaxAgeMs = _durationMs(b.maxStaleness) ?? _bundleMaxAgeMs;
@@ -188,6 +200,7 @@ export function createGuard(opts = {}) {
   /** Map a fetched bundle into the shape evaluateLocally expects, for one action. */
   function _bundleFor(b, action) {
     return {
+      contained: b.contained ?? null,
       standards: (b.standards ?? []).map((s) => ({ standardKey: s.id ?? s.standardKey ?? 'standard', document: s.document })).filter((s) => s.document),
       sops: (b.sops ?? []).map((s) => ({ standardKey: s.id ?? s.sopId ?? 'sop', document: s.document })).filter((s) => s.document),
       mandate: ((b.mandates ?? []).find((m) => m.action === action) ?? (b.mandates ?? [])[0])?.document,
