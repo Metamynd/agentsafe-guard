@@ -92,6 +92,19 @@ for (const c of cases) {
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${c.name}  →  ${v.decision}/${v.reasonCode}`);
 }
 
+// Phase 2.3: a server-CONTAINED agent is denied at the edge, before ANY rule eval —
+// the `contained` flag rides alongside the bundle (a sibling of the signed payload).
+{
+  const cv = guard.evaluateLocally({
+    ...bundle,
+    contained: { status: 'quarantined', reason: 'GROSS_OVERSPEND' },
+    request: { action: 'flight-purchase', amount: 1, merchant: 'amadeus', context: { riskLevel: 'low' } },
+  });
+  const ok = cv.decision === 'quarantine' && cv.reasonCode === 'AGENT_QUARANTINED';
+  if (!ok) failed++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'}  contained agent → denied at the edge (before rule eval)  →  ${cv.decision}/${cv.reasonCode}`);
+}
+
 if (failed) {
   console.error(`\n${failed} case(s) FAILED`);
   process.exit(1);
