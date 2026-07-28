@@ -81,6 +81,10 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
     const res = await fetch(`${base}/policy/bundle/${encodeURIComponent(agentDid)}`);
     const body = await res.json().catch(() => null);
     if (!res.ok || !body?.data) throw new Error(`policy bundle fetch failed (HTTP ${res.status})`);
+    // Live containment (Phase 2.4) rides as a SIBLING of the signed bundle. Expose it
+    // as a NON-ENUMERABLE prop so it never enters the canonicalization verifyBundle
+    // signs over (Object.keys skips it) — the signature stays valid, the flag is readable.
+    Object.defineProperty(body.data, '__contained', { value: body?.contained ?? null, enumerable: false, configurable: true });
     return body.data;
   }
 
@@ -135,6 +139,14 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       const bundle = await loadBundle(agentDid);
       if (bundle?.subject && bundle.subject !== agentDid) {
         return { decision: 'block', reasonCode: 'BUNDLE_SUBJECT_MISMATCH' };
+      }
+      // 3a. Containment (Phase 2.4): a server-contained agent is refused regardless of
+      // the action — the tool provider will not serve a suspended/quarantined agent.
+      const contained = bundle?.__contained;
+      if (contained && contained.status) {
+        const decision = contained.status === 'quarantined' ? 'quarantine' : 'suspend';
+        const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
+        return { decision, reasonCode };
       }
       // 3b. Signed-bundle verification + risk-tiered fail-closed (Phase F, §5.3.2/§5.3.3). When a
       // policy key is configured, a value-bearing action (amount > 0) MUST fail closed on an
