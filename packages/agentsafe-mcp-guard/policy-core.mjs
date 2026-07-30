@@ -389,20 +389,66 @@ function buildAuthMessage(f) {
 function applySignedLast(unsigned, signed) {
   return { ...unsigned ?? {}, ...signed };
 }
+
+// src/policy-core/operating-mode.ts
+var MODE_RANK = {
+  read_only: 0,
+  restricted: 1,
+  supervised: 2,
+  autonomous: 3
+};
+var MODES_BY_RANK = ["read_only", "restricted", "supervised", "autonomous"];
+function isOperatingMode(v) {
+  return typeof v === "string" && Object.prototype.hasOwnProperty.call(MODE_RANK, v);
+}
+function asOperatingMode(v) {
+  return isOperatingMode(v) ? v : "autonomous";
+}
+function moreRestrictive(a, b) {
+  return MODE_RANK[a] <= MODE_RANK[b] ? a : b;
+}
+var SUPERVISED_AMOUNT_CAP = 100;
+var RISK_RANK2 = { low: 0, medium: 1, high: 2, critical: 3 };
+function riskAtOrAboveHigh(riskLevel) {
+  const r = typeof riskLevel === "string" ? RISK_RANK2[riskLevel.toLowerCase()] : void 0;
+  return r !== void 0 && r >= RISK_RANK2.high;
+}
+function operatingModeGate(mode, ctx) {
+  const m = asOperatingMode(mode);
+  const valueBearing = (ctx.amount ?? 0) > 0;
+  if (!valueBearing || m === "autonomous") return { decision: "allow", reasonCode: null };
+  switch (m) {
+    case "read_only":
+      return { decision: "block", reasonCode: "MODE_READ_ONLY" };
+    case "restricted":
+      return { decision: "escalate", reasonCode: "MODE_RESTRICTED_REVIEW" };
+    case "supervised":
+      return riskAtOrAboveHigh(ctx.riskLevel) || (ctx.amount ?? 0) >= SUPERVISED_AMOUNT_CAP ? { decision: "escalate", reasonCode: "MODE_SUPERVISED_REVIEW" } : { decision: "allow", reasonCode: null };
+    default:
+      return { decision: "allow", reasonCode: null };
+  }
+}
 export {
   ATOM_REGISTRY,
   ATOM_SPECS,
   CATALOGUED_ATOMS,
+  MODES_BY_RANK,
+  MODE_RANK,
+  SUPERVISED_AMOUNT_CAP,
   applyCapture,
   applyHold,
   applySignedLast,
+  asOperatingMode,
   buildAuthMessage,
   canAuthorize,
   evaluate,
   evaluateBoundStandards,
   evaluateMandate,
   evaluateStandardRules,
+  isOperatingMode,
   moleculeFires,
+  moreRestrictive,
+  operatingModeGate,
   releaseHold,
   remainingBudget,
   requiredContextFor,

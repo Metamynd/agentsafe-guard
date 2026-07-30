@@ -93,6 +93,28 @@ await check('tampered signature → block', signedRequest({ amount: 100, tamper:
 await check('stale request → block', signedRequest({ amount: 100, issuedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString() }), ['block', 'REQUEST_EXPIRED']);
 await check('forged itinerary cannot shadow signed $600 → block', signedRequest({ amount: 600, context: { 'mm:payAmount': 1 } }), ['block', 'SOP_SPEND_CAP']);
 
+console.log('\n— operating-mode autonomy ladder at the edge (Phase 2.5b) —');
+{
+  // The mode rides as a NON-ENUMERABLE sibling (invisible to canonicalization, like
+  // __contained), so a mode-carrying guard fetches the same bundle + the flag.
+  const withMode = (mode) => createMcpGuard({
+    serviceDid: service.did, serviceKey: service.keyHex,
+    fetchBundle: async () => { const b = JSON.parse(JSON.stringify(bundle)); Object.defineProperty(b, '__operatingMode', { value: { mode }, enumerable: false }); return b; },
+  });
+  const checkMode = async (name, mode, req, expect) => {
+    const v = await withMode(mode).verifyRequest(req);
+    const ok = v.decision === expect[0] && v.reasonCode === expect[1];
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}  →  ${v.decision}/${v.reasonCode}`);
+  };
+  await checkMode('READ_ONLY blocks a value-bearing action', 'read_only', signedRequest({ amount: 100 }), ['block', 'MODE_READ_ONLY']);
+  await checkMode('READ_ONLY allows a zero-amount read', 'read_only', signedRequest({ amount: 0 }), ['allow', 'AUTHORIZED']);
+  await checkMode('RESTRICTED escalates a value-bearing action', 'restricted', signedRequest({ amount: 100 }), ['escalate', 'MODE_RESTRICTED_REVIEW']);
+  await checkMode('SUPERVISED escalates a spend at/above the cap', 'supervised', signedRequest({ amount: 100 }), ['escalate', 'MODE_SUPERVISED_REVIEW']);
+  await checkMode('SUPERVISED allows a small spend below the cap', 'supervised', signedRequest({ amount: 10 }), ['allow', 'AUTHORIZED']);
+  await checkMode('a mode escalate never downgrades a rule block', 'restricted', signedRequest({ amount: 600 }), ['block', 'SOP_SPEND_CAP']);
+}
+
 console.log('\n— mutual handshake (§8.2) —');
 {
   const initiator = createHandshakeInitiator({ fromDid: agent.did, sign: agent.sign });
