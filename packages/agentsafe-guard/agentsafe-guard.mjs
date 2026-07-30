@@ -473,6 +473,37 @@ export function createGuard(opts = {}) {
   }
 
   /**
+   * Effect-safety runtime (E2): report the external-effect lifecycle so an AMBIGUOUS
+   * connector outcome never becomes a blind capture/void. Call effectDispatching() just
+   * before the side-effecting call, effectDispatched() when the connector accepts, and —
+   * critically — effectUnknown() when the response is lost/timed out (instead of guessing).
+   * Once UNKNOWN, capture/void are refused by the gate until the effect is reconciled.
+   */
+  async function _effectPost(authorizationId, kind, payload = {}) {
+    try {
+      const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/${kind}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => null);
+      return body?.data ?? { ok: false, reasonCode: `GATE_HTTP_${res.status}` };
+    } catch (err) {
+      return { ok: false, reasonCode: 'GATE_UNREACHABLE', error: String(err?.message ?? err) };
+    }
+  }
+  const effectDispatching = (authorizationId) => _effectPost(authorizationId, 'dispatching');
+  const effectDispatched = (authorizationId, remoteRef) => _effectPost(authorizationId, 'dispatched', { remoteRef });
+  const effectUnknown = (authorizationId, reason) => _effectPost(authorizationId, 'unknown', { reason });
+  async function effectStatus(authorizationId) {
+    try {
+      const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect`);
+      const body = await res.json().catch(() => null);
+      return body?.data ?? { effectState: null, reasonCode: `GATE_HTTP_${res.status}` };
+    } catch (err) {
+      return { effectState: 'unreachable', reasonCode: 'GATE_UNREACHABLE', error: String(err?.message ?? err) };
+    }
+  }
+
+  /**
    * BYOK proof-of-possession (onboarding proposal #4). For an agent that brought its OWN key,
    * MetaMynd issued the identity with a one-time `challenge` and left the key UNVERIFIED — the gate
    * blocks it with AGENT_KEY_UNVERIFIED until control is proven. This signs the challenge with the
@@ -505,5 +536,5 @@ export function createGuard(opts = {}) {
     return sign(challenge);
   }
 
-  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, verifyKey, signChallenge, agentDid };
+  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid };
 }
