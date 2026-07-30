@@ -105,6 +105,26 @@ for (const c of cases) {
   console.log(`${ok ? 'ok  ' : 'FAIL'}  contained agent → denied at the edge (before rule eval)  →  ${cv.decision}/${cv.reasonCode}`);
 }
 
+// Phase 2.5b: the operating-mode autonomy ladder rides as a sibling and biases the
+// EDGE verdict identically to the backend gate (READ_ONLY blocks value-bearing,
+// RESTRICTED/SUPERVISED escalate, reads always pass, a rule block still outranks).
+const modeCases = [
+  { name: 'READ_ONLY blocks a value-bearing action at the edge', operatingMode: { mode: 'read_only' }, request: { action: 'flight-purchase', amount: 100, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['block', 'MODE_READ_ONLY'] },
+  { name: 'READ_ONLY still allows a zero-amount read', operatingMode: { mode: 'read_only' }, request: { action: 'flight-purchase', amount: 0, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['allow', 'AUTHORIZED'] },
+  { name: 'RESTRICTED escalates an otherwise-allowed value action', operatingMode: { mode: 'restricted' }, request: { action: 'flight-purchase', amount: 100, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['escalate', 'MODE_RESTRICTED_REVIEW'] },
+  // Spend AT/ABOVE the SUPERVISED cap (100) with LOW risk isolates the mode path (the
+  // Standard's high-risk escalate would otherwise fire first with its own reasonCode).
+  { name: 'SUPERVISED escalates a spend at/above the cap', operatingMode: { mode: 'supervised' }, request: { action: 'flight-purchase', amount: 100, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['escalate', 'MODE_SUPERVISED_REVIEW'] },
+  { name: 'SUPERVISED allows a small low-risk spend below the cap', operatingMode: { mode: 'supervised' }, request: { action: 'flight-purchase', amount: 10, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['allow', 'AUTHORIZED'] },
+  { name: 'a mode escalate NEVER downgrades a rule block (precedence holds)', operatingMode: { mode: 'restricted' }, request: { action: 'flight-purchase', amount: 600, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['block', 'SOP_SPEND_CAP'] },
+];
+for (const c of modeCases) {
+  const v = guard.evaluateLocally({ ...bundle, operatingMode: c.operatingMode, request: c.request });
+  const ok = v.decision === c.expect[0] && v.reasonCode === c.expect[1];
+  if (!ok) failed++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'}  ${c.name}  →  ${v.decision}/${v.reasonCode}`);
+}
+
 if (failed) {
   console.error(`\n${failed} case(s) FAILED`);
   process.exit(1);

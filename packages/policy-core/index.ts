@@ -63,3 +63,17 @@ export type {
 export { evaluate, type EvaluateInput, type RulePack } from './evaluate.js';
 export { buildAuthMessage, type AuthMessageFields } from './canonical.js';
 export { applySignedLast } from './context.js';
+
+// Operating-mode autonomy ladder — request-time gate (edge-shared; Phase 2.5b)
+export {
+  operatingModeGate,
+  asOperatingMode,
+  isOperatingMode,
+  moreRestrictive,
+  MODE_RANK,
+  MODES_BY_RANK,
+  SUPERVISED_AMOUNT_CAP,
+  type OperatingMode,
+  type ModeGateContext,
+  type ModeGateResult,
+} from './operating-mode.js';

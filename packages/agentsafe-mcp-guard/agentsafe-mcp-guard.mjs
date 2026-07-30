@@ -12,7 +12,7 @@
 // Dependencies are the two generated, zero-external-dependency bundles:
 //   policy-core.mjs (deterministic evaluator) and magp-did.mjs (key-in-DID verify).
 import crypto from 'node:crypto';
-import { evaluate, buildAuthMessage, applySignedLast } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 import { verifyBundle } from './magp-policy.mjs';
@@ -81,10 +81,12 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
     const res = await fetch(`${base}/policy/bundle/${encodeURIComponent(agentDid)}`);
     const body = await res.json().catch(() => null);
     if (!res.ok || !body?.data) throw new Error(`policy bundle fetch failed (HTTP ${res.status})`);
-    // Live containment (Phase 2.4) rides as a SIBLING of the signed bundle. Expose it
-    // as a NON-ENUMERABLE prop so it never enters the canonicalization verifyBundle
-    // signs over (Object.keys skips it) — the signature stays valid, the flag is readable.
+    // Live containment (Phase 2.4) + operating mode (Phase 2.5b) ride as SIBLINGS of the
+    // signed bundle. Expose them as NON-ENUMERABLE props so they never enter the
+    // canonicalization verifyBundle signs over (Object.keys skips them) — the signature
+    // stays valid, the flags are readable.
     Object.defineProperty(body.data, '__contained', { value: body?.contained ?? null, enumerable: false, configurable: true });
+    Object.defineProperty(body.data, '__operatingMode', { value: body?.operatingMode ?? null, enumerable: false, configurable: true });
     return body.data;
   }
 
@@ -148,6 +150,12 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
         return { decision, reasonCode };
       }
+      // 3a.5. Operating-mode autonomy ladder (Phase 2.5b): the trust-driven posture rides
+      // as a non-enumerable sibling. READ_ONLY refuses a value-bearing action up-front;
+      // SUPERVISED/RESTRICTED only ESCALATE, applied to the verdict below so a rule block
+      // still outranks the floor (most-restrictive-wins, mirroring the gate).
+      const modeGate = operatingModeGate(bundle?.__operatingMode?.mode, { amount, riskLevel: signed?.itinerary?.riskLevel });
+      if (modeGate.decision === 'block') return { decision: 'block', reasonCode: modeGate.reasonCode };
       // 3b. Signed-bundle verification + risk-tiered fail-closed (Phase F, §5.3.2/§5.3.3). When a
       // policy key is configured, a value-bearing action (amount > 0) MUST fail closed on an
       // unsigned / tampered / stale bundle — so enforcement needs no live MetaMynd. A bad SIGNATURE
@@ -156,7 +164,11 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         const v = verifyBundle(bundle, { publicKey: policyPublicKey, valueBearing: Number(amount) > 0 });
         if (!v.ok) return { decision: 'block', reasonCode: v.reasonCode };
       }
-      return verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} });
+      const verdict = verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} });
+      if (verdict.decision === 'allow' && modeGate.decision === 'escalate') {
+        return { ...verdict, decision: 'escalate', reasonCode: modeGate.reasonCode };
+      }
+      return verdict;
     } catch (err) {
       return { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
     }

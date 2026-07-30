@@ -10,7 +10,7 @@
 // The agent's private key is a Hedera Ed25519 DER key (the AGENT_KEY the seed prints).
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { evaluate, buildAuthMessage, applySignedLast } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
 
@@ -147,7 +147,7 @@ export function createGuard(opts = {}) {
    * @param {{action:string,amount?:number,merchant?:string,context?:object,cumulativeSpend?:number,now?:string}} p.request
    * @returns {{decision:'allow'|'block'|'escalate',reasonCode:string|null,authorizationId:null,remaining:null,proofRef:null}}
    */
-  function evaluateLocally({ contained = null, standards = [], sops = [], mandate, request }) {
+  function evaluateLocally({ contained = null, operatingMode = null, standards = [], sops = [], mandate, request }) {
     // Push containment (Phase 2.3): a server-CONTAINED agent is denied at the EDGE,
     // before any rule eval. `contained` rides alongside the signed bundle as a SIBLING
     // response field (never inside the signed payload, so the bundle signature stays
@@ -158,10 +158,18 @@ export function createGuard(opts = {}) {
       return { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
     }
     const { action, amount = 0, merchant = '', context = {}, cumulativeSpend = amount, now } = request;
+    // Operating-mode autonomy ladder (Phase 2.5b): the trust-driven posture rides as a
+    // SIBLING (like `contained`) and biases the edge verdict identically to the gate.
+    // READ_ONLY denies a value-bearing action up-front; SUPERVISED/RESTRICTED only
+    // ESCALATE, applied to the verdict below so a rule block/escalate still outranks it.
+    const modeGate = operatingModeGate(operatingMode?.mode, { amount, riskLevel: context?.riskLevel });
+    if (modeGate.decision === 'block') {
+      return { decision: 'block', reasonCode: modeGate.reasonCode, authorizationId: null, remaining: null, proofRef: null };
+    }
     // Signed fields (action/agentDid/amount, mm:* operands) are applied LAST so an
     // unsigned context key can never shadow them (spec §6.4.2) — the same invariant
     // the gate enforces, via the same policy-core helper.
-    return evaluate({
+    const verdict = evaluate({
       standards,
       sops,
       mandate,
@@ -178,6 +186,12 @@ export function createGuard(opts = {}) {
           }
         : undefined,
     });
+    // Mode ESCALATE floor: only lifts an otherwise-ALLOW to human review (never softens
+    // a stricter verdict) — most-restrictive-wins, mirroring the backend gate exactly.
+    if (verdict.decision === 'allow' && modeGate.decision === 'escalate') {
+      return { ...verdict, decision: 'escalate', reasonCode: modeGate.reasonCode };
+    }
+    return verdict;
   }
 
   /** Fetch + cache the agent's signed policy bundle (refreshed per its maxStaleness). */
@@ -188,9 +202,10 @@ export function createGuard(opts = {}) {
     const body = await res.json().catch(() => null);
     const b = body?.data ?? body;
     if (!b || (!b.mandates && !b.sops && !b.standards)) throw new Error(`invalid policy bundle from ${bundleUrl}`);
-    // Live containment rides as a SIBLING of the signed bundle (never inside it, so the
-    // signature stays valid); stash it on the in-memory copy for local eval.
+    // Live containment + operating mode ride as SIBLINGS of the signed bundle (never
+    // inside it, so the signature stays valid); stash them on the in-memory copy.
     b.contained = body?.contained ?? null;
+    b.operatingMode = body?.operatingMode ?? null;
     _bundle = b;
     _bundleAt = now;
     _bundleMaxAgeMs = _durationMs(b.maxStaleness) ?? _bundleMaxAgeMs;
@@ -201,6 +216,7 @@ export function createGuard(opts = {}) {
   function _bundleFor(b, action) {
     return {
       contained: b.contained ?? null,
+      operatingMode: b.operatingMode ?? null,
       standards: (b.standards ?? []).map((s) => ({ standardKey: s.id ?? s.standardKey ?? 'standard', document: s.document })).filter((s) => s.document),
       sops: (b.sops ?? []).map((s) => ({ standardKey: s.id ?? s.sopId ?? 'sop', document: s.document })).filter((s) => s.document),
       mandate: ((b.mandates ?? []).find((m) => m.action === action) ?? (b.mandates ?? [])[0])?.document,
