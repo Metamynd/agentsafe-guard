@@ -186,9 +186,10 @@ export function createGuard(opts = {}) {
           }
         : undefined,
     });
-    // Mode ESCALATE floor: only lifts an otherwise-ALLOW to human review (never softens
-    // a stricter verdict) — most-restrictive-wins, mirroring the backend gate exactly.
-    if (verdict.decision === 'allow' && modeGate.decision === 'escalate') {
+    // Mode ESCALATE floor: only lifts an otherwise-PERMIT (allow or observe) to human
+    // review (never softens a stricter verdict) — most-restrictive-wins, mirroring the
+    // backend gate exactly (escalate outranks observe, so a flag never masks it).
+    if ((verdict.decision === 'allow' || verdict.decision === 'observe') && modeGate.decision === 'escalate') {
       return { ...verdict, decision: 'escalate', reasonCode: modeGate.reasonCode };
     }
     return verdict;
@@ -280,9 +281,11 @@ export function createGuard(opts = {}) {
       if (!anchor?.sigDigest || !sig || _sha256(sig) !== anchor.sigDigest) return authorize(input);
     }
     const local = evaluateLocally({ ..._bundleFor(b, action), request: input });
-    if (local.decision !== 'allow') return local; // decided locally, no network
-    if (amount > 0 && sealValueActions) return authorize(input); // seal value action remotely
-    return local; // non-value allow — local is sufficient
+    // allow/observe both PERMIT; block/escalate/contain are decided locally with no network.
+    const permits = local.decision === 'allow' || local.decision === 'observe';
+    if (!permits) return local; // denied/escalated locally, no network
+    if (amount > 0 && sealValueActions) return authorize(input); // seal value action remotely (allow or observe)
+    return local; // non-value permit — local is sufficient
   }
 
   /** Mode-aware decision used by guardTool: 'local' (default) or 'remote'. */
@@ -358,11 +361,16 @@ export function createGuard(opts = {}) {
       } catch (err) {
         decision = { decision: 'block', reasonCode: 'LOCAL_EVAL_ERROR', error: String(err?.message ?? err) };
       }
-      if (decision.decision !== 'allow') {
+      // allow/observe both PERMIT execution; observe is permit-but-flag (SAFR §11) — the
+      // handler receives the `decision` so a caller can surface/log the observation.
+      if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
         err.name = 'GovernanceBlocked';
         err.governance = decision;
         throw err;
+      }
+      if (decision.decision === 'observe') {
+        console.warn(`[agentsafe] OBSERVE "${action}": ${decision.reasonCode} — permitted under monitoring`);
       }
       return handler(args, decision);
     };
@@ -382,11 +390,16 @@ export function createGuard(opts = {}) {
   function guardTool(action, handler, mapArgs = (a) => a) {
     return async (args) => {
       const decision = await check({ action, ...mapArgs(args) });
-      if (decision.decision !== 'allow') {
+      // allow/observe both PERMIT execution; observe is permit-but-flag (SAFR §11) — the
+      // handler receives the `decision` so a caller can surface/log the observation.
+      if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
         err.name = 'GovernanceBlocked';
         err.governance = decision;
         throw err;
+      }
+      if (decision.decision === 'observe') {
+        console.warn(`[agentsafe] OBSERVE "${action}": ${decision.reasonCode} — permitted under monitoring`);
       }
       return handler(args, decision);
     };
