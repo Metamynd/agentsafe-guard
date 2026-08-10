@@ -46,6 +46,14 @@ export interface Molecule {
   atoms: RuleAtom[];
   decision: FireDecision;
   reasonCode: string;
+  /**
+   * Optional control namespace (SAFR §8) — a FREEFORM classifier tag, e.g.
+   * `safr.exposure` or `metamynd.sop`. policy-core stays framework-agnostic: the tag
+   * is metadata for filtering/stacking/export, never used by the deterministic gate.
+   * The known SAFR/MetaMynd vocabulary + validation live in the magp layer
+   * (features/magp/control-namespaces.ts).
+   */
+  namespace?: string;
 }
 
 /** The enforceable content of a standard (stored in `standard.documentJson`). */
