@@ -22,11 +22,13 @@ import type { EvaluationContext, PolicyDecision } from './types.js';
 export type Combinator = 'all' | 'any' | 'none';
 /**
  * What a molecule fires when satisfied (never 'allow' — non-firing = allow).
+ * 'observe' PERMITS the action but flags it for monitoring (SAFR §11): an author
+ * writes an observe molecule to say "let this through, but record and watch it".
  * 'suspend'/'quarantine' are containment effects: a terminal deny (like 'block')
  * carrying a distinct audit signal so an author can express "contain the agent"
  * rather than just "deny this action".
  */
-export type FireDecision = 'block' | 'escalate' | 'suspend' | 'quarantine';
+export type FireDecision = 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine';
 
 /** An atom: a reference to a code-defined predicate + its config. */
 export interface RuleAtom {
@@ -57,7 +59,7 @@ export interface StandardDocument {
 }
 
 export interface StandardRuleResult {
-  decision: PolicyDecision; // 'allow' | 'block' | 'escalate'
+  decision: PolicyDecision; // 'allow' | 'observe' | 'escalate' | 'block' | 'suspend' | 'quarantine'
   reasonCode: string | null;
   firedMoleculeId: string | null;
   standardKey: string | null;
@@ -66,10 +68,11 @@ export interface StandardRuleResult {
 /**
  * Restrictiveness ordering — higher wins, so evaluation is order-independent.
  * Containment (suspend/quarantine) outranks a plain block, which outranks an
- * escalate, which outranks allow. So the single most-restrictive firing molecule
- * across all bound standards/SOPs determines the verdict.
+ * escalate, which outranks observe (permit-but-flag), which outranks allow. So the
+ * single most-restrictive firing molecule across all bound standards/SOPs
+ * determines the verdict. Keep this identical to evaluate.ts's PRECEDENCE.
  */
-const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, escalate: 1, block: 2, suspend: 3, quarantine: 4 };
+const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5 };
 
 /** Evaluate a single atom. An unknown predicate never fires (validation rejects it at authoring). */
 function atomFires(atom: RuleAtom, ctx: EvaluationContext): boolean {
@@ -204,8 +207,8 @@ export function validateMolecules(molecules: Molecule[] | undefined): { ok: bool
     if (!['all', 'any', 'none'].includes(m.combinator)) {
       issues.push({ moleculeId: m.id, message: `invalid combinator '${m.combinator}' (all|any|none)` });
     }
-    if (!['block', 'escalate', 'suspend', 'quarantine'].includes(m.decision)) {
-      issues.push({ moleculeId: m.id, message: `invalid decision '${m.decision}' (block|escalate|suspend|quarantine)` });
+    if (!['observe', 'block', 'escalate', 'suspend', 'quarantine'].includes(m.decision)) {
+      issues.push({ moleculeId: m.id, message: `invalid decision '${m.decision}' (observe|block|escalate|suspend|quarantine)` });
     }
     if (!m.reasonCode) issues.push({ moleculeId: m.id, message: 'molecule is missing a reasonCode' });
     if (!m.atoms || m.atoms.length === 0) {

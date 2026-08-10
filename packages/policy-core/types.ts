@@ -11,15 +11,20 @@
 /**
  * A policy decision — the same vocabulary the evidence rail records.
  *
- * `allow` is the ONLY value that permits execution; every other value denies it
- * (fail-safe). `escalate` additionally routes to the human-approval queue.
- * `suspend`/`quarantine` are containment effects: a terminal deny that also marks
- * the event as a containment-level signal in the audit trail (distinct from a
- * plain `block`). Wiring them to a persistent agent operating-state lifecycle
- * (deny all further actions until reinstated) is a follow-up — today they deny the
- * action and record the containment intent.
+ * Two values PERMIT execution: `allow` and `observe`. `observe` (SAFR §11) permits
+ * the action but flags it — the gate still records an evidence event and emits
+ * telemetry, so the action is executed under monitoring and available for later
+ * review. It outranks `allow` in the most-restrictive-wins precedence (a flag
+ * survives an otherwise-allow verdict) but is outranked by any deny/escalate (a
+ * human-review or block need always wins over a mere flag).
+ *
+ * Every other value DENIES execution (fail-safe). `escalate` additionally routes to
+ * the human-approval queue. `suspend`/`quarantine` are containment effects: a
+ * terminal deny that also marks the event as a containment-level signal in the audit
+ * trail (distinct from a plain `block`) and drives the agent's containment lifecycle
+ * (deny all further actions until reinstated).
  */
-export type PolicyDecision = 'allow' | 'block' | 'escalate' | 'suspend' | 'quarantine';
+export type PolicyDecision = 'allow' | 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine';
 
 /**
  * The context an action is evaluated against (spec §6.4). It is the union of the

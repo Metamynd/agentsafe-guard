@@ -118,7 +118,7 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
    * locally against the agent's issuer-hosted bundle. Fails CLOSED: any bad
    * signature, staleness, fetch error, or evaluation error returns a block.
    * @param {{agentDid,action,amount?,currency?,merchant?,itinerary?,nonce,issuedAt,signature}} signed
-   * @returns {Promise<{decision:'allow'|'block'|'escalate',reasonCode:string|null}>}
+   * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
   async function verifyRequest(signed = {}) {
     try {
@@ -165,7 +165,9 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         if (!v.ok) return { decision: 'block', reasonCode: v.reasonCode };
       }
       const verdict = verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} });
-      if (verdict.decision === 'allow' && modeGate.decision === 'escalate') {
+      // Mode ESCALATE floor lifts an otherwise-PERMIT (allow or observe) to human review
+      // (escalate outranks observe, so a flag never masks it) — mirrors the backend gate.
+      if ((verdict.decision === 'allow' || verdict.decision === 'observe') && modeGate.decision === 'escalate') {
         return { ...verdict, decision: 'escalate', reasonCode: modeGate.reasonCode };
       }
       return verdict;
@@ -182,11 +184,15 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
   function guardIncomingTool(action, handler) {
     return async (signed, ...rest) => {
       const decision = await verifyRequest({ ...signed, action: signed?.action ?? action });
-      if (decision.decision !== 'allow') {
+      // allow/observe both PERMIT the tool call; observe is permit-but-flag (SAFR §11).
+      if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`MCP guard ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
         err.name = 'GovernanceBlocked';
         err.governance = decision;
         throw err;
+      }
+      if (decision.decision === 'observe') {
+        console.warn(`[mcp-guard] OBSERVE "${action}": ${decision.reasonCode} — served under monitoring`);
       }
       return handler(signed, ...rest);
     };

@@ -47,6 +47,15 @@ const bundle = {
             reasonCode: 'SOP_SPEND_CAP',
           },
           {
+            // OBSERVE (SAFR §11): a mid-value spend is PERMITTED but flagged for
+            // monitoring — outranks allow, but the cap block/quarantine still wins.
+            id: 'watch',
+            combinator: 'any',
+            atoms: [{ id: 'w', predicate: 'amount-over', config: { limit: 200 } }],
+            decision: 'observe',
+            reasonCode: 'WATCH_LARGE',
+          },
+          {
             // Containment (1C): a gross overspend doesn't just block the action,
             // it quarantines the agent. Outranks the plain block above.
             id: 'contain',
@@ -75,6 +84,9 @@ const bundle = {
 
 const cases = [
   { name: 'within cap, allowed merchant, low risk → allow', request: { action: 'flight-purchase', amount: 100, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['allow', 'AUTHORIZED'] },
+  // SAFR §11: a mid-value spend is permitted-but-flagged (observe outranks allow).
+  { name: 'mid-value spend → observe (permit-but-flag, outranks allow)', request: { action: 'flight-purchase', amount: 300, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['observe', 'WATCH_LARGE'] },
+  // observe loses to the SOP cap block at higher amounts (block > observe).
   { name: 'SOP per-transaction cap → block', request: { action: 'flight-purchase', amount: 600, merchant: 'amadeus', context: { riskLevel: 'low' } }, expect: ['block', 'SOP_SPEND_CAP'] },
   { name: 'Standard risk threshold → escalate', request: { action: 'flight-purchase', amount: 100, merchant: 'amadeus', context: { riskLevel: 'high' } }, expect: ['escalate', 'RISK_REVIEW'] },
   { name: 'mandate merchant not allowed → block', request: { action: 'flight-purchase', amount: 100, merchant: 'sabre', context: { riskLevel: 'low' } }, expect: ['block', 'MERCHANT_NOT_ALLOWED'] },
@@ -123,6 +135,28 @@ for (const c of modeCases) {
   const ok = v.decision === c.expect[0] && v.reasonCode === c.expect[1];
   if (!ok) failed++;
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${c.name}  →  ${v.decision}/${v.reasonCode}`);
+}
+
+// SAFR §11: guardToolLocal EXECUTES the wrapped handler on an OBSERVE (permit-but-
+// flag) exactly like an allow — unlike block/escalate, which throw GovernanceBlocked.
+{
+  let ran = false;
+  const wrapped = guard.guardToolLocal('flight-purchase', async () => { ran = true; return 'booked'; }, (a) => a, bundle);
+  const out = await wrapped({ amount: 300, merchant: 'amadeus', context: { riskLevel: 'low' } });
+  const ok = ran === true && out === 'booked';
+  if (!ok) failed++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'}  guardToolLocal EXECUTES the handler on observe (permit-but-flag)  →  ran=${ran}`);
+}
+
+// And it still THROWS on a block (the cap), never executing the handler.
+{
+  let ran = false;
+  const wrapped = guard.guardToolLocal('flight-purchase', async () => { ran = true; return 'booked'; }, (a) => a, bundle);
+  let threw = false;
+  try { await wrapped({ amount: 600, merchant: 'amadeus', context: { riskLevel: 'low' } }); } catch (e) { threw = e?.name === 'GovernanceBlocked'; }
+  const ok = threw === true && ran === false;
+  if (!ok) failed++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'}  guardToolLocal THROWS on block, handler never runs  →  threw=${threw} ran=${ran}`);
 }
 
 if (failed) {
