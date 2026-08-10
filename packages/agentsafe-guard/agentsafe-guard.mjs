@@ -87,11 +87,13 @@ export function createGuard(opts = {}) {
    * agent's authorization trustlessly against the agent's policy bundle (§9.3). Same shape
    * `authorize()` posts to the gate; a fresh nonce each call.
    */
-  function buildSignedRequest({ action, amount = 0, currency = 'USD', merchant = '', context = {} }) {
+  function buildSignedRequest({ action, amount = 0, currency = 'USD', merchant = '', context = {}, trace, materiality }) {
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
     const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, nonce, issuedAt });
-    return { agentDid, action, amount, currency, merchant, itinerary: context, nonce, issuedAt, signature: sign(message) };
+    // trace/materiality are GovernanceEnvelope fields (SAFR §5) — unsigned metadata; the
+    // signed message stays the action subset, so verification is unchanged.
+    return { agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt, signature: sign(message) };
   }
 
   /**
@@ -99,7 +101,7 @@ export function createGuard(opts = {}) {
    * returns { decision:'allow'|'block'|'escalate', reasonCode, authorizationId, remaining }.
    * A network/gate failure returns a fail-CLOSED block so the agent can't proceed blind.
    */
-  async function authorize({ action, amount = 0, currency = 'USD', merchant = '', context = {} }) {
+  async function authorize({ action, amount = 0, currency = 'USD', merchant = '', context = {}, trace, materiality }) {
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
     // Build the canonical signed message with policy-core so the guard and the
@@ -109,7 +111,9 @@ export function createGuard(opts = {}) {
       const res = await fetch(`${base}/policy/mandate/authorize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentDid, action, amount, currency, merchant, itinerary: context, nonce, issuedAt, signature: sign(message) }),
+        // trace/materiality (SAFR §5 envelope) ride as unsigned metadata; JSON.stringify
+        // drops them when undefined, so an agent that omits them sends the legacy body.
+        body: JSON.stringify({ agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt, signature: sign(message) }),
       });
       const body = await res.json().catch(() => null);
       return body?.data ?? { decision: 'block', reasonCode: `GATE_HTTP_${res.status}` };
