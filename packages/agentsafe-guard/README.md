@@ -217,6 +217,30 @@ Or wrap a tool to gate it against a local bundle (fails closed like `guardTool`)
 const gated = guard.guardToolLocal('flight-purchase', bookFlight, mapArgs, { standards, sops, mandate });
 ```
 
+### Execution adapters (dry-run / sandbox) — SAFR §19
+
+By default a permitted (`allow`/`observe`) tool runs its real handler. An **ExecutionAdapter**
+interposes between the verdict and the side-effect, so the *same* governed decision can be run
+live, **simulated (dry-run)**, or routed to a sandbox — without changing the handler or the gate.
+A blocked/escalated action still throws `GovernanceBlocked` before any adapter is consulted.
+
+```js
+import { dryRunExecutionAdapter } from '@metamynd/agentsafe-guard';
+
+// Guard-wide (or set AGENTSAFE_EXECUTION_MODE=dry-run):
+const guard = createGuard({ api, agentDid, agentKey, executionAdapter: dryRunExecutionAdapter });
+
+// …or per tool (overrides the guard default):
+const preview = guard.guardTool('flight-purchase', bookFlight, mapArgs, { executionAdapter: dryRunExecutionAdapter });
+await preview({ amount: 100 }); // → { dryRun: true, action, decision, authorizationId, args } — bookFlight NEVER runs
+
+// Custom adapter: run the real handler, or substitute it. `proceed()` invokes handler(args, decision).
+const sandboxed = (ctx) => ctx.action === 'flight-purchase' ? sandboxBook(ctx.args) : ctx.proceed();
+```
+
+Contract: `async ({ action, args, decision, proceed }) => result`. Call `proceed()` to execute for
+real; return without it to substitute the side-effect. Self-check: `node execution-adapter.smoke.mjs`.
+
 Signed request fields (`amount`, `merchant`) are always applied over the unsigned `context`, so a
 forged context key can never shadow them (MAGP §6.4.2). Run the self-check:
 
