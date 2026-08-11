@@ -51,6 +51,12 @@ export interface EvaluationContext {
   tool?: string | null; // the tool/function the agent is invoking
   piiPresent?: boolean; // caller-flagged: the action involves PII
   callCount?: number; // rolling call count for rate limiting
+  // Evidence-quality context (SAFR §24) — the agent ATTESTS to the evidence backing this action.
+  // `evidenceTypes` = the kinds of evidence gathered (e.g. 'kyc', 'source-doc', 'signature');
+  // `evidenceConfidence` = a 0–1 confidence in that evidence. Read by the evidence-requirement /
+  // evidence-confidence-below atoms so a rule can escalate an under-evidenced action.
+  evidenceTypes?: string[];
+  evidenceConfidence?: number;
   [key: string]: unknown;
 }
 
