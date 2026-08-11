@@ -15,6 +15,48 @@ import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
 
 /**
+ * ExecutionAdapter (SAFR §19, Phase-4 PR-4) — the seam between a PERMITTING verdict
+ * (allow / observe) and the real side-effect. Before this, a guarded tool called its
+ * handler directly, so the only outcomes were "execute for real" or "throw". An adapter
+ * interposes so the SAME governed decision can be run live, SIMULATED (dry-run), or routed
+ * to a sandbox — without touching the tool handler or the gate.
+ *
+ * Contract: `async (execCtx) => result`, where
+ *   execCtx = { action, args, decision, proceed }
+ *   proceed() runs the real handler (handler(args, decision)) and returns its result.
+ * An adapter that calls `proceed()` executes for real; one that returns WITHOUT calling it
+ * substitutes the side-effect. Adapters run ONLY after the guard has permitted the action —
+ * a block/escalate still throws GovernanceBlocked before any adapter is consulted.
+ */
+
+/** The default: execute the real handler unchanged. */
+export const liveExecutionAdapter = (ctx) => ctx.proceed();
+
+/**
+ * Simulate the side-effect: do NOT call the handler, return a describe-only result. Lets an
+ * agent exercise a fully-governed flow (identity → mandate → controls → verdict) with no real
+ * booking/payment/write — for staging, canaries, and OBSERVE-mode dry-runs.
+ */
+export const dryRunExecutionAdapter = (ctx) => ({
+  dryRun: true,
+  action: ctx.action,
+  decision: ctx.decision?.decision ?? null,
+  reasonCode: ctx.decision?.reasonCode ?? null,
+  authorizationId: ctx.decision?.authorizationId ?? null,
+  args: ctx.args,
+});
+
+/**
+ * Process-default adapter from `AGENTSAFE_EXECUTION_MODE` ('live' | 'dry-run'). Returns null
+ * when unset/live so the caller's own default (live) applies — behavior-neutral by default.
+ */
+export function executionAdapterFromEnv(env = (typeof process !== 'undefined' ? process.env : {})) {
+  const mode = String(env.AGENTSAFE_EXECUTION_MODE ?? '').toLowerCase().trim();
+  if (mode === 'dry-run' || mode === 'dryrun') return dryRunExecutionAdapter;
+  return null;
+}
+
+/**
  * @param {{ api: string, agentDid: string, agentKey: string }} cfg
  *   api      e.g. "http://localhost:9926/api/v1" or "https://metamynd.ai/api/v1"
  *   agentDid the agent's did:hedera
@@ -48,6 +90,9 @@ export function createGuard(opts = {}) {
   const agentKey = opts.agentKey ?? cfg?.agentKey;
   if (!api || !agentDid || !agentKey) throw new Error('createGuard requires { api, agentDid, agentKey } — directly, or via { config } / { configPath } / createGuardFromConfig()');
   const base = api.replace(/\/$/, '');
+  // ExecutionAdapter seam (SAFR §19): an explicit opt wins, else the AGENTSAFE_EXECUTION_MODE env,
+  // else live. Applies to every guarded tool unless a tool passes its own adapter.
+  const defaultExecutionAdapter = opts.executionAdapter ?? executionAdapterFromEnv() ?? liveExecutionAdapter;
   const privateKey = crypto.createPrivateKey({ key: Buffer.from(agentKey, 'hex'), format: 'der', type: 'pkcs8' });
 
   // Ed25519 over the exact canonical message the backend verifies.
@@ -355,7 +400,8 @@ export function createGuard(opts = {}) {
    * @param {(args:any)=>{amount?:number,merchant?:string,context?:object}} mapArgs
    * @param {object|((args:any)=>object|Promise<object>)} getBundle  { standards, sops, mandate } (or a resolver)
    */
-  function guardToolLocal(action, handler, mapArgs = (a) => a, getBundle = {}) {
+  function guardToolLocal(action, handler, mapArgs = (a) => a, getBundle = {}, toolOpts = {}) {
+    const adapter = toolOpts.executionAdapter ?? defaultExecutionAdapter;
     return async (args) => {
       let decision;
       try {
@@ -376,7 +422,8 @@ export function createGuard(opts = {}) {
       if (decision.decision === 'observe') {
         console.warn(`[agentsafe] OBSERVE "${action}": ${decision.reasonCode} — permitted under monitoring`);
       }
-      return handler(args, decision);
+      // ExecutionAdapter seam (§19): the adapter runs the real handler (proceed) or substitutes it.
+      return adapter({ action, args, decision, proceed: () => handler(args, decision) });
     };
   }
 
@@ -391,7 +438,8 @@ export function createGuard(opts = {}) {
    * @param {(args:any)=>{amount?:number,currency?:string,merchant?:string,context?:object}} mapArgs
    *   maps the tool's call args to the gate inputs (amount/merchant + the context the rules need)
    */
-  function guardTool(action, handler, mapArgs = (a) => a) {
+  function guardTool(action, handler, mapArgs = (a) => a, toolOpts = {}) {
+    const adapter = toolOpts.executionAdapter ?? defaultExecutionAdapter;
     return async (args) => {
       const decision = await check({ action, ...mapArgs(args) });
       // allow/observe both PERMIT execution; observe is permit-but-flag (SAFR §11) — the
@@ -405,7 +453,8 @@ export function createGuard(opts = {}) {
       if (decision.decision === 'observe') {
         console.warn(`[agentsafe] OBSERVE "${action}": ${decision.reasonCode} — permitted under monitoring`);
       }
-      return handler(args, decision);
+      // ExecutionAdapter seam (§19): the adapter runs the real handler (proceed) or substitutes it.
+      return adapter({ action, args, decision, proceed: () => handler(args, decision) });
     };
   }
 
@@ -553,5 +602,5 @@ export function createGuard(opts = {}) {
     return sign(challenge);
   }
 
-  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid };
+  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid, executionAdapter: defaultExecutionAdapter };
 }
