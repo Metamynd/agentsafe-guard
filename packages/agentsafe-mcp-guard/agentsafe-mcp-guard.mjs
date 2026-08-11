@@ -31,7 +31,7 @@ const FRESHNESS_MS = 5 * 60 * 1000;
  *   §5.3.2/§5.3.3) and fails closed for value-bearing actions on an unsigned/tampered/stale bundle —
  *   so per-request enforcement needs no live MetaMynd. Omit for the legacy hash-addressed + TLS mode.
  */
-export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   const privateKey = serviceKey
@@ -191,6 +191,22 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         err.governance = decision;
         throw err;
       }
+      // Commitment-bound capability (decision token, §7.7/§20, Phase-4 PR-5). When the request
+      // carries a signed capability AND a verifier is configured, the token must authorize THIS
+      // exact transaction — the host reconstructs the tx + verifies MetaMynd's signature OFFLINE,
+      // so "authorize $150, execute $5,000" (authorize-A / execute-B) is rejected HERE, in the
+      // prod guard, not just the demo gateway. No verifier configured → unchanged (opt-in).
+      if (signed?.capability && typeof verifyCapability === 'function') {
+        let bind;
+        try { bind = await verifyCapability(signed); }
+        catch (err) { bind = { ok: false, reasonCode: 'CAPABILITY_CHECK_ERROR', error: String(err?.message ?? err) }; }
+        if (!bind?.ok) {
+          const err = new Error(`MCP guard CAPABILITY "${action}": ${bind?.reasonCode ?? 'CAPABILITY_INVALID'}`);
+          err.name = 'GovernanceBlocked';
+          err.governance = { decision: 'block', reasonCode: bind?.reasonCode ?? 'CAPABILITY_INVALID' };
+          throw err;
+        }
+      }
       if (decision.decision === 'observe') {
         console.warn(`[mcp-guard] OBSERVE "${action}": ${decision.reasonCode} — served under monitoring`);
       }
@@ -200,7 +216,18 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
 
   // --- x402 payment binding (spec §7a). MAGP authorizes; x402 moves the money;
   //     this binds a settlement to exactly one authorization. No custody (§7a.5). ---
-  const settledAuthIds = new Set();
+  // Durable anti-reuse (Phase-4 PR-5): a `settlementStore` may be injected to persist the
+  // "one settlement per authorization" invariant across instances + restarts (SAFR §34) —
+  // e.g. one backed by POST /magp/settlement/{reserve,finalize,release}. The DEFAULT keeps the
+  // original in-process behaviour so existing embeds are unchanged; it is single-instance only.
+  const store = settlementStore ?? (() => {
+    const claimed = new Set();
+    return {
+      async reserve(id) { if (claimed.has(id)) return { ok: false, reasonCode: 'SETTLEMENT_REUSED' }; claimed.add(id); return { ok: true }; },
+      async release(id) { claimed.delete(id); },
+      async finalize() { /* the id stays claimed */ },
+    };
+  })();
 
   /**
    * Build the 402 PaymentRequirements bound to a MAGP authorization (§7a.2). The
@@ -222,16 +249,24 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
   async function settle({ requirements, authorizationId, paidAmountMinor, xPayment, settleFn } = {}) {
     const binding = checkSettlementBinding(requirements, { authorizationId, paidAmountMinor });
     if (!binding.ok) return { settled: false, reasonCode: binding.reasonCode };
-    if (settledAuthIds.has(authorizationId)) return { settled: false, reasonCode: 'SETTLEMENT_REUSED' };
     if (typeof settleFn !== 'function') return { settled: false, reasonCode: 'NO_FACILITATOR' };
+    // ATOMICALLY claim the authorization BEFORE settling (closes the check-then-settle race that
+    // the old in-memory Set had: two concurrent settles could both pass a read-only check). A
+    // durable store makes this correct across instances/restarts.
+    const reserved = await store.reserve(authorizationId);
+    if (!reserved?.ok) return { settled: false, reasonCode: reserved?.reasonCode ?? 'SETTLEMENT_REUSED' };
     let result;
     try {
       result = await settleFn({ requirements, authorizationId, paidAmountMinor, xPayment });
     } catch (err) {
+      await store.release(authorizationId); // settle threw → free the claim so a legit retry works
       return { settled: false, reasonCode: 'SETTLEMENT_FAILED', error: String(err?.message ?? err) };
     }
-    if (!result?.settled || !result?.txHash) return { settled: false, reasonCode: 'SETTLEMENT_FAILED' };
-    settledAuthIds.add(authorizationId); // this authorization is now spent — cannot settle again
+    if (!result?.settled || !result?.txHash) {
+      await store.release(authorizationId); // facilitator declined → free the claim
+      return { settled: false, reasonCode: 'SETTLEMENT_FAILED' };
+    }
+    await store.finalize?.(authorizationId, { txHash: result.txHash, amountMinor: paidAmountMinor });
     return { settled: true, txHash: result.txHash, reasonCode: 'SETTLED' };
   }
 
