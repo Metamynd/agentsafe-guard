@@ -31,6 +31,25 @@ ${c.output ?? ""}`.toLowerCase();
   "tool-not-allowed": (c, cfg) => notInAllowList(c.tool, cfg?.allowed),
   "pii-present": (c) => c.piiPresent === true,
   "rate-limit-exceeded": (c, cfg) => typeof c.callCount === "number" && c.callCount > Number(cfg?.max ?? 0),
+  // --- Evidence-quality atoms (SAFR §24). Unlike the allow-list atoms, these fire on ABSENCE:
+  //     a REQUIRE semantic — "the action must be backed by this evidence; if it isn't, fire"
+  //     (author with escalate/block). Opt-in: they only run when a rule keys them. ---
+  // Fires when any REQUIRED evidence type is not among the attested `evidenceTypes` (missing
+  // evidence — including none supplied at all → all required missing → fires).
+  "evidence-requirement": (c, cfg) => {
+    const required = (cfg?.required ?? []).map((t) => String(t).toLowerCase().trim()).filter(Boolean);
+    if (required.length === 0) return false;
+    const have = new Set((Array.isArray(c.evidenceTypes) ? c.evidenceTypes : []).map((t) => String(t).toLowerCase().trim()));
+    return required.some((r) => !have.has(r));
+  },
+  // Fires when a required minimum confidence (min > 0) is not met — the attested confidence is
+  // below it, or absent (a required confidence that was never supplied fails the bar). A min of
+  // 0 / unset is no requirement and never fires.
+  "evidence-confidence-below": (c, cfg) => {
+    const min = Number(cfg?.min ?? 0);
+    if (!(min > 0)) return false;
+    return typeof c.evidenceConfidence !== "number" || c.evidenceConfidence < min;
+  },
   // Trust guidance (MetaMynd Trust Index / HCS-28). Fires when the counterparty's trust score is
   // below a soft REVIEW line — intended to author an ESCALATE (route to a human), NOT a hard block.
   // The score is server-derived (signed-last) so the agent's itinerary can't fake it; when no score
@@ -145,6 +164,20 @@ var ATOM_SPECS = [
     description: "Routes to human review when the counterparty's MetaMynd Trust Index (HCS-28) score is below a soft review line. Guidance, not a hard block \u2014 author it with an ESCALATE decision. The score is resolved server-side; no counterparty score \u2192 the atom does not fire.",
     config: [{ key: "reviewBelow", type: "number", required: true, description: "Trust score (0\u2013100) below which a human is asked to decide" }],
     requiredContext: ["holTrustScore"]
+  },
+  {
+    predicate: "evidence-requirement",
+    label: "Required evidence missing",
+    description: "Fires when the action is not backed by every REQUIRED evidence type the agent attests to in `evidenceTypes` (missing evidence \u2014 including none supplied). A REQUIRE control (SAFR \xA724): author it with ESCALATE or BLOCK so an under-evidenced action is stopped or reviewed.",
+    config: [{ key: "required", type: "string[]", required: true, description: "Evidence types that must all be present (e.g. kyc, source-doc, signature)" }],
+    requiredContext: ["evidenceTypes"]
+  },
+  {
+    predicate: "evidence-confidence-below",
+    label: "Evidence confidence below minimum",
+    description: "Fires when the attested evidence confidence is below a required minimum \u2014 or absent (SAFR \xA724). A min of 0 / unset is no requirement. Author with ESCALATE to route low-confidence actions to review.",
+    config: [{ key: "min", type: "number", required: true, description: "Minimum evidence confidence (0\u20131) required" }],
+    requiredContext: ["evidenceConfidence"]
   }
 ];
 var CATALOGUED_ATOMS = ATOM_SPECS.filter((s) => !!ATOM_REGISTRY[s.predicate]);

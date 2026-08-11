@@ -184,3 +184,31 @@ describe('validateMolecules', () => {
     expect(r.issues.some((i) => /reasonCode/.test(i.message))).toBe(true);
   });
 });
+
+// Evidence-quality controls end-to-end through the rule engine (SAFR §24, Phase-4 PR-3):
+// an author composes the evidence atoms into a molecule that ESCALATES an under-evidenced action.
+describe('evidence-quality molecule (SAFR §24)', () => {
+  const evidenceMolecule: Molecule = {
+    id: 'evidence-gate',
+    combinator: 'any', // escalate if evidence is missing OR confidence is low
+    atoms: [
+      { id: 'req', predicate: 'evidence-requirement', config: { required: ['kyc'] } },
+      { id: 'conf', predicate: 'evidence-confidence-below', config: { min: 0.8 } },
+    ],
+    decision: 'escalate',
+    reasonCode: 'EVIDENCE_INSUFFICIENT',
+  };
+
+  it('escalates a well-formed action that lacks the required evidence', () => {
+    const r = evaluateStandardRules([evidenceMolecule], ctx({ evidenceTypes: [], evidenceConfidence: 0.9 }));
+    expect(r).toMatchObject({ decision: 'escalate', reasonCode: 'EVIDENCE_INSUFFICIENT' });
+  });
+  it('escalates when confidence is below the bar even with the evidence present', () => {
+    const r = evaluateStandardRules([evidenceMolecule], ctx({ evidenceTypes: ['kyc'], evidenceConfidence: 0.5 }));
+    expect(r.decision).toBe('escalate');
+  });
+  it('allows a fully-evidenced, high-confidence action', () => {
+    const r = evaluateStandardRules([evidenceMolecule], ctx({ evidenceTypes: ['kyc'], evidenceConfidence: 0.95 }));
+    expect(r.decision).toBe('allow');
+  });
+});

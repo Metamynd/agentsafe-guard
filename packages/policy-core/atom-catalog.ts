@@ -133,6 +133,25 @@ export const ATOM_SPECS: AtomSpec[] = [
     config: [{ key: 'reviewBelow', type: 'number', required: true, description: 'Trust score (0–100) below which a human is asked to decide' }],
     requiredContext: ['holTrustScore'],
   },
+  {
+    predicate: 'evidence-requirement',
+    label: 'Required evidence missing',
+    description:
+      'Fires when the action is not backed by every REQUIRED evidence type the agent attests to in ' +
+      '`evidenceTypes` (missing evidence — including none supplied). A REQUIRE control (SAFR §24): ' +
+      'author it with ESCALATE or BLOCK so an under-evidenced action is stopped or reviewed.',
+    config: [{ key: 'required', type: 'string[]', required: true, description: 'Evidence types that must all be present (e.g. kyc, source-doc, signature)' }],
+    requiredContext: ['evidenceTypes'],
+  },
+  {
+    predicate: 'evidence-confidence-below',
+    label: 'Evidence confidence below minimum',
+    description:
+      'Fires when the attested evidence confidence is below a required minimum — or absent (SAFR §24). ' +
+      'A min of 0 / unset is no requirement. Author with ESCALATE to route low-confidence actions to review.',
+    config: [{ key: 'min', type: 'number', required: true, description: 'Minimum evidence confidence (0–1) required' }],
+    requiredContext: ['evidenceConfidence'],
+  },
 ];
 
 /** All atom predicates that have both an executable implementation AND a spec (the publishable set). */

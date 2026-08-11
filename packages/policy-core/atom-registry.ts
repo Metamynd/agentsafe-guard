@@ -41,6 +41,25 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
   'tool-not-allowed': (c, cfg) => notInAllowList(c.tool, cfg?.allowed),
   'pii-present': (c) => c.piiPresent === true,
   'rate-limit-exceeded': (c, cfg) => typeof c.callCount === 'number' && c.callCount > Number(cfg?.max ?? 0),
+  // --- Evidence-quality atoms (SAFR §24). Unlike the allow-list atoms, these fire on ABSENCE:
+  //     a REQUIRE semantic — "the action must be backed by this evidence; if it isn't, fire"
+  //     (author with escalate/block). Opt-in: they only run when a rule keys them. ---
+  // Fires when any REQUIRED evidence type is not among the attested `evidenceTypes` (missing
+  // evidence — including none supplied at all → all required missing → fires).
+  'evidence-requirement': (c, cfg) => {
+    const required = ((cfg?.required as string[]) ?? []).map((t) => String(t).toLowerCase().trim()).filter(Boolean);
+    if (required.length === 0) return false; // nothing required → nothing to enforce
+    const have = new Set((Array.isArray(c.evidenceTypes) ? c.evidenceTypes : []).map((t) => String(t).toLowerCase().trim()));
+    return required.some((r) => !have.has(r));
+  },
+  // Fires when a required minimum confidence (min > 0) is not met — the attested confidence is
+  // below it, or absent (a required confidence that was never supplied fails the bar). A min of
+  // 0 / unset is no requirement and never fires.
+  'evidence-confidence-below': (c, cfg) => {
+    const min = Number(cfg?.min ?? 0);
+    if (!(min > 0)) return false;
+    return typeof c.evidenceConfidence !== 'number' || c.evidenceConfidence < min;
+  },
   // Trust guidance (MetaMynd Trust Index / HCS-28). Fires when the counterparty's trust score is
   // below a soft REVIEW line — intended to author an ESCALATE (route to a human), NOT a hard block.
   // The score is server-derived (signed-last) so the agent's itinerary can't fake it; when no score
