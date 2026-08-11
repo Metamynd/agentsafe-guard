@@ -109,6 +109,26 @@ settle — all fail-closed. `requirePayment` / `settle` don't move money; the in
 does. On the agent side, `guard.preparePayment(requirements, authorizationId)` refuses an
 **unbound** 402 and one whose authorization doesn't match the agent's own hold.
 
+**Durable anti-reuse (SAFR §34).** By default `settle` tracks settled ids in-process (single
+instance). For HA, inject a `settlementStore` that persists the claim — e.g. one backed by
+`POST /magp/settlement/{reserve,finalize,release}` — so "one settlement per authorization" holds
+across instances + restarts. `settle` **reserves before settling** (atomic claim) and **releases**
+a claim whose settlement failed, so a legitimate retry can proceed:
+
+```js
+const guard = createMcpGuard({ serviceDid, settlementStore: {
+  reserve:  (id) => post('/magp/settlement/reserve',  { authorizationId: id }).then(r => ({ ok: r.reserved, reasonCode: r.reasonCode })),
+  release:  (id) => post('/magp/settlement/release',  { authorizationId: id }),
+  finalize: (id, { txHash, amountMinor }) => post('/magp/settlement/finalize', { authorizationId: id, txHash, amountMinor }),
+}});
+```
+
+**Commitment-bound capability (decision token, §7.7/§20).** Inject `verifyCapability(signed)` and,
+when a request carries a signed capability, `guardIncomingTool` requires it to authorize **this exact
+transaction** — the host reconstructs the tx and verifies MetaMynd's signature offline (via
+`checkCapabilityBinding` from `magp-bind`), so "authorize $150, execute $5,000" is rejected in the
+prod guard, not just the demo gateway. No verifier configured → opt-in (unchanged).
+
 Holds carry an expiry (§7a.4): if not captured, the reservation auto-voids and the budget returns
 to the cap; a party can also void explicitly via `POST /policy/mandate/authorize/:id/void`.
 
