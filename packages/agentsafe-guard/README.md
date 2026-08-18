@@ -15,6 +15,22 @@ compliance team edits in the dashboard, changeable live with no redeploy.
   `policy-core` the gate runs (MAGP §9.2 cooperative mode) — identical inputs give the identical
   verdict, with no network round-trip. See §4.
 
+## Try it first — no account, no network
+
+```bash
+npx @metamynd/agentsafe-guard demo
+```
+
+Runs the policy engine in-process against a sample bundle and prints the verdict for a
+dozen tool calls — allow, observe, block, escalate, quarantine — including the ones that
+matter most: an agent that lies about its own spend in unsigned context, and a quarantined
+agent refused before any rule is read. It mints an ephemeral key, never opens a socket, and
+needs nothing from MetaMynd. Exits non-zero if any verdict disagrees with the policy, so
+it doubles as a smoke test of the installed package.
+
+You need an account only for what can't be enforced client-side: live policy edits,
+cumulative spend caps, human escalation, and anchored evidence.
+
 ## Install
 
 ```bash
