@@ -15,6 +15,26 @@ import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
 
 /**
+ * Replay a Merkle sibling chain and report whether it reconstructs `root`.
+ *
+ * Byte-identical to backend/src/features/magp/merkle.ts: leaves and siblings are hex
+ * sha256 digests, and an internal node is sha256 over the CONCATENATED RAW BYTES of its
+ * children (not the hex text), in left-then-right order. Hashing the hex strings instead
+ * would produce a self-consistent but incompatible tree — one that verified nothing the
+ * backend ever anchored, while appearing to work.
+ */
+function verifyMerkleInclusion(leaf, proof, root) {
+  const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+  const hashNodes = (a, b) => sha(Buffer.concat([Buffer.from(a, 'hex'), Buffer.from(b, 'hex')]));
+  let computed = leaf;
+  for (const step of proof) {
+    if (!step || typeof step.sibling !== 'string') return false;
+    computed = step.position === 'left' ? hashNodes(step.sibling, computed) : hashNodes(computed, step.sibling);
+  }
+  return computed === root;
+}
+
+/**
  * ExecutionAdapter (SAFR §19, Phase-4 PR-4) — the seam between a PERMITTING verdict
  * (allow / observe) and the real side-effect. Before this, a guarded tool called its
  * handler directly, so the only outcomes were "execute for real" or "throw". An adapter
@@ -539,6 +559,71 @@ export function createGuard(opts = {}) {
   }
 
   /**
+   * Merkle inclusion proof for a decision's evidence record — fetched, then VERIFIED
+   * HERE rather than taken on trust.
+   *
+   * The point of an inclusion proof is that its holder can check it WITHOUT trusting the
+   * party that issued it. A helper that returned the server's payload as-is would look
+   * like proof and function as assertion: the caller would be believing MetaMynd's claim
+   * that the record is in the anchored batch, which is exactly the thing the proof exists
+   * to make unnecessary. So the sibling chain is replayed locally and the recomputed root
+   * is compared to the anchored one; `verified` is this SDK's own conclusion.
+   *
+   * Absence and falsification are reported as DIFFERENT outcomes, because they mean
+   * opposite things to whoever is asking:
+   *
+   *   status 'verified'    the record is provably in the batch anchored at anchorTxId
+   *   status 'pending'     no anchored batch contains it YET — anchoring is asynchronous
+   *                        (§10.2), so a recent decision is normally pending, not missing
+   *   status 'failed'      a proof was returned and it does NOT reconstruct the root.
+   *                        This is the alarming one and must never be conflated with
+   *                        'pending'
+   *   status 'unreachable' the gate could not be asked; nothing is implied either way
+   *
+   * Note the trust boundary this does NOT cross: it proves the record belongs to the
+   * batch that claims `root`. Proving that root was published on Hedera is a separate,
+   * stronger check against the mirror node — see integrations/magp-evidence/, the offline
+   * auditor, which does it with MetaMynd entirely absent.
+   */
+  async function proof(eventId) {
+    if (!eventId) throw new Error('proof requires the evidence eventId');
+    let body;
+    let httpStatus;
+    try {
+      const res = await fetch(`${base}/magp/evidence/${encodeURIComponent(eventId)}/proof`);
+      httpStatus = res.status;
+      body = await res.json().catch(() => null);
+    } catch (err) {
+      return { status: 'unreachable', verified: false, eventId, reason: 'GATE_UNREACHABLE', error: String(err?.message ?? err) };
+    }
+
+    if (httpStatus === 404) {
+      // Not an error: batching is asynchronous, so a decision made seconds ago has
+      // genuinely not been anchored yet. Saying "unverified" here would read as doubt
+      // about a record that is simply young.
+      return { status: 'pending', verified: false, eventId, reason: 'NOT_YET_ANCHORED' };
+    }
+    const data = body?.data;
+    if (!data?.leaf || !data?.root || !Array.isArray(data?.proof)) {
+      return { status: 'unreachable', verified: false, eventId, reason: `GATE_HTTP_${httpStatus}` };
+    }
+
+    const verified = verifyMerkleInclusion(data.leaf, data.proof, data.root);
+    return {
+      status: verified ? 'verified' : 'failed',
+      verified,
+      eventId,
+      leaf: data.leaf,
+      root: data.root,
+      proof: data.proof,
+      anchorTxId: data.anchorTxId ?? null,
+      anchorRef: data.anchorRef ?? null,
+      anchoredAt: data.anchoredAt ?? null,
+      ...(verified ? {} : { reason: 'MERKLE_ROOT_MISMATCH' }),
+    };
+  }
+
+  /**
    * Effect-safety runtime (E2): report the external-effect lifecycle so an AMBIGUOUS
    * connector outcome never becomes a blind capture/void. Call effectDispatching() just
    * before the side-effecting call, effectDispatched() when the connector accepts, and —
@@ -602,5 +687,5 @@ export function createGuard(opts = {}) {
     return sign(challenge);
   }
 
-  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid, executionAdapter: defaultExecutionAdapter };
+  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, proof, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid, executionAdapter: defaultExecutionAdapter };
 }
