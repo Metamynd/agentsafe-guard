@@ -21,7 +21,7 @@ This guard is one implementation of an open specification. You do not have to us
 protocol is published so you can implement it yourself, verify a verdict independently, or
 re-implement the gate:
 
-**[MAGP v1.0 — MetaMynd Agentic Governance Protocol](https://metamynd.ai/specs/magp-v1.0.html)**
+**[MAGP v1.0 — MetaMynd Agentic Governance Protocol](https://metamynd.ai/en/developers/spec)**
 ([markdown](https://metamynd.ai/specs/magp-v1.0.md))
 
 It defines agent identity, the canonical signed message (§8.3), the sixteen-stage order of
