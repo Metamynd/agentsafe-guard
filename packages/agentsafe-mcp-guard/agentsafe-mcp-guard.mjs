@@ -56,7 +56,7 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
     const handshakeId = crypto.randomUUID();
     const nonceB = crypto.randomUUID();
     pending.set(handshakeId, { fromDid, nonceB, expiresAt: Date.now() + FRESHNESS_MS });
-    return { handshakeId, toDid: serviceDid, nonceB, sigB: sign(nonceA), protoVersion: protoVersion ?? '0.4' };
+    return { handshakeId, toDid: serviceDid, nonceB, sigB: sign(nonceA), protoVersion: protoVersion ?? '1.0' };
   }
 
   /** Step 2 (B): on PROVE, verify sigA over nonceB against fromDid's key-in-DID. */
@@ -286,7 +286,7 @@ export function createHandshakeInitiator({ fromDid, sign } = {}) {
     /** Step 0 (A): build HELLO; keep nonceA to bind the responder's CHALLENGE. */
     hello() {
       const nonceA = crypto.randomUUID();
-      return { nonceA, message: { fromDid, nonceA, protoVersion: '0.4' } };
+      return { nonceA, message: { fromDid, nonceA, protoVersion: '1.0' } };
     },
     /** Step 3 (A): verify CHALLENGE proves the responder controls toDid, then PROVE. */
     prove({ nonceA, challenge } = {}) {

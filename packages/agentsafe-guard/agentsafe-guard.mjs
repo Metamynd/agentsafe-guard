@@ -491,7 +491,7 @@ export function createGuard(opts = {}) {
     return {
       hello() {
         const nonceA = crypto.randomUUID();
-        return { nonceA, message: { fromDid: agentDid, nonceA, protoVersion: '0.4' } };
+        return { nonceA, message: { fromDid: agentDid, nonceA, protoVersion: '1.0' } };
       },
       prove({ nonceA, challenge } = {}) {
         const { toDid, nonceB, sigB, handshakeId } = challenge ?? {};
