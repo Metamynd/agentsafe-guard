@@ -15,6 +15,21 @@ compliance team edits in the dashboard, changeable live with no redeploy.
   `policy-core` the gate runs (MAGP §9.2 cooperative mode) — identical inputs give the identical
   verdict, with no network round-trip. See §4.
 
+## The protocol
+
+This guard is one implementation of an open specification. You do not have to use it — the
+protocol is published so you can implement it yourself, verify a verdict independently, or
+re-implement the gate:
+
+**[MAGP v1.0 — MetaMynd Agentic Governance Protocol](https://metamynd.ai/specs/magp-v1.0.html)**
+([markdown](https://metamynd.ai/specs/magp-v1.0.md))
+
+It defines agent identity, the canonical signed message (§8.3), the sixteen-stage order of
+checks (§8.5), all 59 reason codes (Appendix A), delegation narrowing (§5.4), and evidence
+you can verify offline without MetaMynd (§13.4). If you are writing a client in a language
+other than JavaScript, read §8.3.3–8.3.5 first: key encoding, number stringification and
+signed-vs-sent field identity each surface only as `SIGNATURE_INVALID`.
+
 ## Try it first — no account, no network
 
 ```bash
