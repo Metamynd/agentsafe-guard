@@ -1,0 +1,58 @@
+{
+  "name": "@metamynd/agentsafe-mcp-guard",
+  "version": "0.1.0",
+  "description": "Zero-dependency trustless governance for the SERVICE side. An MCP server or API re-verifies a calling agent's signed request against the agent's own published policy — so an agent that ignores its own guard still cannot make your service act.",
+  "type": "module",
+  "main": "./agentsafe-mcp-guard.mjs",
+  "module": "./agentsafe-mcp-guard.mjs",
+  "exports": {
+    ".": "./agentsafe-mcp-guard.mjs",
+    "./policy": "./magp-policy.mjs",
+    "./policy-core": "./policy-core.mjs",
+    "./did": "./magp-did.mjs",
+    "./x402": "./x402.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "agentsafe-mcp-guard.mjs",
+    "magp-policy.mjs",
+    "magp-did.mjs",
+    "policy-core.mjs",
+    "x402.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node mcp-guard.smoke.mjs && node pay.smoke.mjs && node decision-token.smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "agent",
+    "agents",
+    "governance",
+    "authorization",
+    "trustless",
+    "zero-trust",
+    "ed25519",
+    "did",
+    "x402",
+    "magp",
+    "metamynd",
+    "agentsafe"
+  ],
+  "author": "MetaMynd",
+  "license": "MIT",
+  "homepage": "https://metamynd.ai/en/developers/spec",
+  "bugs": {
+    "url": "https://metamynd.ai/en/support/contact"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
