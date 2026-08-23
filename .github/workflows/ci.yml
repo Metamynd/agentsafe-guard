@@ -1,0 +1,86 @@
+name: CI
+
+# The evaluator's whole claim is that it is a pure, reproducible function of its inputs.
+# That claim is worth nothing unless it is checked on a machine that is not the author's,
+# from a clean checkout, with no network and no account - which is what this does.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Evaluator + guards
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 is the floor both packages declare in `engines`. If it breaks there, the
+        # declaration is a lie, and someone finds that out the hard way rather than here.
+        node: ['18', '20', '22']
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: npm ci
+
+      - name: Typecheck the evaluator
+        run: npm run typecheck
+
+      - name: Evaluator test suite
+        run: npm run test:core
+
+      # No network, no account, no database. These evaluate a policy bundle in-process and
+      # assert the verdicts match what the gate returns for the same inputs.
+      - name: Agent guard smoke suite
+        run: npm run test:guard
+
+      - name: MCP guard smoke suite
+        run: npm run test:mcp-guard
+
+  generated:
+    name: Bundled evaluator is current
+    runs-on: ubuntu-latest
+
+    # `packages/*/policy-core.mjs` is generated from `packages/policy-core` by esbuild.
+    # Both guards ship the bundle rather than the TypeScript, so a stale bundle means the
+    # code people install disagrees with the code they can read here - the precise failure
+    # that would make publishing a reference implementation pointless.
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      - name: Rebuild the bundle and diff it against what is committed
+        run: |
+          npx --yes esbuild@0.25.12 packages/policy-core/index.ts --bundle --platform=node --format=esm --outfile=/tmp/rebuilt.mjs
+
+          # Normalise away what legitimately differs and says nothing about behaviour:
+          # CRLF from a Windows commit, blank lines, the generated banner, and esbuild's
+          # "// <path>.ts" source markers. The sources sit at a different path in the
+          # repository they are generated from, so those markers never match - comparing
+          # them would make this check cry wolf forever.
+          norm() {
+            tr -d '\r' < "$1" | grep -vE '^// .*policy-core/.*\.ts$' | grep -vE '^// GENERATED from' | grep -v '^$'
+          }
+
+          norm /tmp/rebuilt.mjs > /tmp/rebuilt.norm
+          fail=0
+          for pkg in agentsafe-guard agentsafe-mcp-guard; do
+            norm "packages/$pkg/policy-core.mjs" > /tmp/committed.norm
+            if diff -q /tmp/rebuilt.norm /tmp/committed.norm > /dev/null; then
+              echo "packages/$pkg/policy-core.mjs is current."
+            else
+              echo "::error::packages/$pkg/policy-core.mjs is stale - regenerate it from packages/policy-core"
+              diff /tmp/rebuilt.norm /tmp/committed.norm | head -40
+              fail=1
+            fi
+          done
+          exit $fail
