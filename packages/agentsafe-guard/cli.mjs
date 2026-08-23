@@ -24,11 +24,17 @@ if (cmd === 'demo') {
       require: (flag('require') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
       json: process.argv.includes('--json'),
     });
-    process.exit(result.ok ? 0 : 1);
+    // `process.exitCode`, never `process.exit()`. Calling exit() here aborts while the
+    // fetch keep-alive handle is still closing, which trips a libuv assertion on Windows
+    // (`!(handle->flags & UV_HANDLE_CLOSING)`) and returns 127 — AFTER printing that every
+    // control held. A CI command whose whole job is to fail a build honestly must not fail
+    // it dishonestly, and failing a PASSING agent is the one direction that teaches teams
+    // to delete the check. Setting the code and letting node drain exits cleanly.
+    process.exitCode = result.ok ? 0 : 1;
   } catch (e) {
     // Failing to verify is not the same as verifying a pass, and CI must not read it as one.
     console.error(`verify could not run: ${e.message}`);
-    process.exit(2);
+    process.exitCode = 2;
   }
 } else if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
   console.log(`
