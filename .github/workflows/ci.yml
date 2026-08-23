@@ -10,15 +10,17 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: Evaluator + guards
+  # The evaluator's TypeScript suite. Node 20+ only, and that is a property of the test
+  # runner rather than of the code: vitest 4 bundles rolldown, which imports `styleText`
+  # from node:util, which does not exist on Node 18. The shipped packages have no such
+  # constraint - see the `guards` job, which is what actually proves Node 18 works.
+  evaluator:
+    name: Evaluator suite
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # 18 is the floor both packages declare in `engines`. If it breaks there, the
-        # declaration is a lie, and someone finds that out the hard way rather than here.
-        node: ['18', '20', '22']
+        node: ['20', '22']
 
     steps:
       - uses: actions/checkout@v5
@@ -29,19 +31,41 @@ jobs:
 
       - run: npm ci
 
-      - name: Typecheck the evaluator
+      - name: Typecheck
         run: npm run typecheck
 
-      - name: Evaluator test suite
+      - name: Test
         run: npm run test:core
 
-      # No network, no account, no database. These evaluate a policy bundle in-process and
-      # assert the verdicts match what the gate returns for the same inputs.
+  # Both guards' smoke suites, on every Node version the packages claim to support.
+  #
+  # These need no dependencies at all - the packages have none, and the suites are plain
+  # node scripts - so they run against a bare checkout. That makes this the honest test of
+  # the `engines: >=18` declaration in both manifests. If it breaks on 18, the declaration
+  # is a lie and someone finds that out here rather than in their production agent.
+  guards:
+    name: Guards
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20', '22']
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No npm install anywhere below: no network, no account, no database.
       - name: Agent guard smoke suite
-        run: npm run test:guard
+        working-directory: packages/agentsafe-guard
+        run: npm test
 
       - name: MCP guard smoke suite
-        run: npm run test:mcp-guard
+        working-directory: packages/agentsafe-mcp-guard
+        run: npm test
 
   generated:
     name: Bundled evaluator is current
