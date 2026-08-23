@@ -12,13 +12,16 @@ npm install && npm start
 ```
 
 ```
-Step 1 of 3 - a $250 booking, low risk.
+Step 1 of 4 - a $250 booking, low risk.
    ALLOWED    your tool ran and returned PNR-DEMO
-Step 2 of 3 - a $600 booking, deliberately over the cap.
+Step 2 of 4 - a $600 booking, deliberately over the cap.
    BLOCKED    SOP_SPEND_CAP
    your tool never ran - the gate refused before execution.
-Step 3 of 3 - a $250 booking, but flagged high risk.
+Step 3 of 4 - a $250 booking, but flagged high risk.
    ESCALATED  held for a human - RISK_REVIEW
+Step 4 of 4 - the agent asks to raise its OWN limit.
+   BLOCKED    NO_PERMISSION_FOR_ACTION
+   the mandate never granted this action - at any amount
 ```
 
 ---
@@ -45,6 +48,7 @@ Default-deny by scope gets you that for free.
 | [`packages/policy-core`](packages/policy-core) | The deterministic evaluator. Zero dependencies, no IO, no clock, no LLM. Atoms → molecules → mandate, combined most-restrictive-wins. |
 | [`packages/agentsafe-guard`](packages/agentsafe-guard) | The agent-side guard. `guardTool()` wraps a function and refuses to run it unless the verdict permits. [npm](https://www.npmjs.com/package/@metamynd/agentsafe-guard) |
 | [`packages/agentsafe-mcp-guard`](packages/agentsafe-mcp-guard) | The counterparty-side guard. An MCP server re-evaluates the agent's authority *independently*, so a compromised agent still cannot make an honest service act. [npm](https://www.npmjs.com/package/@metamynd/agentsafe-mcp-guard) |
+| [`packages/create-metamynd-agent`](packages/create-metamynd-agent) | The scaffolder. `npx create-metamynd-agent --sandbox` provisions a governed agent and writes a runnable example — about four seconds, no account. [npm](https://www.npmjs.com/package/create-metamynd-agent) |
 
 Both guards ship with **zero runtime dependencies** — Node's built-in Ed25519 (`node:crypto`)
 and `fetch`, nothing else. For something in the execution path of every privileged action,
@@ -133,4 +137,4 @@ Security issues: please read [SECURITY.md](SECURITY.md) first — do not open a 
 
 ## License
 
-[MIT](LICENSE). Both packages have been MIT since first publication.
+[MIT](LICENSE). Every package here has been MIT since first publication.

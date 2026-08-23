@@ -1,0 +1,42 @@
+{
+  "name": "create-metamynd-agent",
+  "version": "0.3.6",
+  "description": "Scaffold a MetaMynd/AgentSafe-governed AI agent in one command — logs in, provisions the agent (identity + mandate + SOP + Standards) in a single call, writes agent.metamynd.json, and drops a runnable example.",
+  "type": "module",
+  "bin": {
+    "create-metamynd-agent": "index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "create",
+    "scaffold",
+    "cli",
+    "ai",
+    "agent",
+    "governance",
+    "metamynd",
+    "agentsafe",
+    "mandate",
+    "policy"
+  ],
+  "author": "MetaMynd",
+  "license": "MIT",
+  "homepage": "https://metamynd.ai/developers/quickstart",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Metamynd/agentsafe-guard.git",
+    "directory": "packages/create-metamynd-agent"
+  },
+  "bugs": {
+    "url": "https://github.com/Metamynd/agentsafe-guard/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
