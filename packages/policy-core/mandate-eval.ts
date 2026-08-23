@@ -75,6 +75,58 @@ function targetOf(rule: Permission | Prohibition, mandate: Mandate): string | un
  * whose constraints ALL hold grants `allow`; otherwise the first failing
  * constraint's `onFail` (default 'block') decides.
  */
+/**
+ * Did this evaluation fail for want of AUTHORITY, rather than for breaking a rule?
+ *
+ * The distinction is the whole point. `expiry` and `no-permission` mean the agent had no
+ * standing to ask at all, and neither answer depends on the amount, the merchant or
+ * anything else about the request. `permission` (a constraint on a granted target) and
+ * `prohibition` are statements about HOW a granted action may be performed — the same
+ * class of thing a Standard or an SOP says, and rightly ranked alongside them.
+ *
+ * This exists because of a precedence bug worth remembering. The rule layers were
+ * evaluated before the mandate, and a rule block and a mandate block tie on
+ * restrictiveness, so whichever ran first kept the reason code. An agent asking to raise
+ * its own spend limit to $100,000 therefore got back `SOP_SPEND_CAP` — because a
+ * spend-cap rule fired on the amount — while the identical call at $1 got
+ * `NO_PERMISSION_FOR_ACTION`. Both blocked, so nothing was unsafe, and the verdict was
+ * still wrong in the way that matters: it says a larger cap would have let an agent
+ * rewrite its own authority. It would not. A developer reading the reason code cannot know
+ * that, and an auditor reading the evidence trail would credit the wrong control with
+ * having held.
+ *
+ * So an authority failure is returned as the reason, ahead of any rule. Nothing a rule
+ * says about how an action may be performed can be why an action nobody authorised failed.
+ */
+export function isAuthorityFailure(result: MandateResult): boolean {
+  return result.matched?.kind === 'expiry' || result.matched?.kind === 'no-permission';
+}
+
+/**
+ * The authority failure for this target, or null if the mandate grants standing to ask.
+ *
+ * For callers that have a target but not yet a resolved operand map — the gate asks this
+ * before it has replayed cumulative spend. Safe to ask early precisely because an
+ * authority answer cannot depend on operands: an expired mandate grants nothing, and a
+ * target with no permission has no constraints to satisfy.
+ *
+ * Deliberately delegates to `evaluateMandate` rather than re-deriving the answer, so the
+ * order between expiry, prohibitions and permissions is guaranteed by the one evaluator
+ * instead of being restated — and stays guaranteed when that order next changes.
+ *
+ * Narrowed to `block` because every authority failure is one: having no standing to ask is
+ * not a thing a human approver can resolve, so it is never an escalate. Callers that
+ * return a narrower decision union get to keep it.
+ */
+export function authorityFailure(
+  mandate: Mandate,
+  target: string,
+  now: string,
+): (MandateResult & { decision: 'block' }) | null {
+  const result = evaluateMandate(mandate, { target, now, values: {} });
+  return isAuthorityFailure(result) ? { ...result, decision: 'block' } : null;
+}
+
 export function evaluateMandate(mandate: Mandate, req: MandateRequest): MandateResult {
   const now = toTime(req.now);
 

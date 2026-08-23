@@ -7,7 +7,8 @@
  * verified, signature, freshness/nonce). Those stateful checks are NOT part of
  * policy-core — they need IO. What lives here is the reproducible part:
  *
- *   Standards rules  →  SOP rules  →  Mandate evaluation
+ *   Authority (is there standing to ask at all?)
+ *     →  Standards rules  →  SOP rules  →  Mandate evaluation
  *
  * combined by the most-restrictive-wins precedence (block > escalate > allow).
  * Given identical inputs, every conformant implementation returns the identical
@@ -15,7 +16,7 @@
  */
 
 import { evaluateBoundStandards, type StandardDocument } from './standards-rules.js';
-import { evaluateMandate } from './mandate-eval.js';
+import { evaluateMandate, isAuthorityFailure } from './mandate-eval.js';
 import type { Mandate, MandateRequest } from './mandate.types.js';
 import type { EvaluationContext, PolicyDecision, Verdict } from './types.js';
 
@@ -60,16 +61,37 @@ export function evaluate(input: EvaluateInput): Verdict {
     }
   };
 
+  // Authority goes FIRST rather than last, and it goes in through `consider` like
+  // everything else.
+  //
+  // The three layers combine most-restrictive-wins, which is order-independent for the
+  // DECISION but not for the REASON: a rule block and a mandate block tie, and `consider`
+  // keeps the incumbent on a tie, so whichever layer ran first named the cause. Running
+  // the rules first therefore made an expired mandate, or an action never granted, report
+  // whichever rule the amount happened to trip — see `isAuthorityFailure` for the case
+  // that surfaced it.
+  //
+  // Seeding the accumulator fixes the reason without touching the decision, which matters:
+  // a short-circuit return here would have been strictly worse than the bug. A Standard
+  // whose molecule says `suspend` or `quarantine` is MORE restrictive than an authority
+  // block, and on the gate that verdict is what persists containment on the agent.
+  // Returning early would have quietly downgraded a containment to a one-call refusal.
+  //
+  // So: authority names the refusal on a tie, containment still outranks it, and every
+  // other mandate outcome is still folded in LAST — an in-scope request whose cap is
+  // tripped by both an SOP and the mandate still reports the SOP, the more specific and
+  // more editable of the two.
+  const m = input.mandate && input.mandateRequest ? evaluateMandate(input.mandate, input.mandateRequest) : null;
+  const authority = m !== null && isAuthorityFailure(m);
+  if (m && authority) consider(m.decision, m.reasonCode);
+
   const std = evaluateBoundStandards(input.standards ?? [], input.context);
   if (std.decision !== 'allow') consider(std.decision, std.reasonCode ?? 'STANDARD_RULE');
 
   const sop = evaluateBoundStandards(input.sops ?? [], input.context);
   if (sop.decision !== 'allow') consider(sop.decision, sop.reasonCode ?? 'SOP_RULE');
 
-  if (input.mandate && input.mandateRequest) {
-    const m = evaluateMandate(input.mandate, input.mandateRequest);
-    if (m.decision !== 'allow') consider(m.decision, m.reasonCode);
-  }
+  if (m && !authority && m.decision !== 'allow') consider(m.decision, m.reasonCode);
 
   return { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
 }

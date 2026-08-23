@@ -334,6 +334,13 @@ function constraintSatisfied(c, req) {
 function targetOf(rule, mandate) {
   return rule.target ?? mandate.target;
 }
+function isAuthorityFailure(result) {
+  return result.matched?.kind === "expiry" || result.matched?.kind === "no-permission";
+}
+function authorityFailure(mandate, target, now) {
+  const result = evaluateMandate(mandate, { target, now, values: {} });
+  return isAuthorityFailure(result) ? { ...result, decision: "block" } : null;
+}
 function evaluateMandate(mandate, req) {
   const now = toTime(req.now);
   if (mandate.validFrom && now < toTime(mandate.validFrom)) {
@@ -402,14 +409,14 @@ function evaluate(input) {
       reasonCode = code;
     }
   };
+  const m = input.mandate && input.mandateRequest ? evaluateMandate(input.mandate, input.mandateRequest) : null;
+  const authority = m !== null && isAuthorityFailure(m);
+  if (m && authority) consider(m.decision, m.reasonCode);
   const std = evaluateBoundStandards(input.standards ?? [], input.context);
   if (std.decision !== "allow") consider(std.decision, std.reasonCode ?? "STANDARD_RULE");
   const sop = evaluateBoundStandards(input.sops ?? [], input.context);
   if (sop.decision !== "allow") consider(sop.decision, sop.reasonCode ?? "SOP_RULE");
-  if (input.mandate && input.mandateRequest) {
-    const m = evaluateMandate(input.mandate, input.mandateRequest);
-    if (m.decision !== "allow") consider(m.decision, m.reasonCode);
-  }
+  if (m && !authority && m.decision !== "allow") consider(m.decision, m.reasonCode);
   return { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
 }
 
@@ -472,12 +479,14 @@ export {
   applyHold,
   applySignedLast,
   asOperatingMode,
+  authorityFailure,
   buildAuthMessage,
   canAuthorize,
   evaluate,
   evaluateBoundStandards,
   evaluateMandate,
   evaluateStandardRules,
+  isAuthorityFailure,
   isOperatingMode,
   moleculeFires,
   moreRestrictive,

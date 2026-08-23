@@ -40,6 +40,8 @@ export {
 // Mandate (ODRL) evaluator + budget helpers
 export {
   evaluateMandate,
+  isAuthorityFailure,
+  authorityFailure,
   remainingBudget,
   canAuthorize,
   applyHold,
