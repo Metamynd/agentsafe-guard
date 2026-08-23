@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/agentsafe-guard",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Zero-dependency runtime governance for any Node AI agent \u2014 gate tool calls through MetaMynd/AgentSafe (allow / block / escalate) against the agent's mandate, enforced Standards, and SOPs. Ed25519-signed, deterministic, fail-closed.",
   "type": "module",
   "main": "./agentsafe-guard.mjs",
