@@ -46,6 +46,58 @@ it doubles as a smoke test of the installed package.
 You need an account only for what can't be enforced client-side: live policy edits,
 cumulative spend caps, human escalation, and anchored evidence.
 
+## Governance as a build step
+
+```bash
+npx @metamynd/agentsafe-guard verify
+```
+
+Asserts your agent **cannot** exceed its mandate, and exits non-zero if it can. Put it in
+CI and a pull request that widens an agent's authority fails the build, which is a control;
+a dashboard that would have shown you is not.
+
+```
+  ok   permits ordinary in-scope work
+  ok   refuses an action the mandate never granted   → block/NO_PERMISSION_FOR_ACTION
+  ok   refuses 501 against a cap of 500              → block/SOP_SPEND_CAP
+  n/a  no merchant allow-list in this mandate
+       EVERY merchant is permitted
+
+  1 control(s) are not configured — reported, not passed.
+  Fail the build on these with:  verify --require merchants
+```
+
+**A control the mandate does not set is reported, never passed.** That distinction is the
+entire point, and it exists because the alternative shipped: our own public sandbox was
+issued with an empty merchant list, an unapproved supplier was paid $250, and
+`MERCHANT_NOT_ALLOWED` sat documented in the example's own glossary the whole time. A green
+check on a control that does not exist is worse than no check.
+
+`--require merchants,perTxn,cumulative` promotes "not configured" to a build failure — how
+you state *our agents must carry a merchant allow-list* and find out when one does not.
+`--json` for machine-readable output. Evaluation is local and pure: no holds are minted, no
+nonces spent, no budget consumed, and a run costs one GET.
+
+```yaml
+# .github/workflows/governance.yml
+name: Governance
+on: [push, pull_request]
+
+jobs:
+  mandate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - run: npx @metamynd/agentsafe-guard verify --require merchants,perTxn
+```
+
+`agent.metamynd.json` holds no secret beyond the agent key, so commit a key-less config and
+set `AGENT_KEY` in the environment — `AGENT_KEY`, `AGENT_DID` and `METAMYND_API` all
+override the file when present.
+
 ## Install
 
 ```bash
