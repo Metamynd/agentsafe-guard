@@ -98,6 +98,35 @@ jobs:
 set `AGENT_KEY` in the environment — `AGENT_KEY`, `AGENT_DID` and `METAMYND_API` all
 override the file when present.
 
+### As a packaged Action
+
+Same check, packaged so you don't hand-roll the workflow above — and it writes a
+pass/fail table straight into the PR's checks summary instead of a log a reviewer has to
+open:
+
+```yaml
+# .github/workflows/governance.yml
+name: Governance
+on: [push, pull_request]
+
+jobs:
+  mandate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@main
+        with:
+          config: ./agent.metamynd.json
+          require: merchants,perTxn
+        env:
+          AGENT_KEY: ${{ secrets.AGENT_KEY }}
+```
+
+Pin `@main` to a released tag once one exists, the same way you'd pin any third-party
+action. Inputs: `config` (default `./agent.metamynd.json`), `require`, `version` (the
+`@metamynd/agentsafe-guard` npm range to run, default `latest`), `working-directory`.
+Output: `ok` (`"true"`/`"false"`), if a later step needs to branch on the result.
+
 ## Install
 
 ```bash

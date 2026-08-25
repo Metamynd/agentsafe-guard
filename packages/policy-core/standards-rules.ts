@@ -75,12 +75,14 @@ export interface StandardRuleResult {
 
 /**
  * Restrictiveness ordering — higher wins, so evaluation is order-independent.
- * Containment (suspend/quarantine) outranks a plain block, which outranks an
- * escalate, which outranks observe (permit-but-flag), which outranks allow. So the
- * single most-restrictive firing molecule across all bound standards/SOPs
- * determines the verdict. Keep this identical to evaluate.ts's PRECEDENCE.
+ * Containment (decommission > suspend/quarantine) outranks a plain block, which
+ * outranks an escalate, which outranks observe (permit-but-flag), which outranks
+ * allow. So the single most-restrictive firing molecule across all bound
+ * standards/SOPs determines the verdict. `decommission` is included only to satisfy
+ * the shared PolicyDecision type — no molecule can author it (owner/admin-only, see
+ * mandate.types.ts). Keep this identical to evaluate.ts's PRECEDENCE.
  */
-const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5 };
+const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
 
 /** Evaluate a single atom. An unknown predicate never fires (validation rejects it at authoring). */
 function atomFires(atom: RuleAtom, ctx: EvaluationContext): boolean {
