@@ -66,6 +66,7 @@ METAMYND_PASSWORD='…' npx create-metamynd-agent --yes …
 | Flag | Env | Default |
 |---|---|---|
 | `--sandbox` | — | off (skips login/KYB; shared sandbox agent) |
+| `--config <file>` | — | a JSON policy file — see [Policy config file](#policy-config-file---config) |
 | `--api <url>` | `METAMYND_API` | `https://metamynd.ai/api/v1` |
 | `--email <email>` | `METAMYND_EMAIL` | — (required) |
 | `--password <pw>` | `METAMYND_PASSWORD` | interactive masked prompt |
@@ -81,6 +82,42 @@ METAMYND_PASSWORD='…' npx create-metamynd-agent --yes …
 | `--yes`, `-y` | — | non-interactive |
 
 Run `npx create-metamynd-agent --help` for the full list.
+
+## Policy config file (`--config`)
+
+Everything above works from flags and prompts, which is fine for one agent but tedious to check
+into source control or hand to a teammate. `--config <file>` reads a plain **JSON** file instead —
+no YAML, no new dependency, so the CLI stays exactly as dependency-free as the guard it scaffolds:
+
+```json
+{
+  "name": "Procurement Agent",
+  "scope": "purchase-order",
+  "currency": "USD",
+  "maxAmount": 20000,
+  "perTxnMax": 2000,
+  "merchants": ["acme-supplies", "northwind-rail"],
+  "rules": [
+    { "when": { "predicate": "amount-over", "config": { "limit": 2000 } }, "then": "escalate" },
+    { "when": { "predicate": "risk-at-or-above", "config": { "level": "high" } }, "then": "block" }
+  ]
+}
+```
+
+```bash
+npx create-metamynd-agent --config ./procurement.policy.json --email you@example.com --yes
+```
+
+`rules` is sugar for the common one-atom-one-decision case — each entry compiles to a starter-SOP
+molecule (`when.predicate` + `when.config` becomes the atom, `then` becomes the decision). See the
+[protocol spec's atom catalog](https://metamynd.ai/developers/spec) for the full predicate list
+(`amount-over`, `risk-at-or-above`, `jurisdiction-not-allowed`, `merchant`-style checks, and more).
+If you need a real multi-atom/combinator molecule, supply `molecules` directly instead (the same
+shape the dashboard's SOP editor produces) — `rules` is ignored when `molecules` is present.
+
+Any CLI flag still overrides the matching field from the file (`--config base.json --name "Other
+Bot"`), and login credentials are never read from the file — use `--email`/`METAMYND_EMAIL` and
+`METAMYND_PASSWORD` as usual, so a policy file is safe to commit.
 
 ## Bring your own key (`--byok`)
 

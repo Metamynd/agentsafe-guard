@@ -5,17 +5,18 @@
  * constraints, never a schema/code change.
  *
  * Decision vocabulary matches the policy engine and evidence rail:
- * 'allow' | 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine'. Two values
- * PERMIT execution: 'allow' and 'observe' (the latter permits-but-flags, SAFR §11).
- * The rest deny (fail-safe). 'suspend'/'quarantine' are containment effects (a
- * terminal deny with a distinct audit signal). A mandate prohibition or constraint
- * can therefore be authored to CONTAIN the agent, not just block one action, via its
- * `enforcement` / `onFail`.
+ * 'allow' | 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine' | 'decommission'.
+ * Two values PERMIT execution: 'allow' and 'observe' (the latter permits-but-flags,
+ * SAFR §11). The rest deny (fail-safe). 'suspend'/'quarantine'/'decommission' are
+ * containment effects (a terminal deny with a distinct audit signal). A mandate
+ * prohibition or constraint can therefore be authored to CONTAIN the agent, not just
+ * block one action, via its `enforcement` / `onFail`. 'decommission' is reserved for
+ * the owner-initiated agent-identity containment state (never fired by a rule).
  *
  * See docs/design/agent-mandates-and-standards-layer.md §3.
  */
 
-export type MandateDecision = 'allow' | 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine';
+export type MandateDecision = 'allow' | 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine' | 'decommission';
 
 /** The fixed operator set. New scenarios add operands/resolvers, not operators. */
 export type Operator =

@@ -1,0 +1,94 @@
+name: 'AgentSafe verify'
+description: >-
+  Assert a MetaMynd/AgentSafe-governed agent cannot exceed its mandate — offline, local
+  policy-core evaluation over the agent's signed bundle, the same check
+  `npx @metamynd/agentsafe-guard verify` runs. Fails the build when a configured control
+  does not hold, or when a control named by `require` is not configured at all.
+author: MetaMynd
+branding:
+  icon: shield
+  color: purple
+
+# No AGENT_KEY is needed for this to run — verify() only READS the agent's signed policy
+# bundle from the gate (one GET) and evaluates locally; it mints no holds, spends no nonce,
+# and moves no budget. Set AGENT_KEY only if agent.metamynd.json in the repo omits it (the
+# usual CI shape: commit a key-less config, keep the key in a secret).
+#
+#   - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@main
+#     with:
+#       config: ./agent.metamynd.json
+#       require: merchants,perTxn
+#     env:
+#       AGENT_KEY: ${{ secrets.AGENT_KEY }}
+inputs:
+  config:
+    description: 'Path to the agent config file, relative to working-directory.'
+    required: false
+    default: './agent.metamynd.json'
+  require:
+    description: >-
+      Comma-separated controls that must be CONFIGURED, not merely holding when set — e.g.
+      "merchants,perTxn" fails the build if either is absent from the mandate at all, the
+      same way a missing spend cap should fail a review even though nothing violated it yet.
+      Controls: scope, perTxn, cumulative, merchants.
+    required: false
+    default: ''
+  version:
+    description: 'The @metamynd/agentsafe-guard version (npm semver range) to run.'
+    required: false
+    default: 'latest'
+  working-directory:
+    description: 'Directory to resolve `config` from and run the check in.'
+    required: false
+    default: '.'
+
+outputs:
+  ok:
+    description: '"true" when every configured control held and nothing required was missing, else "false".'
+    value: ${{ steps.verify.outputs.ok }}
+
+runs:
+  using: composite
+  steps:
+    - name: agentsafe-guard verify
+      id: verify
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set +e
+        RAW=$(npx --yes "@metamynd/agentsafe-guard@${{ inputs.version }}" verify \
+          --config "${{ inputs.config }}" \
+          ${{ inputs.require != '' && format('--require {0}', inputs.require) || '' }} \
+          --json)
+        CODE=$?
+
+        # verify() already contains its own console-report formatter (verify.mjs); reuse it
+        # rather than re-deriving the same pass/fail/absent rendering here a second time,
+        # once for a human reading the Actions log and once for the job summary.
+        echo "$RAW" | node -e '
+          let d = "";
+          process.stdin.on("data", (c) => (d += c));
+          process.stdin.on("end", () => {
+            const r = JSON.parse(d);
+            const mark = { held: "✅", failed: "❌", "not-configured": "⚪" };
+            const lines = [
+              `### AgentSafe verify — \`${r.agent}\` (${r.action})`,
+              "",
+              "| | Control | Assertion | Verdict |",
+              "|---|---|---|---|",
+              ...r.checks.map(
+                (c) =>
+                  `| ${mark[c.status] ?? "?"} | ${c.control} | ${c.assertion} | ${c.decision ? `${c.decision}/${c.reasonCode}` : "—"}${c.note ? ` — ${c.note}` : ""} |`,
+              ),
+              "",
+              r.ok
+                ? "Every configured control held, and nothing required is missing."
+                : "**This agent can exceed its mandate as configured.** See the failed/missing rows above.",
+            ];
+            require("node:fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+            console.log(lines.join("\n"));
+          });
+        '
+
+        echo "ok=$(echo "$RAW" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).ok))')" >> "$GITHUB_OUTPUT"
+        exit $CODE

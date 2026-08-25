@@ -21,9 +21,11 @@ import type { Mandate, MandateRequest } from './mandate.types.js';
 import type { EvaluationContext, PolicyDecision, Verdict } from './types.js';
 
 /** Restrictiveness ordering — higher wins, so combination is order-independent.
- * Containment (suspend/quarantine) > block > escalate > observe (permit-but-flag) >
- * allow. Keep this identical to standards-rules.ts's PRECEDENCE. */
-const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5 };
+ * Containment (decommission > suspend/quarantine) > block > escalate > observe
+ * (permit-but-flag) > allow. `decommission` outranks the rule-firable containment
+ * effects even though a rule/atom can never actually produce it (owner/admin-only).
+ * Keep this identical to standards-rules.ts's PRECEDENCE. */
+const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
 
 /** A bound rule pack: a Standard or SOP document keyed for provenance. */
 export interface RulePack {

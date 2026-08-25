@@ -19,12 +19,13 @@
  * human-review or block need always wins over a mere flag).
  *
  * Every other value DENIES execution (fail-safe). `escalate` additionally routes to
- * the human-approval queue. `suspend`/`quarantine` are containment effects: a
- * terminal deny that also marks the event as a containment-level signal in the audit
- * trail (distinct from a plain `block`) and drives the agent's containment lifecycle
- * (deny all further actions until reinstated).
+ * the human-approval queue. `suspend`/`quarantine`/`decommission` are containment
+ * effects: a terminal deny that also marks the event as a containment-level signal in
+ * the audit trail (distinct from a plain `block`) and drives the agent's containment
+ * lifecycle (deny all further actions until reinstated). `decommission` is
+ * owner/admin-initiated only — never fired by a rule, unlike `suspend`/`quarantine`.
  */
-export type PolicyDecision = 'allow' | 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine';
+export type PolicyDecision = 'allow' | 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine' | 'decommission';
 
 /**
  * The context an action is evaluated against (spec §6.4). It is the union of the

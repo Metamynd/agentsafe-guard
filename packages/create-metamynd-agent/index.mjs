@@ -64,6 +64,8 @@ ${c.b('Usage')}
 
 ${c.b('Options')}
   --sandbox            No login, no KYB: scaffold against the shared sandbox agent (fastest start)
+  --config <file>      A JSON policy file (name/scope/limits + simple "rules") — see README#config-file.
+                       Flags below still override individual fields from the file.
   --request            Delegated: request an agent for an owner's org (--owner <email>, +--byok)
   --claim [--watch]    Delegated: claim the config once the owner approves (reads metamynd-request.json)
   --owner <email>      Target owner's email (with --request)
@@ -137,6 +139,70 @@ function askHidden(query) {
 function fail(msg) {
   console.error(`\n${c.red('✖')} ${msg}\n`);
   process.exit(1);
+}
+
+// ---------- policy config file (--config) ----------
+// The API/SOP/molecule authoring surface is real, but it is not where a developer wants to
+// START — round-five feedback named this precisely: "developers need a simpler policy file
+// first." Everything a simple file needs already exists server-side (ProvisionSchema already
+// takes mandate limits + an optional sop.documentJson.molecules array in one flat JSON body),
+// so this is a thin, ZERO-DEPENDENCY translator — plain JSON, not YAML, so the CLI keeps the
+// "no dependencies at all" property the guard itself is built on — not a new policy engine.
+//
+// Shape:
+//   {
+//     "name": "Procurement Agent", "scope": "purchase-order", "currency": "USD",
+//     "maxAmount": 20000, "perTxnMax": 2000, "merchants": ["acme-supplies"],
+//     "rules": [
+//       { "when": { "predicate": "amount-over", "config": { "limit": 2000 } }, "then": "escalate" }
+//     ]
+//   }
+// `rules` is sugar for the common one-atom-one-decision case, compiled to a `molecules` array
+// below. A caller who needs a real combinator/multi-atom molecule can supply `molecules`
+// directly instead — `rules` is ignored when `molecules` is present.
+function loadConfigFile(path) {
+  let raw;
+  try { raw = readFileSync(resolve(path), 'utf8'); }
+  catch (e) { fail(`Could not read config file ${path} (${e.message})`); }
+  let json;
+  try { json = JSON.parse(raw); }
+  catch (e) { fail(`${path} is not valid JSON (${e.message})`); }
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+    fail(`${path} must be a JSON object.`);
+  }
+  return json;
+}
+
+// A rule needs `when.predicate` (the atom) and `then` (the decision the gate should return
+// when it fires) — everything else is optional sugar. See backend's atom-catalog.ts for the
+// full predicate list (amount-over, risk-at-or-above, jurisdiction-not-allowed, ...).
+function ruleToMolecule(rule, i) {
+  const when = rule?.when;
+  if (!when || typeof when.predicate !== 'string') {
+    fail(`rules[${i}] needs a "when.predicate" — see the config file docs for the atom list.`);
+  }
+  if (typeof rule.then !== 'string') {
+    fail(`rules[${i}] needs a "then" decision (e.g. "block", "escalate").`);
+  }
+  return {
+    id: `r${i + 1}`,
+    name: rule.name,
+    combinator: 'all',
+    atoms: [{ id: 'a1', predicate: when.predicate, config: when.config ?? {} }],
+    decision: rule.then,
+    reasonCode: rule.reasonCode ?? `${when.predicate.toUpperCase().replace(/-/g, '_')}_${String(rule.then).toUpperCase()}`,
+  };
+}
+
+/** Builds the `sop`/`rulePack` fields to merge into the provisioning body, or {} if the config file specifies neither. */
+function configFileSopFields(config) {
+  if (!config) return {};
+  if (Array.isArray(config.molecules)) return { sop: { documentJson: { molecules: config.molecules } } };
+  if (Array.isArray(config.rules) && config.rules.length) {
+    return { sop: { documentJson: { molecules: config.rules.map(ruleToMolecule) } } };
+  }
+  if (typeof config.rulePack === 'string') return { rulePack: config.rulePack };
+  return {};
 }
 
 function slugify(name) {
@@ -587,6 +653,13 @@ async function main() {
   if (args.request) { await runRequest(args); return; }
   if (args.claim) { await runClaim(args); return; }
 
+  // --config: a JSON policy file. Its fields become the DEFAULT for each prompt/flag below —
+  // an explicit CLI flag still wins (e.g. `--config base.json --name "Other Bot"`), and
+  // env vars still win over the file for login credentials specifically (never put a
+  // password in a policy file that gets checked into source control).
+  const fileConfig = typeof args.config === 'string' ? loadConfigFile(args.config) : null;
+  if (fileConfig) console.log(`  ${c.green('✓')} loaded policy config ${c.dim(args.config)}`);
+
   const interactive = !args.yes && process.stdin.isTTY;
   const rl = interactive ? makeRl() : null;
   const pick = async (flag, envVar, prompt, def) => {
@@ -618,13 +691,16 @@ async function main() {
   if (!token) { rl?.close(); fail('Login succeeded but no access token was returned.'); }
   console.log(`  ${c.green('✓')} authenticated as ${email}`);
 
-  // 2. Agent details
-  const name = await pick('name', null, 'Agent name', 'Support Bot');
-  const scope = await pick('scope', null, 'Mandate scope (governed action)', 'flight-purchase');
-  const perTxnMax = Number(await pick('per-txn-max', null, 'Per-transaction cap', '500')) || 500;
-  const maxAmount = Number(await pick('max-amount', null, 'Total mandate budget', '10000')) || 10000;
-  const currency = (await pick('currency', null, 'Currency', 'USD')) || 'USD';
-  const merchantsRaw = await pick('merchants', null, 'Allowed merchants (comma-sep, blank = any)', '');
+  // 2. Agent details — a --config file's fields are the default at every prompt/flag below.
+  const name = await pick('name', null, 'Agent name', fileConfig?.name ?? 'Support Bot');
+  const scope = await pick('scope', null, 'Mandate scope (governed action)', fileConfig?.scope ?? 'flight-purchase');
+  const perTxnMax = Number(await pick('per-txn-max', null, 'Per-transaction cap', String(fileConfig?.perTxnMax ?? '500'))) || 500;
+  const maxAmount = Number(await pick('max-amount', null, 'Total mandate budget', String(fileConfig?.maxAmount ?? '10000'))) || 10000;
+  const currency = (await pick('currency', null, 'Currency', fileConfig?.currency ?? 'USD')) || 'USD';
+  const merchantsRaw = await pick(
+    'merchants', null, 'Allowed merchants (comma-sep, blank = any)',
+    Array.isArray(fileConfig?.merchants) ? fileConfig.merchants.join(',') : '',
+  );
   const merchants = String(merchantsRaw).split(',').map((s) => s.trim()).filter(Boolean);
 
   // BYOK: --byok generates a keypair on THIS machine (MetaMynd never sees the private key). An
@@ -642,9 +718,13 @@ async function main() {
 
   rl?.close();
 
-  // 3. Provision (one call)
+  // 3. Provision (one call) — a --config file's `rules`/`molecules`/`rulePack` become the
+  // starter SOP; with none of those, provisionGuardConfig falls back to its own default
+  // (a per-transaction cap + high-risk review), same as before --config existed.
+  const sopFields = configFileSopFields(fileConfig);
+  if (sopFields.sop) console.log(`  ${c.green('✓')} compiled ${sopFields.sop.documentJson.molecules.length} rule(s) from the config file`);
   console.log(c.dim(`\n  → provisioning "${name}" (identity + mandate + SOP + Standards) …`));
-  const body = { name, scope, currency, maxAmount, perTxnMax, merchants, ...(publicKey ? { publicKey } : {}) };
+  const body = { name, scope, currency, maxAmount, perTxnMax, merchants, ...(publicKey ? { publicKey } : {}), ...sopFields };
   const provisioned = await apiPost(base, '/onboarding/agent', body, token);
   const config = provisioned?.data;
   if (!config?.agentDid) fail('Provisioning did not return a config with an agentDid.');
