@@ -14,7 +14,7 @@ branding:
 # and moves no budget. Set AGENT_KEY only if agent.metamynd.json in the repo omits it (the
 # usual CI shape: commit a key-less config, keep the key in a secret).
 #
-#   - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@main
+#   - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.5.2
 #     with:
 #       config: ./agent.metamynd.json
 #       require: merchants,perTxn

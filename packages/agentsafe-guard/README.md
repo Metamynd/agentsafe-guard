@@ -114,7 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@main
+      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.5.2
         with:
           config: ./agent.metamynd.json
           require: merchants,perTxn
@@ -122,10 +122,11 @@ jobs:
           AGENT_KEY: ${{ secrets.AGENT_KEY }}
 ```
 
-Pin `@main` to a released tag once one exists, the same way you'd pin any third-party
-action. Inputs: `config` (default `./agent.metamynd.json`), `require`, `version` (the
-`@metamynd/agentsafe-guard` npm range to run, default `latest`), `working-directory`.
-Output: `ok` (`"true"`/`"false"`), if a later step needs to branch on the result.
+Pinned to a released tag, the same way you'd pin any third-party action — not `@main`,
+which moves under you every time this repository resyncs. Inputs: `config` (default
+`./agent.metamynd.json`), `require`, `version` (the `@metamynd/agentsafe-guard` npm range
+to run, default `latest`), `working-directory`. Output: `ok` (`"true"`/`"false"`), if a
+later step needs to branch on the result.
 
 ## Install
 
