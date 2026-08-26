@@ -68,9 +68,23 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
     typeof c.holTrustScore === 'number' && c.holTrustScore < Number(cfg?.reviewBelow ?? 60),
 };
 
-/** True when `value` is a non-empty string that is NOT in the (case-insensitive) allow-list. */
+/**
+ * True when `value` is a non-empty string that is NOT in the (case-insensitive) allow-list.
+ *
+ * An EMPTY allow-list fires on any non-empty value — "nothing is approved yet" — matching
+ * `data-source-not-approved`'s own behavior and this file's own header comment above
+ * ("Allow-list atoms fire when the context field is PRESENT and NOT allowed"). A previous
+ * version required `allowed.length > 0` before firing at all, which silently inverted that:
+ * an unconfigured allow-list meant EVERYTHING was permitted rather than nothing, for
+ * `jurisdiction-not-allowed`, `data-residency-violation`, `model-not-allowed` and
+ * `tool-not-allowed`. Confirmed via the real simulation engine against
+ * `tool-boundary-baseline`'s own seeded config (`allowed: []`, deliberately empty per that
+ * set's remediation text "so that nothing passes unexamined") that the old behavior let
+ * every tool/model through — the opposite of what was promised.
+ */
 function notInAllowList(value: unknown, allowList: unknown): boolean {
   const v = value != null ? String(value).toLowerCase().trim() : '';
+  if (v === '') return false;
   const allowed = (Array.isArray(allowList) ? allowList : []).map((x) => String(x).toLowerCase().trim());
-  return v !== '' && allowed.length > 0 && !allowed.includes(v);
+  return !allowed.includes(v);
 }
