@@ -58,8 +58,9 @@ ${c.output ?? ""}`.toLowerCase();
 };
 function notInAllowList(value, allowList) {
   const v = value != null ? String(value).toLowerCase().trim() : "";
+  if (v === "") return false;
   const allowed = (Array.isArray(allowList) ? allowList : []).map((x) => String(x).toLowerCase().trim());
-  return v !== "" && allowed.length > 0 && !allowed.includes(v);
+  return !allowed.includes(v);
 }
 
 // src/policy-core/atom-catalog.ts
@@ -191,7 +192,7 @@ function requiredContextFor(predicates) {
 }
 
 // src/policy-core/standards-rules.ts
-var PRECEDENCE = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5 };
+var PRECEDENCE = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
 function atomFires(atom, ctx) {
   const pred = ATOM_REGISTRY[atom.predicate];
   if (!pred) return false;
@@ -399,7 +400,7 @@ function sumEventField(events, type, field) {
 }
 
 // src/policy-core/evaluate.ts
-var PRECEDENCE2 = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5 };
+var PRECEDENCE2 = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
 function evaluate(input) {
   let decision = "allow";
   let reasonCode = "AUTHORIZED";
