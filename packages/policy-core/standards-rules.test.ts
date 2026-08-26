@@ -119,6 +119,20 @@ describe('compliance atoms', () => {
     expect(fires('tool-not-allowed', { allowed: ['search'] }, { tool: 'wire-transfer' })).toBe(true);
     expect(fires('tool-not-allowed', { allowed: ['search', 'wire-transfer'] }, { tool: 'wire-transfer' })).toBe(false);
   });
+  it('allow-list atoms fire on an EMPTY allow-list too — "nothing approved yet", not "everything permitted"', () => {
+    // Regression for a bug where notInAllowList() required allowed.length > 0 before firing
+    // at all, so an unconfigured (empty) allow-list silently let everything through —
+    // found while wiring the Scenario Bank's tool-boundary-baseline set, whose own
+    // remediation text promises the opposite ("ships empty so that nothing passes
+    // unexamined"). data-source-not-approved already got this right; these four did not.
+    expect(fires('tool-not-allowed', { allowed: [] }, { tool: 'shell-exec' })).toBe(true);
+    expect(fires('model-not-allowed', { allowed: [] }, { model: 'unvetted-local-llm' })).toBe(true);
+    expect(fires('jurisdiction-not-allowed', { allowed: [] }, { jurisdiction: 'DE' })).toBe(true);
+    expect(fires('data-residency-violation', { allowedRegions: [] }, { dataResidency: 'US' })).toBe(true);
+    // Still does not fire when the field itself is simply absent — an empty allow-list
+    // does not turn "no value supplied" into a violation.
+    expect(fires('tool-not-allowed', { allowed: [] }, {})).toBe(false);
+  });
   it('pii-present: fires only when explicitly flagged', () => {
     expect(fires('pii-present', {}, { piiPresent: true })).toBe(true);
     expect(fires('pii-present', {}, { piiPresent: false })).toBe(false);
