@@ -16,6 +16,10 @@ enforcement boundary — see [Separate tool gateway](#separate-tool-gateway-defa
 
 ## Free local harness (no account, no network, `--harness`)
 
+> **Without MetaMynd, you can be bypassed.** `--harness` proves your policy logic works — it does
+> not enforce it against a caller trying to get around it. See [What this is not](#what-this-is-not)
+> below before you rely on it for anything beyond testing rules.
+
 ```bash
 npm create metamynd-agent@latest -- --harness   # or: npx create-metamynd-agent --harness
 ```
@@ -38,6 +42,8 @@ my-agent/
 ```
 
 ### What this is not
+
+**Without MetaMynd, you can be bypassed.** Everything below is why, precisely.
 
 No anchored or cross-party-verifiable identity, no dashboard reachable when your machine is off, no
 owner queue someone *else* can approve from, no anchored evidence, no enforced platform Standards.
@@ -81,6 +87,8 @@ agent with your own limits.
 
 `--sandbox` always scaffolds the single-process shape (no `gateway/`) — it's a shared identity never
 meant to hold real credentials, so there's nothing here worth a separate enforcement boundary for.
+Note this is a narrower gap than `--harness`'s: `--sandbox` DOES call MetaMynd for the decision, it
+just still has nowhere else for the tool to live, so the same in-process bypass applies regardless.
 The generated project's own README says so. The full flow below is what scaffolds one by default.
 
 ## Use
@@ -126,6 +134,10 @@ npm start
 
 ### Separate tool gateway (default)
 
+This is the other half of **without MetaMynd, you can be bypassed**: WITH it — specifically, with
+`gateway/`, the second process this scaffolds by default — you can't be, the same way the hosted
+platform's own MCP counterparty can't be talked around by a compromised agent.
+
 `guard.guardTool()` in `index.mjs` still runs — it's a fast, local, client-side pre-check that gives
 good UX (fail fast on an obviously-blocked call, no round trip) — but it is **not** what stops a
 bypass. It still calls its handler in the SAME process regardless of where the decision came from,
@@ -142,8 +154,9 @@ AgentSafe repo (mutual handshake, x402 payment binding, capability tokens) — t
 just the part that closes the bypass, not the whole protocol.
 
 Pass `--no-gateway` to opt out and get the old single-process scaffold instead — e.g. if you're
-already running your own separate gateway and don't need this one. The generated project's own
-README says plainly that this is *not* a separate enforcement boundary if you do.
+already running your own separate gateway and don't need this one. **You are back to being
+bypassable if you do**, for the same structural reason `--harness` is; the generated project's own
+README says so plainly.
 
 ## Non-interactive
 
