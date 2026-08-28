@@ -420,6 +420,10 @@ console.log(dim('   - the blocked call never reached your tool at all.'));
 console.log(dim('   - every decision was recorded as tamper-evident evidence.'));
 console.log(dim('   - if the gate were unreachable the guard fails CLOSED: it blocks.'));
 console.log('');
+console.log(bold('  Without MetaMynd, you can be bypassed.') + ' bookFlight() runs in THIS process -');
+console.log(dim('  call it directly instead of gatedBookFlight and nothing above stops you.'));
+console.log(dim('  Re-scaffold without --sandbox/--no-gateway for the default shape, which does.'));
+console.log('');
 console.log('  Change the cap in the dashboard (Legal Entity -> SOPs) and run again.');
 console.log(dim('  The outcome changes. This file does not. That is the point.'));
 console.log('');
@@ -600,6 +604,9 @@ console.log(dim('     authority, because it cannot name an action nobody delegat
 console.log(dim('   - every blocked/escalated call never reached a real tool at all.'));
 console.log(dim('   - if the gate were unreachable the guard fails CLOSED: it blocks.'));
 console.log('');
+console.log(bold('  With MetaMynd, you can\\'t be bypassed.') + ' ./gateway is why - it independently');
+console.log(dim('  re-verified step 1 before running it, and holds the tool this file never can.'));
+console.log('');
 console.log('  Change the cap in the dashboard (Legal Entity -> SOPs) and run again.');
 console.log(dim('  The outcome changes. This file does not. That is the point.'));
 console.log('');
@@ -682,7 +689,8 @@ A MetaMynd/AgentSafe-governed agent, scaffolded with \`create-metamynd-agent\`.
 
 ${gatewaySection}${
     withGateway
-      ? `This scaffold's default shape (agent + separate gateway process, port ${gatewayPort} by
+      ? `**With MetaMynd's gateway, you can't be bypassed** — that's what this section is about.
+This scaffold's default shape (agent + separate gateway process, port ${gatewayPort} by
 default) is the actual enforcement boundary: \`guard.guardTool()\` in \`index.mjs\` is a
 client-side convenience, not a boundary — it still runs its handler in-process regardless of
 where the decision came from. What actually stops a bypass is that \`bookFlight()\` itself only
@@ -690,15 +698,16 @@ exists in \`./gateway\`, a process this one cannot reach into, which independent
 every request against this agent's own policy bundle. Re-scaffold with \`--no-gateway\` for the
 old single-process shape — it is NOT a separate enforcement boundary; see its own generated
 README for why.`
-      : `This scaffold has no separate gateway process (either \`--sandbox\`, which never
-provisions real credentials, or \`--no-gateway\` was passed): \`guard.guardTool()\` wraps a tool
-in the SAME process as the check itself. That is a client-side convenience, not a boundary — it
-still runs your tool's handler in-process regardless of where the decision came from, so
-anything able to call \`bookFlight()\` directly gets the same result the gate would have given
-it. If this tool ever holds a real credential, provision for real (drop \`--sandbox\`) without
-\`--no-gateway\` for the default shape, which puts the tool behind a separate process instead.
-This is the same structural gap \`--harness\`'s README documents, for the same reason: a
-cooperative in-process check has no counterparty to disagree with a caller that skips it.`
+      : `**Without MetaMynd, you can be bypassed** — this is that case. This scaffold has no
+separate gateway process (either \`--sandbox\`, which never provisions real credentials, or
+\`--no-gateway\` was passed): \`guard.guardTool()\` wraps a tool in the SAME process as the check
+itself. That is a client-side convenience, not a boundary — it still runs your tool's handler
+in-process regardless of where the decision came from, so anything able to call \`bookFlight()\`
+directly gets the same result the gate would have given it. If this tool ever holds a real
+credential, provision for real (drop \`--sandbox\`) without \`--no-gateway\` for the default
+shape, which puts the tool behind a separate process instead. This is the same structural gap
+\`--harness\`'s README documents, for the same reason: a cooperative in-process check has no
+counterparty to disagree with a caller that skips it.`
   }
 
 ## Change the rules
@@ -828,7 +837,8 @@ function gatewayGitignore() {
 function gatewayReadme(slug, scope, port) {
   return `# ${slug}-gateway
 
-This is the **real enforcement boundary** for \`${slug}\`'s tool(s) — not \`../index.mjs\`.
+**With MetaMynd, you can't be bypassed.** This process is why. It is the **real enforcement
+boundary** for \`${slug}\`'s tool(s) — not \`../index.mjs\`.
 
 ## Why this exists
 
@@ -1552,12 +1562,17 @@ console.log(dim('     authority, because it cannot name an action nobody delegat
 console.log(dim('   - the blocked call never reached your tool at all.'));
 console.log(dim('   - every decision is in ./metamynd-harness.log.jsonl - yours, locally.'));
 console.log('');
+console.log(bold('  Without MetaMynd, you can be bypassed.') + ' bookFlight() above runs in THIS');
+console.log(dim('  process - call it directly instead of gatedBookFlight and nothing stops you.'));
+console.log(dim('  --harness proves your policy logic; it does not enforce it against that.'));
+console.log('');
 console.log('  Edit ./metamynd-rules.json (or the dashboard) and run again - the outcome');
 console.log(dim('  changes. This file does not. That is the point.'));
 console.log('');
 console.log(dim('  Ready for more than one machine, a queue someone else can approve from,'));
-console.log(dim('  anchored evidence, or KYC/KYB-backed identity? That is the hosted platform -'));
-console.log(dim('  same guardTool() call, same rules shape, drop --harness and provision there.'));
+console.log(dim('  anchored evidence, or KYC/KYB-backed identity, AND a separate gateway process'));
+console.log(dim('  that closes the bypass above? That is the hosted platform - drop --harness'));
+console.log(dim('  and provision there; the same guardTool() call keeps working.'));
 console.log('');
 dashboard.close();
 `;
@@ -1607,6 +1622,8 @@ open the dashboard to approve it), and a BLOCK (an action outside the mandate en
 
 ## What this is not
 
+**Without MetaMynd, you can be bypassed.** Everything below is why, precisely.
+
 No anchored/verifiable identity, no cross-party trust, no evidence anyone but you can audit,
 no dashboard reachable when this machine is off, no owner queue someone else can approve from.
 That's the hosted platform (\`npx create-metamynd-agent\`, without \`--harness\`) — same
@@ -1617,8 +1634,8 @@ cooperative library this process embeds — call the tool handler directly inste
 one and nothing stops you, because there is no second party in the loop to disagree with you.
 That's structural, not a bug: use this harness to govern your own agent's own honest behavior,
 not as a defense against an agent (or a person) actively trying to get around it. The hosted
-platform's \`guardTool()\` doesn't have this gap, because the MCP/tool service re-verifies the
-agent's signed authority for itself instead of trusting that the agent's own guard ran.
+platform's default scaffold doesn't have this gap, because a SEPARATE gateway process re-verifies
+the agent's signed authority for itself instead of trusting that the agent's own guard ran.
 `;
 }
 
