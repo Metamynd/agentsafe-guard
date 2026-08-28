@@ -9,6 +9,47 @@ portable `agent.metamynd.json`, and drops a runnable example that gates a tool t
 > MetaMynd account. If that's you and you're verified, you're ready. Verify once in the dashboard if
 > not; it's the only gate.
 
+## Free local harness (no account, no network, `--harness`)
+
+```bash
+npm create metamynd-agent@latest -- --harness   # or: npx create-metamynd-agent --harness
+```
+
+No login, no KYB, **no network call at all** — generates a local identity and a local rules file
+(mandate + starter SOP), and scaffolds a project whose `guardTool()` calls are decided entirely on
+your machine by the same deterministic evaluator ([`policy-core`](../agentsafe-guard/policy-core.mjs))
+the hosted gate runs. An escalated action is held for **you** to approve at a small local dashboard
+(`http://127.0.0.1:4400` by default) — there's no hosted owner queue in this mode, because there's
+no hosted anything. Real gating, your own rules, free, forever.
+
+```
+my-agent/
+├─ agent.metamynd.json      # a locally-generated identity — NOT anchored/verifiable
+├─ metamynd-rules.json      # your rules — edit by hand, or at the dashboard
+├─ metamynd-harness.log.jsonl  # every decision, append-only
+├─ harness-server.mjs       # the local dashboard: rules, pending approvals, decision log
+├─ index.mjs                # runnable example: ALLOW · BLOCK · ESCALATE (approve locally) · BLOCK
+└─ package.json / .gitignore / README.md
+```
+
+### What this is not
+
+No anchored or cross-party-verifiable identity, no dashboard reachable when your machine is off, no
+owner queue someone *else* can approve from, no anchored evidence, no enforced platform Standards.
+That set of things is the hosted platform — and getting there later is a **config change, not a
+rewrite**: the exact same `guardTool()` call your harness project already makes just needs a real
+`bundleUrl`/`api` pointed at a real gate (provision normally, without `--harness`) instead of a rules
+file you authored yourself. Nothing about how you wrote your agent changes.
+
+Works with `--config` too — its `rules` become the harness's starter rules file, same as the hosted
+flow. See [Policy config file](#policy-config-file---config) below.
+
+The dashboard's rules panel is a real editor, not just JSON with input boxes: edit an existing
+rule's values, **delete** a rule, or **add a new one** from a form (predicate + its typed config
+fields + decision) driven by the same atom catalog and validator
+([`policy-core`](../agentsafe-guard/policy-core.mjs)) the hosted gate itself uses — so nothing you
+add through it can be invalid. Hand-editing `metamynd-rules.json` still works too, if you prefer.
+
 ## Try it instantly — sandbox (no account, no KYB)
 
 ```bash
@@ -16,8 +57,10 @@ npm create metamynd-agent@latest -- --sandbox   # or: npx create-metamynd-agent 
 ```
 
 Skips login and provisioning entirely — fetches a **shared sandbox agent** config from the public
-`POST /onboarding/sandbox` endpoint and scaffolds a runnable example. Great for a first look; use
-the full flow below when you want your own governed agent with your own limits.
+`POST /onboarding/sandbox` endpoint and scaffolds a runnable example. Unlike `--harness`, this DOES
+call the hosted API (a shared demo identity) — it's a first look at the *hosted* platform, not a
+local/offline mode. Great for a first look; use the full flow below when you want your own governed
+agent with your own limits.
 
 ## Use
 
@@ -65,8 +108,10 @@ METAMYND_PASSWORD='…' npx create-metamynd-agent --yes …
 
 | Flag | Env | Default |
 |---|---|---|
-| `--sandbox` | — | off (skips login/KYB; shared sandbox agent) |
+| `--harness` | — | off (no login/KYB/network at all; free local governance — see above) |
+| `--sandbox` | — | off (skips login/KYB; shared sandbox agent, still hosted) |
 | `--config <file>` | — | a JSON policy file — see [Policy config file](#policy-config-file---config) |
+| `--port <n>` | — | `4400` — `--harness` only, the local dashboard's port |
 | `--api <url>` | `METAMYND_API` | `https://metamynd.ai/api/v1` |
 | `--email <email>` | `METAMYND_EMAIL` | — (required) |
 | `--password <pw>` | `METAMYND_PASSWORD` | interactive masked prompt |
