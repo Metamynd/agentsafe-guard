@@ -63,9 +63,14 @@ ${c.b('Usage')}
   npx create-metamynd-agent [options]
 
 ${c.b('Options')}
+  --harness            No login, no KYB, no network at all: a free local governance harness —
+                       your own rules, your own identity, decided entirely on this machine. See
+                       README#harness. Not for enterprise use (no anchored identity/evidence,
+                       no cross-party trust) — that is what the hosted platform adds.
   --sandbox            No login, no KYB: scaffold against the shared sandbox agent (fastest start)
   --config <file>      A JSON policy file (name/scope/limits + simple "rules") — see README#config-file.
-                       Flags below still override individual fields from the file.
+                       Flags below still override individual fields from the file. Works with
+                       --harness too (its rules become the harness's starter rules file).
   --request            Delegated: request an agent for an owner's org (--owner <email>, +--byok)
   --claim [--watch]    Delegated: claim the config once the owner approves (reads metamynd-request.json)
   --owner <email>      Target owner's email (with --request)
@@ -83,6 +88,7 @@ ${c.b('Options')}
                        (MetaMynd never sees the private key). Overridden by --public-key.
   --public-key <hex>   BYOK with a key you already hold (SPKI/raw hex); you prove control yourself
   --out <dir>          Output project directory (default ./<agent-slug>)
+  --port <n>           --harness only: the local dashboard's port (default 4400)
   --yes, -y            Non-interactive: use flags/env/defaults, never prompt
   -h, --help           Show this help
   -v, --version        Show version
@@ -521,6 +527,696 @@ async function runSandbox(args) {
   scaffoldProject({ outDir, config, slug: 'metamynd-sandbox', scope, perTxnMax, sandbox: true, force: !!args.force });
 }
 
+// ---------- --harness: a free, local, zero-network governance harness ----------
+//
+// Not the hosted platform, and not trying to be. `guardToolLocal()` + `evaluateLocally()`
+// (agentsafe-guard.mjs) already decide allow/block/escalate with NO network call, given
+// {standards, sops, mandate} as plain objects — this mode is just the missing packaging:
+// author those objects locally instead of fetching a signed bundle from a backend, add
+// somewhere for a human to approve an escalate, and a page to see any of it.
+//
+// What you get: real gating, on your own machine, your own rules, no account.
+// What you don't: anchored/verifiable identity, cross-party trust, evidence anyone but you
+// can audit, a dashboard reachable when your machine is off. That gap is the paid platform —
+// and it's a config change to cross, not a rewrite: point `bundleUrl` at a real MAGP_API
+// (or re-provision with `create-metamynd-agent`, no --harness) and the SAME guardTool() calls
+// keep working, sealed by a real gate instead of a rules file you authored yourself.
+
+/** Mirrors defaultSopDocument() in backend/src/features/onboarding/onboarding.provision.ts —
+ *  same starter rules the hosted platform issues, so a harness project behaves identically
+ *  to a freshly-provisioned one before anyone edits either. */
+function harnessDefaultSop(perTxnMax) {
+  return {
+    molecules: [
+      { id: 'cap', name: 'Per-transaction cap', combinator: 'any', atoms: [{ id: 'a1', predicate: 'amount-over', config: { limit: perTxnMax } }], decision: 'block', reasonCode: 'SOP_SPEND_CAP' },
+      { id: 'review', name: 'High-risk review', combinator: 'any', atoms: [{ id: 'a2', predicate: 'risk-at-or-above', config: { level: 'high' } }], decision: 'escalate', reasonCode: 'RISK_REVIEW' },
+    ],
+  };
+}
+
+/** Mirrors issueMandate()'s document shape in backend/src/features/policy/mandate/mandate.service.ts
+ *  (minus the parts only a real principal/issuer can do: no VC, no Hedera anchor, no signature) —
+ *  same shape evaluateMandate() in policy-core.mjs expects either way. */
+function harnessMandate({ scope, currency, maxAmount, perTxnMax, merchants }) {
+  return {
+    uid: `urn:metamynd:mandate:local-${crypto.randomUUID()}`,
+    profile: 'https://metamynd.ai/odrl/agent-mandate/v1',
+    validFrom: new Date().toISOString(),
+    validUntil: null,
+    permission: [
+      {
+        target: scope,
+        action: 'execute',
+        constraint: [
+          { leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: perTxnMax, unit: currency },
+          { leftOperand: 'mm:cumulativeSpend', operator: 'lteq', rightOperand: maxAmount, unit: currency },
+          ...(merchants?.length ? [{ leftOperand: 'mm:merchant', operator: 'isAnyOf', rightOperand: merchants }] : []),
+        ],
+      },
+    ],
+  };
+}
+
+/** A clearly-local, clearly-not-anchored identifier — `guard.agentDid` is just a signing
+ *  subject in the local path (never resolved against Hedera), but the format should not
+ *  read as a verified did:hedera when it is not one. */
+function harnessAgentDid(publicKeyHex) {
+  return `did:key:local-${crypto.createHash('sha256').update(publicKeyHex, 'hex').digest('hex').slice(0, 32)}`;
+}
+
+function harnessRulesFile(mandate, sopDocument) {
+  return JSON.stringify(
+    {
+      _comment: 'Your rules — edit here, or at the dashboard below. Reloaded on every decision, no restart needed.',
+      mandate,
+      sops: [{ standardKey: 'sop', document: sopDocument }],
+      standards: [],
+    },
+    null,
+    2,
+  ) + '\n';
+}
+
+function harnessServerFile() {
+  return `// harness-server.mjs — the free local governance dashboard. Zero dependencies.
+// Runs in-process with your agent: shows the rules in force, lets you add/edit/remove SOP
+// rules without hand-editing JSON, holds an escalated action for YOU to approve (there is no
+// hosted owner queue here — you are the owner), and logs every decision. Bound to 127.0.0.1
+// by default: this is a local trust boundary, not a service.
+import http from 'node:http';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, writeFileSync as wf } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+// The SAME atom catalog + validator the hosted platform's rule builder uses — so the add-rule
+// form's predicate list, field types and validation never drift from what the gate accepts.
+import { ATOM_SPECS, validateMolecules } from '${GUARD_PKG}/policy-core';
+
+const OPERATORS = { lteq: '<=', gteq: '>=', lt: '<', gt: '>', eq: '==', neq: '!=', isAnyOf: 'is any of', isNoneOf: 'is none of' };
+function renderConstraint(c) {
+  const op = OPERATORS[c.operator] || c.operator;
+  const right = Array.isArray(c.rightOperand) ? \`[\${c.rightOperand.join(', ')}]\` : c.rightOperand;
+  return \`\${String(c.leftOperand).replace(/^mm:/, '')} \${op} \${right}\${c.unit ? ' ' + c.unit : ''}\`;
+}
+function renderAtom(a) {
+  const c = a.config || {};
+  switch (a.predicate) {
+    case 'amount-over': return \`transaction amount must not exceed \${c.limit}\`;
+    case 'cumulative-over': return \`cumulative spend must not exceed \${c.limit}\`;
+    case 'jurisdiction-not-allowed': return \`jurisdiction must be one of [\${(c.allowed || []).join(', ')}]\`;
+    case 'tool-not-allowed': return \`tool must be one of [\${(c.allowed || []).join(', ')}]\`;
+    case 'risk-at-or-above': return \`risk level at or above \${c.level}\`;
+    default: return \`\${a.predicate}\${Object.keys(c).length ? ' ' + JSON.stringify(c) : ''}\`;
+  }
+}
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// A field's declared type (from ATOM_SPECS) coerces a raw form string authoritatively —
+// no guessing, unlike the generic value-edit coerce() below.
+function coerceField(raw, type) {
+  if (type === 'number') return Number(raw);
+  if (type === 'string[]') return String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+  return raw; // string, enum
+}
+
+export function startDashboard({ port = 4400, host = '127.0.0.1', agentDid, scope, rulesPath, logPath }) {
+  const holds = new Map(); // id -> { id, action, args, decision, ts, status, resolve }
+  if (!existsSync(logPath)) wf(logPath, '');
+
+  function log(entry) {
+    try { appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + '\\n'); } catch { /* best-effort */ }
+  }
+  function tailLog(n = 25) {
+    try {
+      const lines = readFileSync(logPath, 'utf8').split('\\n').filter(Boolean);
+      return lines.slice(-n).reverse().map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    } catch { return []; }
+  }
+  function readRules() {
+    try { return JSON.parse(readFileSync(rulesPath, 'utf8')); } catch (e) { return { error: String(e?.message ?? e) }; }
+  }
+  function writeRules(next) {
+    writeFileSync(rulesPath, JSON.stringify(next, null, 2) + '\\n');
+  }
+
+  /** Called by your agent code when a governed action escalates. Registers the hold (visible
+   *  on the dashboard immediately) and returns { id, promise } — promise resolves to
+   *  true/false the moment a human clicks Approve/Deny here. Nothing times this out; a caller
+   *  that wants a demo-friendly timeout should race the promise itself. */
+  function holdForApproval(action, args, decision) {
+    const id = randomUUID();
+    log({ type: 'escalate', id, action, args, reasonCode: decision.reasonCode });
+    let resolveFn;
+    const promise = new Promise((resolve) => { resolveFn = resolve; });
+    holds.set(id, { id, action, args, decision, ts: Date.now(), status: 'pending', resolve: resolveFn });
+    return { id, promise };
+  }
+
+  function logDecision(action, args, decision) {
+    if (decision.decision === 'escalate') return; // holdForApproval already logs this one
+    log({ type: decision.decision, action, args, reasonCode: decision.reasonCode });
+  }
+
+  function renderRulesHtml(rules) {
+    if (rules.error) return \`<p class="err">Could not read \${esc(rulesPath)}: \${esc(rules.error)}</p>\`;
+    const m = (rules.mandate?.permission || [])[0];
+    const mandateRows = (m?.constraint || []).map((c, i) =>
+      \`<div class="rule"><span class="rname">\${esc(c.leftOperand.replace(/^mm:/, ''))}</span><span class="rcond">\${esc(renderConstraint(c))}</span>
+       <input data-kind="mandate" data-idx="\${i}" value="\${esc(Array.isArray(c.rightOperand) ? c.rightOperand.join(',') : c.rightOperand)}" /></div>\`).join('');
+    // Grouped by molecule (one "rule" a person authored), not flattened — a molecule can have
+    // several atoms/config fields, and the delete button acts on the whole rule, not one field.
+    const sopGroups = (rules.sops || []).flatMap((s) => (s.document?.molecules || []).map((mo) => {
+      const fieldRows = (mo.atoms || []).flatMap((a) => Object.entries(a.config || {}).map(([k, v]) =>
+        \`<div class="rule"><span class="rcond">\${esc(renderAtom(a))}</span>
+         <input data-kind="atom" data-mid="\${esc(mo.id)}" data-aid="\${esc(a.id)}" data-key="\${esc(k)}" value="\${esc(Array.isArray(v) ? v.join(',') : v)}" /></div>\`)).join('');
+      return \`<div class="mgroup">
+        <div class="mhead"><span class="rname">\${esc(mo.name || mo.id)}</span>
+          <span class="reff">\${esc(mo.decision)} · \${esc(mo.reasonCode)}</span>
+          <button class="delmol" data-id="\${esc(mo.id)}" title="Remove this rule">Delete</button></div>
+        \${fieldRows}
+      </div>\`;
+    })).join('');
+    return \`<div class="rules">\${mandateRows}</div>\${sopGroups}<button id="save">Save changes</button><span id="saveMsg"></span>
+<div id="addRule">
+  <h3>Add a rule</h3>
+  <div class="addrow">
+    <label>When <select id="addPredicate"></select></label>
+    <label>Then <select id="addDecision">
+      <option value="block">block</option><option value="escalate">escalate</option>
+      <option value="observe">observe</option><option value="suspend">suspend</option>
+      <option value="quarantine">quarantine</option>
+    </select></label>
+  </div>
+  <p class="dim" id="addDesc"></p>
+  <div id="addFields"></div>
+  <div class="addrow">
+    <label>Name <input id="addName" placeholder="(optional)" /></label>
+    <label>Reason code <input id="addReasonCode" placeholder="(auto)" /></label>
+  </div>
+  <button id="addRuleBtn">Add rule</button><span id="addMsg"></span>
+</div>\`;
+  }
+
+  function renderHoldsHtml() {
+    const pending = [...holds.values()].filter((h) => h.status === 'pending').sort((a, b) => a.ts - b.ts);
+    if (!pending.length) return '<p class="dim">No pending approvals.</p>';
+    return pending.map((h) =>
+      \`<div class="hold"><b>\${esc(h.action)}</b> <span class="dim">\${esc(h.decision.reasonCode)}</span>
+       <pre>\${esc(JSON.stringify(h.args, null, 2))}</pre>
+       <button class="approve" data-id="\${h.id}">Approve</button>
+       <button class="deny" data-id="\${h.id}">Deny</button></div>\`).join('');
+  }
+
+  function renderLogHtml() {
+    const rows = tailLog(25);
+    if (!rows.length) return '<p class="dim">No decisions yet — run your agent.</p>';
+    return rows.map((r) =>
+      \`<div class="logrow \${esc(r.type)}"><span class="dot"></span><b>\${esc(r.action)}</b> \${esc(r.type)} <span class="dim">\${esc(r.reasonCode || '')} · \${esc(r.ts)}</span></div>\`).join('');
+  }
+
+  function page() {
+    const rules = readRules();
+    return \`<!doctype html><html><head><meta charset="utf-8"><title>MetaMynd harness — \${esc(scope)}</title>
+<style>
+  * { box-sizing: border-box; } body { margin:0; background:#f5f4f8; color:#1a1a2e; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:16px 22px; border-bottom:1px solid #e2e0eb; background:#fff; }
+  header h1 { font-size:16px; margin:0 0 4px; } header .did { font:11px ui-monospace,monospace; color:#6b6b80; }
+  main { max-width:760px; margin:0 auto; padding:20px; }
+  section { background:#fff; border:1px solid #e2e0eb; border-radius:10px; padding:14px 16px; margin-bottom:16px; }
+  section h2 { font-size:13px; margin:0 0 10px; color:#6b6b80; text-transform:uppercase; letter-spacing:.04em; }
+  .rule { display:flex; align-items:center; gap:10px; padding:6px 0; border-top:1px solid #eeecf3; flex-wrap:wrap; }
+  .rule:first-child { border-top:none; } .rname { font-weight:600; } .reff { font-weight:400; color:#6b6b80; font-size:11px; }
+  .rcond { font:12px ui-monospace,monospace; color:#6b6b80; flex:1; }
+  .rule input { font:12px ui-monospace,monospace; border:1px solid #d8d5e6; border-radius:6px; padding:4px 8px; width:140px; }
+  .mgroup { border-top:1px solid #eeecf3; padding:8px 0; }
+  .mhead { display:flex; align-items:center; gap:10px; margin-bottom:2px; }
+  .mhead .rname { min-width:150px; }
+  button { font:inherit; cursor:pointer; border:none; border-radius:8px; padding:8px 14px; background:#6c4ff2; color:#fff; font-weight:600; }
+  button.deny, button.delmol { background:#c02532; } button.approve { background:#0f7a43; }
+  button.delmol { padding:4px 10px; font-size:11px; margin-left:auto; }
+  #saveMsg, #addMsg { margin-left:10px; color:#0f7a43; font-size:12px; }
+  #addRule { margin-top:14px; padding-top:14px; border-top:1px solid #eeecf3; }
+  #addRule h3 { font-size:12px; margin:0 0 10px; color:#6b6b80; text-transform:uppercase; letter-spacing:.04em; }
+  .addrow { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:8px; }
+  .addrow label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:#6b6b80; }
+  .addrow input, .addrow select, #addFields input, #addFields select { font:13px inherit; border:1px solid #d8d5e6; border-radius:6px; padding:6px 8px; min-width:160px; }
+  #addFields { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:8px; }
+  #addFields label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:#6b6b80; }
+  #addDesc { font-size:12px; margin:2px 0 10px; }
+  .hold { border:1px solid #f2c46a; background:#fff8ea; border-radius:8px; padding:10px 12px; margin-bottom:8px; }
+  .hold pre { font-size:11px; background:#f5f4f8; padding:8px; border-radius:6px; overflow:auto; }
+  .dim { color:#6b6b80; } pre { margin:6px 0; }
+  .logrow { padding:5px 0; border-top:1px solid #eeecf3; font-size:12px; } .logrow:first-child { border-top:none; }
+  .logrow .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  .logrow.allow .dot, .logrow.observe .dot { background:#0f7a43; } .logrow.block .dot { background:#c02532; } .logrow.escalate .dot { background:#c98a1c; }
+  .err { color:#c02532; }
+</style></head><body>
+<header><h1>MetaMynd governance harness</h1><div class="did">\${esc(agentDid)} · scope \${esc(scope)}</div></header>
+<main>
+<section><h2>Rules in force</h2>\${renderRulesHtml(rules)}</section>
+<section><h2>Pending approvals</h2><div id="holds">\${renderHoldsHtml()}</div></section>
+<section><h2>Recent decisions</h2><div id="log">\${renderLogHtml()}</div></section>
+</main>
+<script>
+async function refresh() {
+  const r = await fetch('/state').then((x) => x.json());
+  document.getElementById('holds').innerHTML = r.holdsHtml;
+  document.getElementById('log').innerHTML = r.logHtml;
+}
+
+// --- Add-a-rule form: predicates + field types come from the SAME catalog the gate itself
+// validates against (served at /catalog), so this form can never offer something invalid. ---
+let CATALOG = [];
+function fieldInputHtml(f) {
+  const id = 'af_' + f.key;
+  if (f.type === 'enum') {
+    return '<label>' + f.description + '<select id="' + id + '" data-key="' + f.key + '" data-type="' + f.type + '">' +
+      (f.options || []).map((o) => '<option value="' + o + '">' + o + '</option>').join('') + '</select></label>';
+  }
+  return '<label>' + f.description + (f.type === 'string[]' ? ' (comma-separated)' : '') +
+    '<input id="' + id + '" data-key="' + f.key + '" data-type="' + f.type + '" ' + (f.type === 'number' ? 'type="number"' : '') + ' /></label>';
+}
+function renderAddFields() {
+  const spec = CATALOG.find((s) => s.predicate === document.getElementById('addPredicate').value);
+  document.getElementById('addDesc').textContent = spec ? spec.description : '';
+  document.getElementById('addFields').innerHTML = spec ? spec.config.map(fieldInputHtml).join('') : '';
+}
+fetch('/catalog').then((r) => r.json()).then((specs) => {
+  CATALOG = specs;
+  document.getElementById('addPredicate').innerHTML = specs.map((s) => '<option value="' + s.predicate + '">' + s.label + '</option>').join('');
+  renderAddFields();
+});
+document.getElementById('addPredicate').addEventListener('change', renderAddFields);
+
+document.addEventListener('click', async (e) => {
+  if (e.target.matches('.approve,.deny')) {
+    const id = e.target.dataset.id, verb = e.target.classList.contains('approve') ? 'approve' : 'deny';
+    await fetch('/holds/' + id + '/' + verb, { method: 'POST' });
+    refresh();
+  }
+  if (e.target.id === 'save') {
+    const mandateInputs = [...document.querySelectorAll('input[data-kind="mandate"]')];
+    const atomInputs = [...document.querySelectorAll('input[data-kind="atom"]')];
+    const edits = {
+      mandate: mandateInputs.map((i) => ({ idx: Number(i.dataset.idx), value: i.value })),
+      atoms: atomInputs.map((i) => ({ mid: i.dataset.mid, aid: i.dataset.aid, key: i.dataset.key, value: i.value })),
+    };
+    const res = await fetch('/rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(edits) });
+    document.getElementById('saveMsg').textContent = res.ok ? 'saved — takes effect on the next decision' : 'save failed';
+  }
+  if (e.target.matches('.delmol')) {
+    if (!confirm('Remove this rule?')) return;
+    const res = await fetch('/rules/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: e.target.dataset.id }) });
+    if (res.ok) location.reload(); else document.getElementById('saveMsg').textContent = 'delete failed';
+  }
+  if (e.target.id === 'addRuleBtn') {
+    const predicate = document.getElementById('addPredicate').value;
+    const config = {};
+    for (const el of document.querySelectorAll('#addFields [data-key]')) config[el.dataset.key] = el.value;
+    const body = {
+      predicate, config,
+      decision: document.getElementById('addDecision').value,
+      name: document.getElementById('addName').value || undefined,
+      reasonCode: document.getElementById('addReasonCode').value || undefined,
+    };
+    const res = await fetch('/rules/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const r = await res.json();
+    if (res.ok) location.reload();
+    else document.getElementById('addMsg').textContent = r.error || 'could not add rule';
+  }
+});
+setInterval(refresh, 3000);
+</script></body></html>\`;
+  }
+
+  // A number-looking string edit becomes a number (spend caps etc.); a comma-list becomes an
+  // array (merchants/allow-lists); anything else stays a string.
+  function coerce(raw) {
+    if (raw.includes(',')) return raw.split(',').map((s) => s.trim()).filter(Boolean);
+    if (raw.trim() !== '' && !Number.isNaN(Number(raw))) return Number(raw);
+    return raw;
+  }
+
+  function applyEdits(rules, edits) {
+    const m = (rules.mandate?.permission || [])[0];
+    for (const e of edits.mandate || []) {
+      if (m?.constraint?.[e.idx]) m.constraint[e.idx].rightOperand = coerce(e.value);
+    }
+    for (const e of edits.atoms || []) {
+      for (const s of rules.sops || []) {
+        const mol = (s.document?.molecules || []).find((x) => x.id === e.mid);
+        const atom = mol?.atoms?.find((a) => a.id === e.aid);
+        if (atom) atom.config[e.key] = coerce(e.value);
+      }
+    }
+    return rules;
+  }
+
+  /** Builds one molecule from the add-rule form, validates it with the SAME validator the
+   *  hosted platform runs, and appends it to the first SOP document (there is exactly one in
+   *  a harness project). Single-atom, combinator "all" — the same "sugar" shape --config's
+   *  "rules" array compiles to, so a harness rules file and a --config file stay interchangeable. */
+  function addRule({ predicate, config, decision, name, reasonCode }) {
+    const spec = ATOM_SPECS.find((s) => s.predicate === predicate);
+    if (!spec) return { ok: false, error: \`unknown predicate "\${predicate}"\` };
+    const cfg = {};
+    for (const f of spec.config) {
+      const raw = config?.[f.key];
+      if (raw === undefined || raw === '') { if (f.required) return { ok: false, error: \`"\${f.description}" is required\` }; continue; }
+      cfg[f.key] = coerceField(raw, f.type);
+    }
+    const molecule = {
+      id: \`\${predicate}-\${Date.now().toString(36)}\`,
+      name: name || spec.label,
+      combinator: 'all',
+      atoms: [{ id: 'a1', predicate, config: cfg }],
+      decision,
+      reasonCode: reasonCode || \`\${predicate.toUpperCase().replace(/-/g, '_')}_\${String(decision).toUpperCase()}\`,
+    };
+    const check = validateMolecules([molecule]);
+    if (!check.ok) return { ok: false, error: check.issues.map((i) => i.message).join('; ') };
+    const rules = readRules();
+    if (rules.error) return { ok: false, error: rules.error };
+    if (!rules.sops?.[0]) rules.sops = [{ standardKey: 'sop', document: { molecules: [] } }];
+    rules.sops[0].document.molecules = [...(rules.sops[0].document.molecules || []), molecule];
+    writeRules(rules);
+    log({ type: 'rule-added', id: molecule.id, predicate, decision });
+    return { ok: true, molecule };
+  }
+
+  function deleteRule(id) {
+    const rules = readRules();
+    if (rules.error) return { ok: false, error: rules.error };
+    for (const s of rules.sops || []) {
+      if (!s.document?.molecules) continue;
+      s.document.molecules = s.document.molecules.filter((mo) => mo.id !== id);
+    }
+    writeRules(rules);
+    log({ type: 'rule-deleted', id });
+    return { ok: true };
+  }
+
+  const server = http.createServer(async (req, res) => {
+    const path = req.url.split('?')[0];
+    const send = (status, body, type = 'application/json') => { res.writeHead(status, { 'Content-Type': type }); res.end(type === 'application/json' ? JSON.stringify(body) : body); };
+    if (req.method === 'GET' && path === '/') return send(200, page(), 'text/html; charset=utf-8');
+    if (req.method === 'GET' && path === '/state') return send(200, { holdsHtml: renderHoldsHtml(), logHtml: renderLogHtml() });
+    if (req.method === 'GET' && path === '/catalog') return send(200, ATOM_SPECS);
+    if (req.method === 'POST' && path === '/rules') {
+      let body = ''; req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        try { writeRules(applyEdits(readRules(), JSON.parse(body || '{}'))); return send(200, { ok: true }); }
+        catch (e) { return send(500, { ok: false, error: String(e?.message ?? e) }); }
+      });
+      return;
+    }
+    if (req.method === 'POST' && path === '/rules/add') {
+      let body = ''; req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        try {
+          const r = addRule(JSON.parse(body || '{}'));
+          return send(r.ok ? 200 : 400, r);
+        } catch (e) { return send(500, { ok: false, error: String(e?.message ?? e) }); }
+      });
+      return;
+    }
+    if (req.method === 'POST' && path === '/rules/delete') {
+      let body = ''; req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        try {
+          const { id } = JSON.parse(body || '{}');
+          return send(200, deleteRule(id));
+        } catch (e) { return send(500, { ok: false, error: String(e?.message ?? e) }); }
+      });
+      return;
+    }
+    const m = /^\\/holds\\/([^/]+)\\/(approve|deny)$/.exec(path);
+    if (req.method === 'POST' && m) {
+      const h = holds.get(m[1]);
+      if (h && h.status === 'pending') {
+        h.status = m[2] === 'approve' ? 'approved' : 'denied';
+        log({ type: h.status, id: h.id, action: h.action });
+        h.resolve(h.status === 'approved');
+      }
+      return send(200, { ok: true });
+    }
+    send(404, { error: 'not found' });
+  });
+  server.listen(port, host);
+  return { holdForApproval, logDecision, url: \`http://\${host}:\${port}\`, close: () => server.close() };
+}
+`;
+}
+
+function harnessIndexFile(scope, perTxnMax, port) {
+  const under = Math.max(1, Math.round(perTxnMax * 0.5));
+  const over = Math.round(perTxnMax + 100);
+  return `// index.mjs — your agent, governed entirely on this machine. No account, no network call
+// for a decision: guardToolLocal() decides allow/block/escalate against ./metamynd-rules.json
+// (edit it directly, or at the dashboard). An escalate is held here for YOU to approve —
+// there is no hosted owner queue in this mode, so open the dashboard URL printed below.
+import { readFileSync } from 'node:fs';
+import { createGuard } from '${GUARD_PKG}';
+import { startDashboard } from './harness-server.mjs';
+
+const config = JSON.parse(readFileSync('./agent.metamynd.json', 'utf8'));
+// 'local' as the api: guardToolLocal() never calls it. Kept required-but-unused rather than
+// silently accepting no api at all, so a later switch to a real gate is one field, not a rewrite.
+const guard = createGuard({ api: 'local', agentDid: config.agentDid, agentKey: config.agentKey });
+
+const dashboard = startDashboard({
+  port: ${port},
+  agentDid: config.agentDid,
+  scope: '${scope}',
+  rulesPath: './metamynd-rules.json',
+  logPath: './metamynd-harness.log.jsonl',
+});
+console.log('\\x1b[2m  dashboard: ' + dashboard.url + ' (rules, approvals, decision log)\\x1b[0m\\n');
+
+// Reads the CURRENT rules file fresh every call — editing it (by hand, or at the dashboard)
+// takes effect on the next decision, no restart, matching the "no redeploy" experience the
+// hosted platform gives you.
+const getBundle = () => JSON.parse(readFileSync('./metamynd-rules.json', 'utf8'));
+
+// --- Your real tool. Replace the body with your actual implementation. ---
+async function bookFlight(args) {
+  return { pnr: 'PNR-DEMO', ...args };
+}
+
+// --- The GATED version. Register THIS with your agent instead of the raw handler. ---
+const gatedBookFlight = guard.guardToolLocal(
+  '${scope}',                                   // = your mandate scope
+  bookFlight,
+  (a) => ({                                     // map tool args → gate inputs
+    amount: a.amount,
+    merchant: a.merchant,
+    context: { tool: 'book-flight', riskLevel: a.riskLevel ?? 'low' },
+  }),
+  getBundle,
+);
+
+// --- A tool the agent was NEVER granted. Wrapping it is the demonstration: there is no
+// --- rule anywhere forbidding this. The mandate simply never mentioned the action.
+async function raiseOwnLimit(args) {
+  return { updated: true, ...args };          // never runs, and that is the point
+}
+
+const gatedRaiseOwnLimit = guard.guardToolLocal(
+  'permissions.update',                       // an action NOT in the mandate
+  raiseOwnLimit,
+  (a) => ({ amount: a.amount, merchant: a.merchant, context: { tool: 'permissions-update' } }),
+  getBundle,
+);
+
+const dim = (t) => '\\x1b[2m' + t + '\\x1b[0m';
+const bold = (t) => '\\x1b[1m' + t + '\\x1b[0m';
+const rule = (n) => '  ' + '-'.repeat(n);
+
+const WHY = {
+  AUTHORIZED: 'inside the mandate and under the SOP spend cap',
+  SOP_SPEND_CAP: 'your SOP caps a single transaction at $${perTxnMax}',
+  RISK_REVIEW: 'your SOP sends high-risk actions to a human first',
+  MERCHANT_NOT_ALLOWED: 'the mandate lists which merchants this agent may pay',
+  NO_PERMISSION_FOR_ACTION: 'the mandate never granted this action - at any amount',
+  NO_MANDATE: 'there is no mandate for this action at all',
+};
+
+async function attempt(n, intent, action, args, tool = gatedBookFlight) {
+  console.log('');
+  console.log(bold('  Step ' + n + ' of 4') + ' - ' + intent);
+  console.log(dim('     evaluating locally, no network call...'));
+  try {
+    const r = await tool(args);
+    console.log('\\x1b[32m     ALLOWED\\x1b[0m  your tool ran and returned ' + (r.pnr ?? 'ok'));
+    console.log(dim('     ' + WHY.AUTHORIZED));
+  } catch (e) {
+    const g = e.governance ?? {};
+    const why = WHY[g.reasonCode] ?? e.message;
+    if (g.decision === 'escalate') {
+      console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for you to approve - ' + g.reasonCode);
+      console.log(dim('     ' + why));
+      const { id, promise } = dashboard.holdForApproval(action, args, g);
+      console.log(dim('     open ' + dashboard.url + ' and click Approve/Deny (hold ' + id.slice(0, 8) + '…)'));
+      const timeout = new Promise((r) => setTimeout(() => r('timeout'), 20000));
+      const result = await Promise.race([promise, timeout]);
+      if (result === 'timeout') console.log(dim('     still pending after 20s — this demo will not wait forever; the dashboard will, run it again to check.'));
+      else console.log(dim('     ' + (result ? 'approved.' : 'denied.')));
+    } else {
+      console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? 'refused'));
+      console.log(dim('     ' + why));
+      console.log(dim('     your tool never ran - the gate refused before execution.'));
+    }
+    dashboard.logDecision(action, args, g);
+  }
+}
+
+console.log('');
+console.log(bold('  What this simulation shows'));
+console.log('');
+console.log('  Same idea as the hosted platform, running entirely on this machine: an agent');
+console.log('  should not be the thing that decides what it is allowed to do. Three attempts');
+console.log('  take the SAME code path and produce three different outcomes. The fourth asks');
+console.log('  for something never granted at all - the one a prompt could not have stopped,');
+console.log('  because the decision is not made inside your program, and not on a server either.');
+console.log('');
+console.log(dim('  scope  ${scope}'));
+console.log(dim('  cap    $${perTxnMax} per transaction, from ./metamynd-rules.json'));
+
+console.log('');
+console.log(rule(66));
+await attempt(1, 'a $${under} booking, low risk. Expected to pass.', '${scope}', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'low' });
+await attempt(2, 'a $${over} booking, deliberately over the cap.', '${scope}', { amount: ${over}, merchant: 'skyward-air', riskLevel: 'low' });
+await attempt(3, 'a $${under} booking, but flagged high risk.', '${scope}', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'high' });
+await attempt(4, 'the agent stops booking flights and asks to raise its OWN limit.', 'permissions.update', { amount: 100000, merchant: 'skyward-air' }, gatedRaiseOwnLimit);
+console.log('');
+console.log(rule(66));
+
+console.log('');
+console.log(bold('  What this proved'));
+console.log('');
+console.log(dim('   - one code path, three outcomes, decided with zero network calls.'));
+console.log(dim('   - step 4 needed no rule to stop it. The agent could not widen its own'));
+console.log(dim('     authority, because it cannot name an action nobody delegated to it.'));
+console.log(dim('   - the blocked call never reached your tool at all.'));
+console.log(dim('   - every decision is in ./metamynd-harness.log.jsonl - yours, locally.'));
+console.log('');
+console.log('  Edit ./metamynd-rules.json (or the dashboard) and run again - the outcome');
+console.log(dim('  changes. This file does not. That is the point.'));
+console.log('');
+console.log(dim('  Ready for more than one machine, a queue someone else can approve from,'));
+console.log(dim('  anchored evidence, or KYC/KYB-backed identity? That is the hosted platform -'));
+console.log(dim('  same guardTool() call, same rules shape, drop --harness and provision there.'));
+console.log('');
+dashboard.close();
+`;
+}
+
+function harnessPackageJson(slug) {
+  return JSON.stringify(
+    {
+      name: slug,
+      version: '0.1.0',
+      private: true,
+      type: 'module',
+      scripts: { start: 'node index.mjs' },
+      dependencies: { [GUARD_PKG]: GUARD_VERSION },
+    },
+    null,
+    2,
+  ) + '\n';
+}
+
+function harnessReadme(slug, scope, port) {
+  return `# ${slug}
+
+A free, local MetaMynd/AgentSafe governance harness — your own rules, your own identity,
+decided entirely on this machine. No account, no network call for a decision.
+
+## Run
+
+\`\`\`bash
+npm install
+npm start
+\`\`\`
+
+You should see an ALLOW, a BLOCK (over the per-transaction cap), an ESCALATE (high risk —
+open the dashboard to approve it), and a BLOCK (an action outside the mandate entirely).
+
+## Files
+
+- \`agent.metamynd.json\` — your local identity (a generated Ed25519 keypair; \`agentDid\` is a
+  local label, not an anchored/verifiable one). **Contains a secret key — never commit it.**
+- \`metamynd-rules.json\` — your rules: the mandate (scope + spend limits) and SOP (extra checks).
+  Edit it directly, or at the dashboard. Reloaded on every decision — no restart.
+- \`metamynd-harness.log.jsonl\` — every decision this agent made, append-only.
+- \`harness-server.mjs\` — the local dashboard (port ${port}): rules, pending approvals, decision log.
+- \`index.mjs\` — wraps a tool with \`guard.guardToolLocal(...)\`; the tool only runs when the
+  LOCAL rules permit it.
+
+## What this is not
+
+No anchored/verifiable identity, no cross-party trust, no evidence anyone but you can audit,
+no dashboard reachable when this machine is off, no owner queue someone else can approve from.
+That's the hosted platform (\`npx create-metamynd-agent\`, without \`--harness\`) — same
+\`guardTool()\` call, same rules shape, so upgrading later is a config change, not a rewrite.
+`;
+}
+
+/** --harness: no login, no KYB, no network — author identity + rules locally and scaffold. */
+async function runHarness(args) {
+  const interactive = !args.yes && process.stdin.isTTY;
+  const rl = interactive ? makeRl() : null;
+  const pick = async (flag, prompt, def) => {
+    const fromFlag = typeof args[flag] === 'string' ? args[flag] : undefined;
+    if (fromFlag !== undefined) return fromFlag;
+    if (!interactive) return def;
+    return ask(rl, prompt, def);
+  };
+
+  const fileConfig = typeof args.config === 'string' ? loadConfigFile(args.config) : null;
+  if (fileConfig) console.log(`  ${c.green('✓')} loaded policy config ${c.dim(args.config)}`);
+
+  const name = await pick('name', 'Agent name', fileConfig?.name ?? 'Local Agent');
+  const scope = await pick('scope', 'Mandate scope (governed action)', fileConfig?.scope ?? 'flight-purchase');
+  const perTxnMax = Number(await pick('per-txn-max', 'Per-transaction cap', String(fileConfig?.perTxnMax ?? '500'))) || 500;
+  const maxAmount = Number(await pick('max-amount', 'Total mandate budget', String(fileConfig?.maxAmount ?? '10000'))) || 10000;
+  const currency = (await pick('currency', 'Currency', fileConfig?.currency ?? 'USD')) || 'USD';
+  const merchantsRaw = await pick('merchants', 'Allowed merchants (comma-sep, blank = any)', Array.isArray(fileConfig?.merchants) ? fileConfig.merchants.join(',') : '');
+  const merchants = String(merchantsRaw).split(',').map((s) => s.trim()).filter(Boolean);
+  const port = Number(args.port) || 4400;
+  const slug = slugify(name);
+  const outDir = resolve(String(args.out || (interactive ? await ask(rl, 'Output directory', `./${slug}`) : `./${slug}`)));
+  rl?.close();
+
+  assertScaffoldTarget(outDir, !!args.force);
+  console.log(c.dim('\n  → generating a local identity (Ed25519, this machine only) …'));
+  const { publicKeyHex, privateKeyHex } = generateAgentKeypair();
+  const agentDid = harnessAgentDid(publicKeyHex);
+  console.log(`  ${c.green('✓')} local agent ${c.b(agentDid)}`);
+
+  const sopFields = configFileSopFields(fileConfig);
+  const sopDocument = sopFields.sop ? sopFields.sop.documentJson : harnessDefaultSop(perTxnMax);
+  if (sopFields.sop) console.log(`  ${c.green('✓')} compiled ${sopDocument.molecules.length} rule(s) from the config file`);
+  const mandate = harnessMandate({ scope, currency, maxAmount, perTxnMax, merchants });
+
+  console.log(`\n  ${c.b('Scaffolding')} ${c.dim(outDir)}`);
+  if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+  writeFileSafe(outDir, 'agent.metamynd.json', JSON.stringify({ agentDid, agentKey: privateKeyHex, mode: 'harness' }, null, 2) + '\n', !!args.force);
+  writeFileSafe(outDir, 'metamynd-rules.json', harnessRulesFile(mandate, sopDocument), !!args.force);
+  writeFileSafe(outDir, 'harness-server.mjs', harnessServerFile(), !!args.force);
+  writeFileSafe(outDir, 'index.mjs', harnessIndexFile(scope, perTxnMax, port), !!args.force);
+  writeFileSafe(outDir, 'package.json', harnessPackageJson(slug), !!args.force);
+  writeFileSafe(outDir, '.gitignore', gitignore(), !!args.force);
+  writeFileSafe(outDir, 'README.md', harnessReadme(slug, scope, port), !!args.force);
+
+  const rel = outDir.replace(resolve('.'), '.').replace(/\\/g, '/');
+  console.log(`\n${c.green(c.b('  ✓ Done.'))} Your local governance harness is ready.\n`);
+  console.log(`  ${c.dim('Free, local, no account. Not the hosted platform — see README#what-this-is-not.')}\n`);
+  console.log(`  Next:`);
+  console.log(c.cyan(`    cd ${rel}`));
+  console.log(c.cyan(`    npm install`));
+  console.log(c.cyan(`    npm start`) + c.dim('   → ALLOW · BLOCK (over cap) · ESCALATE (approve at the dashboard) · BLOCK (ungranted action)\n'));
+  console.log(c.dim(`  Edit ./metamynd-rules.json any time (by hand, or at http://127.0.0.1:${port}) — no redeploy.\n`));
+}
+
 // ---------- delegated issuance (#6) ----------
 async function apiGet(base, path, { claimToken } = {}) {
   let res;
@@ -647,6 +1343,8 @@ async function main() {
 
   console.log(`\n${c.b(c.cyan('  create-metamynd-agent'))}  ${c.dim('— provision a governed agent in ~2 minutes')}\n`);
 
+  // --harness: skip login + provisioning + the network entirely.
+  if (args.harness) { await runHarness(args); return; }
   // --sandbox: skip login + provisioning entirely.
   if (args.sandbox) { await runSandbox(args); return; }
   // Delegated issuance (#6): request an agent for an owner's org / claim it once approved.
