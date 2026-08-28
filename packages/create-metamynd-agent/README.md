@@ -2,8 +2,13 @@
 
 Scaffold a **MetaMynd/AgentSafe-governed** AI agent in one command. It logs you in, provisions the
 agent in a **single call** (identity + mandate + starter SOP + all enforced Standards), writes a
-portable `agent.metamynd.json`, and drops a runnable example that gates a tool through the
-[`@metamynd/agentsafe-guard`](https://www.npmjs.com/package/@metamynd/agentsafe-guard).
+portable `agent.metamynd.json`, and drops a runnable agent that gates a tool through the
+[`@metamynd/agentsafe-guard`](https://www.npmjs.com/package/@metamynd/agentsafe-guard) — **plus, by
+default, a second `gateway/` process** built on
+[`@metamynd/agentsafe-mcp-guard`](https://www.npmjs.com/package/@metamynd/agentsafe-mcp-guard) and
+[`@metamynd/agentsafe-http-gateway`](https://www.npmjs.com/package/@metamynd/agentsafe-http-gateway).
+The agent's own `guardTool()` call is a fast, local, client-side check; the gateway is the real
+enforcement boundary — see [Separate tool gateway](#separate-tool-gateway-default) below.
 
 > **Prerequisite:** an agent is always owned by a **KYB-verified owner** — a person/org with a
 > MetaMynd account. If that's you and you're verified, you're ready. Verify once in the dashboard if
@@ -45,13 +50,13 @@ It is also **not a separate enforcement boundary**, and this matters more than t
 `guardToolLocal()` is a cooperative library your own process embeds — call the raw handler directly
 instead of the guarded one and nothing stops you, because there is no second party in the loop to
 disagree with you. Confirmed by direct testing: a bypass attempt (skip the guard, call the tool
-function underneath it) succeeds every time, structurally, not as a bug. In the hosted flow this is
-what the **counterparty** is for — the MCP/tool service independently re-verifies the agent's signed
-authority for itself rather than trusting that the agent's own guard ran, which is why a compromised
-or dishonest agent still can't get an honest service to act (see the three-party demo at
-[metamynd.ai/developers/quickstart](https://metamynd.ai/developers/quickstart)). `--harness` has no
-counterparty, so it can't have that property. Use it to govern your own agent's own honest behavior
-— not as a defense against an agent (or a person) that's actively trying to get around it.
+function underneath it) succeeds every time, structurally, not as a bug. What actually closes this
+is a **counterparty** — a separate process holding the tool, that independently re-verifies the
+agent's signed authority for itself rather than trusting that the agent's own guard ran. `--harness`
+never has one, by design (there's no second party on one machine with no network). **Just dropping
+`--harness` is not enough on its own to get one either** — see
+[Separate tool gateway](#separate-tool-gateway-default) below for what actually provides it, and
+`--no-gateway`'s own caveat for what happens if you opt out of it.
 
 Works with `--config` too — its `rules` become the harness's starter rules file, same as the hosted
 flow. See [Policy config file](#policy-config-file---config) below.
@@ -74,6 +79,10 @@ call the hosted API (a shared demo identity) — it's a first look at the *hoste
 local/offline mode. Great for a first look; use the full flow below when you want your own governed
 agent with your own limits.
 
+`--sandbox` always scaffolds the single-process shape (no `gateway/`) — it's a shared identity never
+meant to hold real credentials, so there's nothing here worth a separate enforcement boundary for.
+The generated project's own README says so. The full flow below is what scaffolds one by default.
+
 ## Use
 
 ```bash
@@ -82,24 +91,59 @@ npm create metamynd-agent@latest
 npx create-metamynd-agent
 ```
 
-Answer a few prompts (API, owner email/password, agent name, scope, per-transaction cap) and you get:
+Answer a few prompts (API, owner email/password, agent name, scope, per-transaction cap) and you get
+**two** scaffolded projects — the agent, and its tool gateway:
 
 ```
 my-agent/
 ├─ agent.metamynd.json   # portable guard config — HOLDS THE AGENT SECRET KEY (gitignored)
-├─ index.mjs             # runnable example: ALLOW · BLOCK (over cap) · ESCALATE (high risk)
+├─ index.mjs             # runnable example: signs + calls ./gateway; guardTool() here is a
+│                         # fast local pre-check, NOT the enforcement boundary
 ├─ package.json          # depends on @metamynd/agentsafe-guard
 ├─ .gitignore
-└─ README.md
+├─ README.md
+└─ gateway/               # a SEPARATE process — the real enforcement boundary. Read its
+    ├─ server.mjs         # README first if you only read one.
+    ├─ package.json       # depends on @metamynd/agentsafe-mcp-guard + @metamynd/agentsafe-http-gateway
+    ├─ .env.example       # real tool credentials go here, never in the agent directory
+    ├─ .gitignore
+    └─ README.md
 ```
 
-Then:
+Then, in **two terminals** — the gateway first:
+
+```bash
+cd my-agent/gateway
+npm install
+npm start
+```
 
 ```bash
 cd my-agent
 npm install
 npm start
 ```
+
+### Separate tool gateway (default)
+
+`guard.guardTool()` in `index.mjs` still runs — it's a fast, local, client-side pre-check that gives
+good UX (fail fast on an obviously-blocked call, no round trip) — but it is **not** what stops a
+bypass. It still calls its handler in the SAME process regardless of where the decision came from,
+so anything able to call that handler directly gets the same result the gate would have given it.
+
+What actually stops a bypass is that `bookFlight()` doesn't exist in the agent's process at all.
+It exists only in `gateway/server.mjs` — a separate process, started separately, holding any real
+tool credentials the agent process never sees — which independently re-verifies every request
+against the agent's own published policy bundle before running it (same shape as the mutual
+counterparty check in [`@metamynd/agentsafe-mcp-guard`](https://www.npmjs.com/package/@metamynd/agentsafe-mcp-guard),
+built with [`@metamynd/agentsafe-http-gateway`](https://www.npmjs.com/package/@metamynd/agentsafe-http-gateway)).
+It's a minimal slice of the same pattern proven end to end in `demo/duffel-mcp-gateway` in the
+AgentSafe repo (mutual handshake, x402 payment binding, capability tokens) — this scaffold gives you
+just the part that closes the bypass, not the whole protocol.
+
+Pass `--no-gateway` to opt out and get the old single-process scaffold instead — e.g. if you're
+already running your own separate gateway and don't need this one. The generated project's own
+README says plainly that this is *not* a separate enforcement boundary if you do.
 
 ## Non-interactive
 
@@ -123,6 +167,8 @@ METAMYND_PASSWORD='…' npx create-metamynd-agent --yes …
 | `--harness` | — | off (no login/KYB/network at all; free local governance — see above) |
 | `--sandbox` | — | off (skips login/KYB; shared sandbox agent, still hosted) |
 | `--config <file>` | — | a JSON policy file — see [Policy config file](#policy-config-file---config) |
+| `--no-gateway` | — | off — hosted flow only; skips the default separate tool gateway (see above) |
+| `--gateway-port <n>` | — | `4401` — hosted flow only, the gateway process's port |
 | `--port <n>` | — | `4400` — `--harness` only, the local dashboard's port |
 | `--api <url>` | `METAMYND_API` | `https://metamynd.ai/api/v1` |
 | `--email <email>` | `METAMYND_EMAIL` | — (required) |
@@ -200,13 +246,18 @@ npx create-metamynd-agent --claim --watch
 ```
 
 `--request` submits the request (as your own authed user) and stores the claim token locally; `--claim`
-polls until the owner approves, then scaffolds the project. With `--byok` the keypair is generated
-locally and control is proven on claim — MetaMynd never sees the private key.
+polls until the owner approves, then scaffolds the project (the same default two-process shape as
+the full flow above — `--no-gateway`/`--gateway-port` work here too). With `--byok` the keypair is
+generated locally and control is proven on claim — MetaMynd never sees the private key.
 
 ## Security
 
 `agent.metamynd.json` contains the agent's **secret key** (a managed key, or — with `--byok` — the one
 generated locally). The scaffolded project gitignores it. Never commit it or paste it anywhere public.
+
+Any REAL tool credential (an airline API key, a payment key, ...) belongs in `gateway/.env` — never
+in the agent directory. That's the whole point of the default two-process shape: the agent process
+should never be able to hold, or leak, a credential it doesn't have.
 
 ## Full guide
 
