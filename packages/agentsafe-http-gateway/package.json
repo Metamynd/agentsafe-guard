@@ -1,0 +1,60 @@
+{
+  "name": "@metamynd/agentsafe-http-gateway",
+  "version": "0.1.1",
+  "description": "Generic HTTP interception gateway (SAFR §17) — a zero-dependency reverse proxy that governs arbitrary HTTP calls through the AgentSafe gate before forwarding upstream.",
+  "type": "module",
+  "main": "gateway.mjs",
+  "exports": {
+    ".": "./gateway.mjs",
+    "./route-match": "./route-match.mjs",
+    "./server": "./server.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "gateway.mjs",
+    "route-match.mjs",
+    "server.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node gateway.smoke.mjs"
+  },
+  "dependencies": {
+    "@metamynd/agentsafe-mcp-guard": "^0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "http",
+    "gateway",
+    "reverse-proxy",
+    "ai",
+    "agent",
+    "agents",
+    "governance",
+    "authorization",
+    "trustless",
+    "zero-trust",
+    "magp",
+    "metamynd",
+    "agentsafe"
+  ],
+  "author": "MetaMynd",
+  "license": "MIT",
+  "homepage": "https://metamynd.ai/en/developers/spec",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Metamynd/agentsafe-guard.git",
+    "directory": "packages/agentsafe-http-gateway"
+  },
+  "bugs": {
+    "url": "https://github.com/Metamynd/agentsafe-guard/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

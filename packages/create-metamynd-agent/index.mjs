@@ -3,8 +3,10 @@
 //
 // Logs a KYB-verified owner in, provisions the agent in ONE call
 // (POST /onboarding/agent → identity + mandate + starter SOP + enforced Standards),
-// writes the portable `agent.metamynd.json`, and drops a runnable example that gates a
-// tool through the guard (allow / block / escalate).
+// writes the portable `agent.metamynd.json` and a runnable agent example, PLUS (by default)
+// a separate `gateway/` process — a second, independent guard that re-verifies every request
+// and holds the real tool, so the agent's own guardTool() call is a convenience, not the
+// enforcement boundary. `--no-gateway` skips it (see README#separate-tool-gateway-default).
 //
 // ZERO dependencies: Node ≥ 18 built-ins only (fetch, readline).
 //
@@ -22,7 +24,13 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // >=0.4.0 <0.5.0, so leaving this at ^0.4.0 would scaffold an agent whose `npm test` runs
 // `agentsafe-guard verify` against a guard that has no such command.
 const GUARD_VERSION = '^0.5.0';
+// The default hosted scaffold's SECOND process — the tool gateway (see scaffoldProject).
+const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
+const MCP_GUARD_VERSION = '^0.1.0';
+const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
+const GATEWAY_VERSION = '^0.1.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
+const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
 // ---------- tiny ANSI ----------
 const c = {
@@ -88,6 +96,10 @@ ${c.b('Options')}
                        (MetaMynd never sees the private key). Overridden by --public-key.
   --public-key <hex>   BYOK with a key you already hold (SPKI/raw hex); you prove control yourself
   --out <dir>          Output project directory (default ./<agent-slug>)
+  --no-gateway         Hosted flow only: skip the separate tool-gateway process (see
+                       README#separate-tool-gateway-default) and scaffold the old
+                       single-process example instead. Not a separate enforcement boundary.
+  --gateway-port <n>   Hosted flow only: the gateway process's port (default 4401)
   --port <n>           --harness only: the local dashboard's port (default 4400)
   --yes, -y            Non-interactive: use flags/env/defaults, never prompt
   -h, --help           Show this help
@@ -99,7 +111,9 @@ ${c.b('Environment')}
 ${c.b('What it does')}
   1. Logs in as a KYB-verified owner       → owner access token
   2. POST /onboarding/agent (one call)      → identity + mandate + SOP + Standards
-  3. Writes agent.metamynd.json + a runnable example that gates a tool through the guard.
+  3. Writes agent.metamynd.json + index.mjs, PLUS (by default) a separate gateway/ process —
+     the real enforcement boundary, not index.mjs's own guard.guardTool() call. --no-gateway
+     skips it.
 `;
 
 // ---------- prompts ----------
@@ -257,7 +271,17 @@ async function apiPost(base, path, body, token) {
 }
 
 // ---------- scaffolding ----------
-function exampleIndex(scope, perTxnMax) {
+/**
+ * The --no-gateway / --sandbox variant: the tool is a local function in the SAME process as
+ * guard.guardTool(). Fine for a demo with nothing real behind it (--sandbox always uses this —
+ * it's a shared identity, never meant to hold real credentials). For anything that touches a
+ * real credential, guard.guardTool() alone is a client-side convenience, not a boundary: it
+ * still calls this handler in-process regardless of where the decision came from, so an agent
+ * that skips it and calls bookFlight() directly gets the same result the gate would have given
+ * it — the same shape of gap --harness's README documents. See exampleIndex() below, which is
+ * what the real (non-sandbox) flow scaffolds by default instead.
+ */
+function exampleIndexNoGateway(scope, perTxnMax) {
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
   return `// index.mjs — your agent, governed by MetaMynd/AgentSafe.
@@ -268,6 +292,11 @@ import { createGuardFromConfig } from '${GUARD_PKG}';
 const guard = await createGuardFromConfig('./agent.metamynd.json'); // no env vars
 
 // --- Your real tool. Replace the body with your actual implementation. ---
+// --- If that implementation touches a real credential, this in-process call is NOT an
+// --- enforcement boundary: guard.guardTool() below still calls this function directly in
+// --- THIS process regardless of the decision's source, so anything that can call it directly
+// --- gets the same result the gate would have given it. A real (non --sandbox) scaffold
+// --- without --no-gateway moves this behind a separate process instead. See README.
 async function bookFlight(args) {
   return { pnr: 'PNR-DEMO', ...args };
 }
@@ -397,6 +426,186 @@ console.log('');
 `;
 }
 
+/**
+ * The DEFAULT hosted scaffold: the tool lives in a separate process (./gateway), not here.
+ * guard.guardTool() below is still called — it is a fast, local, client-side pre-check that
+ * gives good UX (fail fast, no round trip for an obviously-blocked call) — but it is not what
+ * stops a bypass. What stops a bypass is that there is no bookFlight() in THIS process to call
+ * directly: it only exists in ./gateway, which independently re-verifies every request against
+ * this agent's own policy bundle before it runs, and holds any real credentials the tool needs.
+ */
+function exampleIndex(scope, perTxnMax, gatewayPort) {
+  const under = Math.max(1, Math.round(perTxnMax * 0.5));
+  const over = Math.round(perTxnMax + 100);
+  return `// index.mjs — your agent, governed by MetaMynd/AgentSafe.
+// Every governed tool call is checked TWICE before it runs: once here (fast, local, client-side),
+// and independently again by ./gateway — a SEPARATE process that holds the real tool and its
+// credentials. That second check is the actual enforcement boundary; see ./gateway/README.md.
+import { createGuardFromConfig } from '${GUARD_PKG}';
+
+// Loads agent.metamynd.json: the agent's DID, its signing key, and the gate to call.
+const guard = await createGuardFromConfig('./agent.metamynd.json'); // no env vars
+
+const GATEWAY = process.env.GATEWAY_URL || 'http://localhost:${gatewayPort}';
+
+// --- Calls the gateway process instead of a local function. There is no raw bookFlight() in
+// --- this file to call directly — the tool, and any real credentials it needs, live only in
+// --- ./gateway, which independently re-verifies this signed request itself.
+async function bookFlightViaGateway(args) {
+  const signed = guard.buildSignedRequest({
+    action: '${scope}',
+    amount: args.amount,
+    currency: 'USD',
+    merchant: args.merchant,
+    context: { tool: 'book-flight', riskLevel: args.riskLevel ?? 'low' },
+  });
+  const res = await fetch(GATEWAY + '/book-flight', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) },
+    body: JSON.stringify(args),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
+    err.name = 'GovernanceBlocked';
+    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR' };
+    throw err;
+  }
+  return body;
+}
+
+// --- The GATED version. Register THIS with your agent instead of calling the gateway directly.
+// --- This local check and the gateway's own re-check are independent; neither trusts the other.
+const gatedBookFlight = guard.guardTool(
+  '${scope}',                                   // = your mandate scope
+  bookFlightViaGateway,
+  (a) => ({                                     // map tool args → gate inputs
+    amount: a.amount,
+    currency: 'USD',
+    merchant: a.merchant,
+    context: { tool: 'book-flight', riskLevel: a.riskLevel ?? 'low' },
+  }),
+);
+
+// --- A tool the agent was NEVER granted. Wrapping it is the demonstration: there is no
+// --- rule anywhere forbidding this. The mandate simply never mentioned the action.
+async function raiseOwnLimit(args) {
+  return { updated: true, ...args };          // never runs, and that is the point
+}
+
+const gatedRaiseOwnLimit = guard.guardTool(
+  'permissions.update',                       // an action NOT in the mandate
+  raiseOwnLimit,
+  (a) => ({
+    amount: a.amount,
+    currency: 'USD',
+    merchant: a.merchant,
+    context: { tool: 'permissions-update' },
+  }),
+);
+
+const dim = (t) => '\\x1b[2m' + t + '\\x1b[0m';
+const bold = (t) => '\\x1b[1m' + t + '\\x1b[0m';
+const rule = (n) => '  ' + '-'.repeat(n);
+
+// Plain-English meaning for the reason codes this demo can produce. The gateway re-evaluates
+// the SAME policy bundle with the SAME evaluator the gate uses, so it produces these same codes.
+const WHY = {
+  AUTHORIZED: 'inside the mandate and under the SOP spend cap',
+  SOP_SPEND_CAP: 'your SOP caps a single transaction at $${perTxnMax}',
+  RISK_REVIEW: 'your SOP sends high-risk actions to a human first',
+  MERCHANT_NOT_ALLOWED: 'the mandate lists which merchants this agent may pay',
+  // Both say the same thing from where you are standing: the mandate does not cover that
+  // action. Which one you see depends on whether the verdict was reached here or at the
+  // gate, and neither of them depends on the amount.
+  NO_PERMISSION_FOR_ACTION: 'the mandate never granted this action - at any amount',
+  NO_MANDATE: 'there is no mandate for this action at all',
+};
+
+// ---------------------------------------------------------------- 1. CONTEXT
+console.log('');
+console.log(bold('  What this simulation shows'));
+console.log('');
+console.log('  An agent should not be the thing that decides what it is allowed to do — and');
+console.log('  it should not be the thing that RUNS what it decided, either. This run makes');
+console.log('  both concrete. Three attempts take the SAME code path and produce three');
+console.log('  different outcomes. The fourth asks for something the agent was never granted');
+console.log('  at all - and that is the one a prompt could not have stopped, because the');
+console.log('  decision is not made inside your program, and the tool is not either.');
+
+// ---------------------------------------------------------------- 2. MECHANISM
+console.log('');
+console.log(bold('  How it does that'));
+console.log('');
+console.log(dim('   1. this project holds an agent identity (a DID) and its signing key'));
+console.log(dim('   2. that agent has a mandate - a scope it may act in, and a spend cap'));
+console.log(dim('   3. guardTool() wraps your tool call, giving a fast local pre-check'));
+console.log(dim('   4. each attempt is ALSO signed and sent to ./gateway - a separate process'));
+console.log(dim('   5. the gateway independently re-verifies before your tool runs there'));
+console.log(dim('   6. there is no local bookFlight() to call directly - only the gateway has it'));
+console.log('');
+console.log(dim('  scope    ${scope}'));
+console.log(dim('  cap      $${perTxnMax} per transaction, set by your SOP'));
+console.log(dim('  gateway  ' + GATEWAY + '  (run it in a separate terminal - see ./gateway)'));
+
+// ---------------------------------------------------------------- 3. THE STEPS
+async function attempt(n, intent, args, tool = gatedBookFlight) {
+  console.log('');
+  console.log(bold('  Step ' + n + ' of 4') + ' - ' + intent);
+  console.log(dim('     signing the request locally, then asking the gate to decide...'));
+  try {
+    const r = await tool(args);
+    console.log('\\x1b[32m     ALLOWED\\x1b[0m  your tool ran (in ./gateway) and returned ' + (r.pnr ?? 'ok'));
+    console.log(dim('     ' + WHY.AUTHORIZED));
+  } catch (e) {
+    const g = e.governance ?? {};
+    const why = WHY[g.reasonCode] ?? e.message;
+    if (g.decision === 'escalate') {
+      console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
+      console.log(dim('     ' + why));
+      console.log(dim('     not a failure: approve it in the dashboard and the action resumes.'));
+    } else {
+      console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? 'refused'));
+      console.log(dim('     ' + why));
+      console.log(dim('     your tool never ran - refused before execution.'));
+    }
+  }
+}
+
+console.log('');
+console.log(rule(66));
+await attempt(1, 'a $${under} booking, low risk. Expected to pass.', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'low' });
+await attempt(2, 'a $${over} booking, deliberately over the cap.', { amount: ${over}, merchant: 'skyward-air', riskLevel: 'low' });
+await attempt(3, 'a $${under} booking, but flagged high risk.', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'high' });
+await attempt(
+  4,
+  'the agent stops booking flights and asks to raise its OWN limit.',
+  { amount: 100000, merchant: 'skyward-air' },
+  gatedRaiseOwnLimit,
+);
+console.log('');
+console.log(rule(66));
+
+// ---------------------------------------------------------------- 4. RESULT
+console.log('');
+console.log(bold('  What this proved'));
+console.log('');
+console.log(dim('   - one code path, three outcomes. The rules decided, not this file'));
+console.log(dim('     and not the model driving it.'));
+console.log(dim('   - step 1 ran in ./gateway, a process this file cannot reach into. There'));
+console.log(dim('     is no rawBookFlight() here to call instead - that is what actually'));
+console.log(dim('     stops a bypass, not the guardTool() call above it.'));
+console.log(dim('   - step 4 needed no rule to stop it. The agent could not widen its own'));
+console.log(dim('     authority, because it cannot name an action nobody delegated to it.'));
+console.log(dim('   - every blocked/escalated call never reached a real tool at all.'));
+console.log(dim('   - if the gate were unreachable the guard fails CLOSED: it blocks.'));
+console.log('');
+console.log('  Change the cap in the dashboard (Legal Entity -> SOPs) and run again.');
+console.log(dim('  The outcome changes. This file does not. That is the point.'));
+console.log('');
+`;
+}
+
 function examplePackageJson(slug) {
   return JSON.stringify(
     {
@@ -415,12 +624,41 @@ function examplePackageJson(slug) {
   ) + '\n';
 }
 
-function exampleReadme(slug, scope) {
-  return `# ${slug}
+function exampleReadme(slug, scope, withGateway, gatewayPort) {
+  const gatewaySection = withGateway
+    ? `## Run
 
-A MetaMynd/AgentSafe-governed agent, scaffolded with \`create-metamynd-agent\`.
+Two processes — start the gateway first, in its own terminal:
 
-## Run
+\`\`\`bash
+cd gateway && npm install && npm start   # the REAL enforcement boundary — see gateway/README.md
+\`\`\`
+
+Then, in this directory:
+
+\`\`\`bash
+npm install
+npm start
+\`\`\`
+
+You should see an ALLOW (fulfilled by \`./gateway\`), a BLOCK (over the per-transaction cap), and
+an ESCALATE (high risk). The BLOCK and ESCALATE never reach the gateway at all — this file's own
+\`guard.guardTool()\` refuses them first. Only the ALLOW crosses into the other process.
+
+## Files
+
+- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
+  **Contains the agent's secret key — never commit it.** It is already in \`.gitignore\`.
+- \`index.mjs\` — signs each request and calls \`./gateway\` for it; \`guard.guardTool()\` here is a
+  fast local pre-check, not the enforcement boundary.
+- \`gateway/\` — a **separate process**. It holds the real tool and independently re-verifies every
+  request against this agent's own policy before running it. See \`gateway/README.md\` — read that
+  one first if you're only going to read one.
+
+## What this is not
+
+`
+    : `## Run
 
 \`\`\`bash
 npm install
@@ -435,6 +673,34 @@ You should see an ALLOW, a BLOCK (over the per-transaction cap), and an ESCALATE
   **Contains the agent's secret key — never commit it.** It is already in \`.gitignore\`.
 - \`index.mjs\` — wraps a tool with \`guard.guardTool(...)\`; the tool only runs when the gate allows.
 
+## What this is not
+
+`;
+  return `# ${slug}
+
+A MetaMynd/AgentSafe-governed agent, scaffolded with \`create-metamynd-agent\`.
+
+${gatewaySection}${
+    withGateway
+      ? `This scaffold's default shape (agent + separate gateway process, port ${gatewayPort} by
+default) is the actual enforcement boundary: \`guard.guardTool()\` in \`index.mjs\` is a
+client-side convenience, not a boundary — it still runs its handler in-process regardless of
+where the decision came from. What actually stops a bypass is that \`bookFlight()\` itself only
+exists in \`./gateway\`, a process this one cannot reach into, which independently re-verifies
+every request against this agent's own policy bundle. Re-scaffold with \`--no-gateway\` for the
+old single-process shape — it is NOT a separate enforcement boundary; see its own generated
+README for why.`
+      : `This scaffold has no separate gateway process (either \`--sandbox\`, which never
+provisions real credentials, or \`--no-gateway\` was passed): \`guard.guardTool()\` wraps a tool
+in the SAME process as the check itself. That is a client-side convenience, not a boundary — it
+still runs your tool's handler in-process regardless of where the decision came from, so
+anything able to call \`bookFlight()\` directly gets the same result the gate would have given
+it. If this tool ever holds a real credential, provision for real (drop \`--sandbox\`) without
+\`--no-gateway\` for the default shape, which puts the tool behind a separate process instead.
+This is the same structural gap \`--harness\`'s README documents, for the same reason: a
+cooperative in-process check has no counterparty to disagree with a caller that skips it.`
+  }
+
 ## Change the rules
 
 Edit the agent's SOPs in the dashboard (Legal Entity → SOPs). The agent's behaviour changes live —
@@ -446,6 +712,172 @@ Full integration guide: \`docs/integration/INTEGRATE-WITH-METAMYND.md\`.
 
 function gitignore() {
   return `node_modules/\nagent.metamynd.json\n.env\n`;
+}
+
+// ---------- the default hosted scaffold's second process: a separate tool gateway ----------
+//
+// Not a new protocol — @metamynd/agentsafe-mcp-guard (trustless verifyRequest, already public)
+// and @metamynd/agentsafe-http-gateway (the generic reverse-proxy built on it, already public)
+// do the real work. This just wires up the smallest useful shape: one protected route, one
+// tool, re-verified independently of the agent that's calling it. See demo/duffel-mcp-gateway
+// in the AgentSafe repo for the full pattern (mutual handshake, x402 payment, capability
+// binding) this is a minimal slice of.
+
+function gatewayServerFile(scope, port, apiBase) {
+  return `#!/usr/bin/env node
+// gateway/server.mjs — the REAL enforcement boundary for this agent's tool(s).
+//
+// This is a SEPARATE process from the agent. It holds the tool's real credentials (the agent
+// process never does), and it independently re-verifies every request against this agent's OWN
+// published policy bundle — it does not trust the agent's own guard.guardTool() check. A
+// compromised or dishonest agent calling its own local function gets nothing here, because
+// there is no local function: the tool only runs in this process.
+import http from 'node:http';
+import { createMcpGuard } from '${MCP_GUARD_PKG}';
+import { createHttpGateway } from '${GATEWAY_PKG}';
+
+const PORT = Number(process.env.PORT || ${port});
+const MAGP_API = process.env.MAGP_API || '${apiBase}';
+
+// --- Your real tool. Real credentials (an airline API key, a payment key, ...) belong ONLY
+// --- here, read from process.env (see .env.example) — never in the agent process.
+async function bookFlight(args) {
+  return { pnr: 'PNR-DEMO', ...args };
+}
+
+// One protected route: only a request signed by this agent, for exactly this action, and
+// re-verified against this agent's own mandate/SOP, reaches bookFlight() below.
+const routes = [{ method: 'POST', path: '/book-flight', action: '${scope}' }];
+
+// No serviceKey: this minimal gateway only calls verifyRequest() (re-check a signed request),
+// not the mutual-handshake methods, which are the only thing that needs it.
+const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API });
+
+const gateway = createHttpGateway({
+  guard,
+  routes,
+  forward: async (req) => {
+    let args = {};
+    try { args = JSON.parse(req.rawBody?.toString('utf8') || '{}'); } catch { /* empty body */ }
+    const result = await bookFlight(args);
+    return { status: 200, body: result };
+  },
+  // This gateway IS the tool, not a proxy in front of one — an unmatched path has nothing to
+  // pass through TO. Without this, any path a route doesn't match falls through ungoverned
+  // straight to forward() above, which would run bookFlight() with no check at all.
+  denyByDefault: true,
+});
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const rawBody = await readBody(req);
+    const result = await gateway({ method: req.method, path: req.url, headers: req.headers, rawBody });
+    const headers = { 'content-type': 'application/json' };
+    if (result.governance) headers['x-agentsafe-decision'] = result.governance.decision;
+    res.writeHead(result.status, headers);
+    res.end(JSON.stringify(result.body ?? {}));
+  } catch (err) {
+    // Fail CLOSED on any gateway error.
+    res.writeHead(502, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ decision: 'block', reasonCode: 'GATEWAY_ERROR', error: String(err?.message ?? err) }));
+  }
+});
+
+server.listen(PORT, () => {
+  console.log('[gateway] listening on :' + PORT + ' -> the only place bookFlight() runs.');
+  console.log('[gateway] every request is independently re-verified against this agent\\'s own policy.');
+});
+`;
+}
+
+function gatewayPackageJson(slug) {
+  return JSON.stringify(
+    {
+      name: slug + '-gateway',
+      version: '0.1.0',
+      private: true,
+      type: 'module',
+      scripts: { start: 'node server.mjs' },
+      dependencies: { [MCP_GUARD_PKG]: MCP_GUARD_VERSION, [GATEWAY_PKG]: GATEWAY_VERSION },
+    },
+    null,
+    2,
+  ) + '\n';
+}
+
+function gatewayEnvExample() {
+  return `# Real tool credentials belong HERE, read from process.env in server.mjs — never in the
+# agent process one directory up.
+# AIRLINE_API_KEY=
+`;
+}
+
+function gatewayGitignore() {
+  return `node_modules/\n.env\n`;
+}
+
+function gatewayReadme(slug, scope, port) {
+  return `# ${slug}-gateway
+
+This is the **real enforcement boundary** for \`${slug}\`'s tool(s) — not \`../index.mjs\`.
+
+## Why this exists
+
+\`guard.guardTool()\` in the agent's \`index.mjs\` is a client-side convenience: it gives fast,
+local ALLOW/BLOCK/ESCALATE feedback, but it still runs its handler in the SAME process
+regardless of where that decision came from. Anything able to call the agent's tool function
+directly — a bug, a compromised dependency, a dishonest fork of the agent's own code — gets the
+same result the gate would have given it. That is not a defect in \`guardTool()\`; a cooperative
+in-process check has no counterparty to disagree with a caller that skips it. See \`--harness\`'s
+own README for the same structural point in the free local-demo mode.
+
+This process closes that gap by being a **separate** one. The agent has no way to reach into it
+and call \`bookFlight()\` directly, because \`bookFlight()\` doesn't exist in the agent's process —
+it exists only here, and every request that reaches it has already been independently
+re-verified against this agent's OWN published policy bundle, fetched over the network by THIS
+process, not trusted from the agent's say-so.
+
+## Run
+
+\`\`\`bash
+npm install
+npm start
+\`\`\`
+
+Listens on \`:${port}\` by default (\`PORT\` env var to change it — keep \`../index.mjs\`'s
+\`GATEWAY_URL\` in sync if you do).
+
+## Add real credentials
+
+Edit \`server.mjs\`'s \`bookFlight()\` with your real implementation, reading any credentials it
+needs from \`process.env\` (see \`.env.example\`). Load \`.env\` however you prefer (e.g.
+\`node --env-file=.env server.mjs\`, Node ≥ 20.6) — it is already in \`.gitignore\`. The agent
+directory one level up must never hold these credentials; if it needs to call a DIFFERENT tool,
+add another protected route here rather than adding a local function back in \`index.mjs\`.
+
+## Files
+
+- \`server.mjs\` — the gateway: one protected route (\`POST /book-flight\`, action \`${scope}\`),
+  \`@metamynd/agentsafe-mcp-guard\`'s \`verifyRequest()\` re-checking every request, and the real
+  \`bookFlight()\`.
+- \`.env.example\` — where real tool credentials go (copy to \`.env\`, fill in, never commit).
+
+## Beyond this minimal slice
+
+This gateway only re-verifies a signed request (§9.3/§9.6 of the MAGP spec). It does not do the
+mutual DID handshake, x402 payment binding, or commitment-bound capability tokens that a
+production Service integration would add — see \`@metamynd/agentsafe-mcp-guard\`'s own README for
+those, and \`demo/duffel-mcp-gateway\` in the AgentSafe repo for a full worked example.
+`;
 }
 
 function writeFileSafe(dir, name, content, force = false) {
@@ -480,16 +912,32 @@ function assertScaffoldTarget(outDir, force) {
   );
 }
 
-/** Write the scaffolded project + print next steps. Shared by the provision and sandbox paths. */
-function scaffoldProject({ outDir, config, slug, scope, perTxnMax, sandbox, force = false }) {
+/**
+ * Write the scaffolded project + print next steps. Shared by the provision and sandbox paths.
+ * `withGateway`: scaffold the default two-process shape (agent + ./gateway) — the real
+ * enforcement boundary. Off for --sandbox (shared demo identity, never real credentials
+ * anyway) and --no-gateway (opt out, e.g. you're already running your own separate gateway).
+ */
+function scaffoldProject({ outDir, config, slug, scope, perTxnMax, sandbox, withGateway, gatewayPort = DEFAULT_GATEWAY_PORT, force = false }) {
   assertScaffoldTarget(outDir, force);
   console.log(`\n  ${c.b('Scaffolding')} ${c.dim(outDir)}`);
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
   writeFileSafe(outDir, 'agent.metamynd.json', JSON.stringify(config, null, 2) + '\n', force);
-  writeFileSafe(outDir, 'index.mjs', exampleIndex(scope, perTxnMax), force);
+  writeFileSafe(outDir, 'index.mjs', withGateway ? exampleIndex(scope, perTxnMax, gatewayPort) : exampleIndexNoGateway(scope, perTxnMax), force);
   writeFileSafe(outDir, 'package.json', examplePackageJson(slug), force);
   writeFileSafe(outDir, '.gitignore', gitignore(), force);
-  writeFileSafe(outDir, 'README.md', exampleReadme(slug, scope), force);
+  writeFileSafe(outDir, 'README.md', exampleReadme(slug, scope, withGateway, gatewayPort), force);
+
+  if (withGateway) {
+    const apiBase = config.apiBase ?? config.api ?? DEFAULT_API;
+    const gwDir = join(outDir, 'gateway');
+    if (!existsSync(gwDir)) mkdirSync(gwDir, { recursive: true });
+    writeFileSafe(gwDir, 'server.mjs', gatewayServerFile(scope, gatewayPort, apiBase), force);
+    writeFileSafe(gwDir, 'package.json', gatewayPackageJson(slug), force);
+    writeFileSafe(gwDir, '.env.example', gatewayEnvExample(), force);
+    writeFileSafe(gwDir, '.gitignore', gatewayGitignore(), force);
+    writeFileSafe(gwDir, 'README.md', gatewayReadme(slug, scope, gatewayPort), force);
+  }
 
   const rel = outDir.replace(resolve('.'), '.').replace(/\\/g, '/');
   console.log(`\n${c.green(c.b('  ✓ Done.'))} Your governed agent is ready.\n`);
@@ -498,7 +946,13 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, sandbox, forc
   } else if (config.agentKey) {
     console.log(`  ${c.yellow('⚠ agent.metamynd.json holds the agent secret key')} — it is gitignored; never commit it.\n`);
   }
+  if (withGateway) {
+    console.log(`  ${c.yellow('⚠ two processes now')} — \`gateway/\` is the real enforcement boundary, not \`index.mjs\`. Read \`gateway/README.md\`.\n`);
+  }
   console.log(`  Next:`);
+  if (withGateway) {
+    console.log(c.cyan(`    cd ${rel}/gateway && npm install && npm start`) + c.dim('   (separate terminal — start this first)'));
+  }
   console.log(c.cyan(`    cd ${rel}`));
   console.log(c.cyan(`    npm install`));
   // The example runs FOUR attempts. This summary promised three, so the one carrying the
@@ -524,7 +978,7 @@ async function runSandbox(args) {
   console.log(`  ${c.green('✓')} sandbox agent ${c.b(config.agentDid)} ${c.dim('(shared test identity)')}`);
   const scope = config.mandate?.scope || 'flight-purchase';
   const perTxnMax = Number(config.perTxnMax) || 500;
-  scaffoldProject({ outDir, config, slug: 'metamynd-sandbox', scope, perTxnMax, sandbox: true, force: !!args.force });
+  scaffoldProject({ outDir, config, slug: 'metamynd-sandbox', scope, perTxnMax, sandbox: true, withGateway: false, force: !!args.force });
 }
 
 // ---------- --harness: a free, local, zero-network governance harness ----------
@@ -1336,7 +1790,7 @@ async function runClaim(args) {
 
   const slug = slugify(state.name || 'metamynd-agent');
   const outDir = resolve(String(args.out || `./${slug}`));
-  scaffoldProject({ outDir, config, slug, scope: state.scope || config.mandate?.scope || 'flight-purchase', perTxnMax: Number(state.perTxnMax) || 500, sandbox: false, force: !!args.force });
+  scaffoldProject({ outDir, config, slug, scope: state.scope || config.mandate?.scope || 'flight-purchase', perTxnMax: Number(state.perTxnMax) || 500, sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
 }
 
 // ---------- main ----------
@@ -1459,7 +1913,7 @@ async function main() {
   }
 
   // 4. Scaffold + next steps
-  scaffoldProject({ outDir, config, slug, scope, perTxnMax, sandbox: false, force: !!args.force });
+  scaffoldProject({ outDir, config, slug, scope, perTxnMax, sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
 }
 
 main().catch((e) => fail(e?.stack || e?.message || String(e)));

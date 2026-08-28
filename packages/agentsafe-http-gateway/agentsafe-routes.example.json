@@ -1,0 +1,5 @@
+[
+  { "method": "POST", "path": "/book/*", "action": "flight-purchase" },
+  { "method": "POST", "path": "/payments/**", "action": "payment-execute" },
+  { "method": "GET", "path": "/quote", "action": "quote-read" }
+]
