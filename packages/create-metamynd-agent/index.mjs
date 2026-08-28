@@ -1157,6 +1157,14 @@ No anchored/verifiable identity, no cross-party trust, no evidence anyone but yo
 no dashboard reachable when this machine is off, no owner queue someone else can approve from.
 That's the hosted platform (\`npx create-metamynd-agent\`, without \`--harness\`) — same
 \`guardTool()\` call, same rules shape, so upgrading later is a config change, not a rewrite.
+
+It is also **not a separate enforcement boundary**. \`guardToolLocal()\` (in \`index.mjs\`) is a
+cooperative library this process embeds — call the tool handler directly instead of the guarded
+one and nothing stops you, because there is no second party in the loop to disagree with you.
+That's structural, not a bug: use this harness to govern your own agent's own honest behavior,
+not as a defense against an agent (or a person) actively trying to get around it. The hosted
+platform's \`guardTool()\` doesn't have this gap, because the MCP/tool service re-verifies the
+agent's signed authority for itself instead of trusting that the agent's own guard ran.
 `;
 }
 
