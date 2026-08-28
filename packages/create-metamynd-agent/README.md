@@ -41,6 +41,18 @@ rewrite**: the exact same `guardTool()` call your harness project already makes 
 `bundleUrl`/`api` pointed at a real gate (provision normally, without `--harness`) instead of a rules
 file you authored yourself. Nothing about how you wrote your agent changes.
 
+It is also **not a separate enforcement boundary**, and this matters more than the list above.
+`guardToolLocal()` is a cooperative library your own process embeds — call the raw handler directly
+instead of the guarded one and nothing stops you, because there is no second party in the loop to
+disagree with you. Confirmed by direct testing: a bypass attempt (skip the guard, call the tool
+function underneath it) succeeds every time, structurally, not as a bug. In the hosted flow this is
+what the **counterparty** is for — the MCP/tool service independently re-verifies the agent's signed
+authority for itself rather than trusting that the agent's own guard ran, which is why a compromised
+or dishonest agent still can't get an honest service to act (see the three-party demo at
+[metamynd.ai/developers/quickstart](https://metamynd.ai/developers/quickstart)). `--harness` has no
+counterparty, so it can't have that property. Use it to govern your own agent's own honest behavior
+— not as a defense against an agent (or a person) that's actively trying to get around it.
+
 Works with `--config` too — its `rules` become the harness's starter rules file, same as the hosted
 flow. See [Policy config file](#policy-config-file---config) below.
 
