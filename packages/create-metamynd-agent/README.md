@@ -150,9 +150,9 @@ What actually stops that bypass is that `bookFlight()` doesn't exist in the agen
 It exists only in `gateway/server.mjs` — a separate process, started separately, holding any real
 tool credentials the agent process never sees — which independently re-verifies every request
 against the agent's own published policy bundle before running it, **binds that request to the
-actual body being executed** (`@metamynd/agentsafe-http-gateway` ≥ 0.2.0), and requires the
+actual body being executed** (`@metamynd/agentsafe-http-gateway` ≥ 0.3.0), and requires the
 agent's `authorizationId` to atomically claim single-use execution against the real stateful gate
-(`requireAuthorization`, `@metamynd/agentsafe-mcp-guard` ≥ 0.2.0) — closing a confused-deputy gap
+(`requireAuthorization`, `@metamynd/agentsafe-mcp-guard` ≥ 0.3.0) — closing a confused-deputy gap
 and a replay/cumulative-spend gap, both found during independent testing. Same shape as the mutual
 counterparty check in [`@metamynd/agentsafe-mcp-guard`](https://www.npmjs.com/package/@metamynd/agentsafe-mcp-guard),
 built with [`@metamynd/agentsafe-http-gateway`](https://www.npmjs.com/package/@metamynd/agentsafe-http-gateway).
@@ -168,12 +168,21 @@ Named precisely, not left implicit:
 - **Direct call.** `bookFlight()` doesn't exist in the agent's process.
 - **Confused deputy (payload).** Signing a cheap request while executing an expensive one (a
   different amount/currency/merchant in the body than what was signed) is refused before the tool
-  runs — payload binding.
+  runs — payload binding (`@metamynd/agentsafe-http-gateway` ≥ 0.3.0). The default binder fails
+  the request CLOSED, not just when it finds a mismatched flat field, but also when it can't find
+  the governed fields at all — nested JSON, an array, a renamed or differently-cased key. That
+  gap was found and closed the same way: a signed $250/skyward-air request had previously been
+  able to execute $5000/evil-corp via `{ booking: { amount, merchant } }`, because the flat
+  matcher found nothing to compare and treated "nothing found" as "nothing to check."
 - **Replay.** A captured, resent request fails to atomically claim single-use execution the second
   time — `requireAuthorization`.
 - **Cumulative spend.** The claimed authorization only exists because the real stateful gate
   already checked it against the mandate's TOTAL budget when minted, not just this one request's
   amount — so many small legal-looking calls can't add up past the cap this way.
+- **Amount unknown.** A signed-transaction tool (raw bytes) or a nested x402 payload carries its
+  amount somewhere a naive spend cap never looks — `amount-unknown` (`@metamynd/agentsafe-guard`
+  ≥ 0.6.0, `@metamynd/agentsafe-mcp-guard` ≥ 0.3.0) blocks by default when the gate can't
+  determine the value, instead of letting it slip past the cap untested.
 
 The claim above also checks `agentDid`/`amount`/`currency`/`merchant` together against the
 request being executed (`@metamynd/agentsafe-mcp-guard` ≥ 0.2.1) — a same-amount, same-currency

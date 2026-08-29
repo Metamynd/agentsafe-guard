@@ -67,6 +67,11 @@ const bookFlight = guard.guardIncomingTool('flight-purchase', rawBookFlight);
 4. evaluates Standards → SOPs → mandate with `policy-core` — signed fields applied last, so a
    forged `itinerary` key can't shadow the signed amount/merchant (§6.4.2).
 
+`policy-core`'s `amount-unknown` atom (0.3.0) is a deny-by-default check for any value-moving
+tool call whose amount the guard can't determine — a signed-transaction or nested x402 payload
+can carry its value somewhere a naive spend cap never looks, and this blocks that case instead
+of letting it slip past the cap untested.
+
 ### Replay and cumulative spend (`requireAuthorization`)
 
 Re-evaluating policy per request (above) proves the request is well-formed and in-policy — it
