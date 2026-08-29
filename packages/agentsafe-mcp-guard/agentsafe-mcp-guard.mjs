@@ -17,8 +17,14 @@ import { verifyDidSignature } from './magp-did.mjs';
 import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 import { verifyBundle } from './magp-policy.mjs';
 
-/** Freshness window for signed requests and handshake nonces (spec §7.7). */
+/** Freshness window for signed requests and handshake nonces (spec §7.7). How far `issuedAt`
+ *  may be BEHIND server time — network/processing delay. */
 const FRESHNESS_MS = 5 * 60 * 1000;
+/** How far a signed request's `issuedAt` may be AHEAD of server time — clock skew, not a window
+ *  to pre-sign a request for later use. Checked separately from FRESHNESS_MS so `Math.abs()`
+ *  can't fold both directions into one 10-minute window (found live: a request signed up to 5
+ *  minutes in the future was accepted). Mirrors mandate.service.ts's CLOCK_SKEW_TOLERANCE_MS. */
+const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
 
 /**
  * @param {object} cfg
@@ -127,7 +133,7 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
 
   /** Evaluate the agent's bundle against the request via policy-core (signed fields last). */
   function verdictFromBundle(bundle, req) {
-    const { agentDid, action, amount = 0, merchant = '', itinerary = {}, cumulativeSpend = amount, now } = req;
+    const { agentDid, action, amount = 0, currency = 'USD', merchant = '', itinerary = {}, cumulativeSpend = amount, now } = req;
     const mandate = (bundle.mandates ?? []).find((m) => m.action === action)?.document;
     return evaluate({
       standards: (bundle.standards ?? []).map((s) => ({ standardKey: s.key, document: s.document })),
@@ -142,6 +148,11 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
               'mm:payAmount': amount,
               'mm:cumulativeSpend': cumulativeSpend,
               'mm:merchant': merchant,
+              // A payAmount/cumulativeSpend constraint issued with a `unit` (currency) is
+              // only satisfied in that currency (see mandate-eval.ts's constraintSatisfied)
+              // — omitting this would make EVERY unit-bearing cap fail regardless of amount.
+              // Defaults to 'USD', matching verifyRequest()'s own default for this field.
+              'mm:currency': currency,
             }),
           }
         : undefined,
@@ -169,8 +180,11 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       // 2. Freshness. (Single-use nonce consumption stays the gate's job by default — a Service
       //    re-check is verification, not a second authorization. requireAuthorization below is
       //    the opt-in exception: it DOES give the Service its own single-use claim.)
+      // Asymmetric: `age` positive = issuedAt in the past (tolerate FRESHNESS_MS); negative =
+      // issuedAt in the future (tolerate only CLOCK_SKEW_TOLERANCE_MS) — see its own comment.
       const ts = Date.parse(issuedAt);
-      if (Number.isNaN(ts) || Math.abs(Date.now() - ts) > FRESHNESS_MS) {
+      const age = Date.now() - ts;
+      if (Number.isNaN(ts) || age > FRESHNESS_MS || age < -CLOCK_SKEW_TOLERANCE_MS) {
         return { decision: 'block', reasonCode: 'REQUEST_EXPIRED' };
       }
       // 3. Re-evaluate against the issuer-hosted bundle (fetched over TLS from the issuer).

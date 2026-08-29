@@ -23,13 +23,23 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
   },
   'amount-over': (c, cfg) => typeof c.amount === 'number' && c.amount > Number(cfg?.limit ?? 0),
   // Deny-by-default primitive for value-moving actions. Fires on ABSENCE (like the
-  // evidence atoms below, and unlike `amount-over`): true when the context carries no
-  // usable amount — the gate cannot tell how much value the call would move, so a
-  // spend cap authored next to it would silently never fire. Author it with BLOCK as
-  // the FIRST rule of a spend policy; the cap that follows then only ever judges a
-  // known number. Opt-in: only a rule that keys it runs it, so actions that carry no
-  // amount by nature are unaffected.
-  'amount-unknown': (c) => !(typeof c.amount === 'number' && Number.isFinite(c.amount)),
+  // evidence atoms below, and unlike `amount-over`) OR on a NEGATIVE amount: true when
+  // the context carries no usable amount, or one that cannot be trusted for capping —
+  // the gate cannot tell how much value the call would move, so a spend cap authored
+  // next to it would silently never fire. `amount-over` only ever fires on `> limit`,
+  // so a negative amount clears every positive cap by construction, and on a system
+  // that tracks committed spend ADDITIVELY (reserved += amount), a negative claim can
+  // net-reduce what's already committed rather than add to it — the same "cap never
+  // fires" failure as a missing amount, reached from the other side of zero. Zero
+  // itself is NOT covered here: a genuine $0 action (a read, a no-op) is a valid,
+  // known amount, not an unknown one. Author this with BLOCK as the FIRST rule of a
+  // spend policy; the cap that follows then only ever judges a known, non-negative
+  // number. Opt-in: only a rule that keys it runs it, so actions that carry no amount
+  // by nature are unaffected. The public authorize endpoint's own schema already
+  // rejects a negative amount before it reaches this atom (defense in depth, not the
+  // only layer) — this is what closes the same gap for paths that schema doesn't
+  // cover: the local/harness evaluator and the platform's own MCP tool policies.
+  'amount-unknown': (c) => !(typeof c.amount === 'number' && Number.isFinite(c.amount) && c.amount >= 0),
   // Total budget: cumulativeSpend is a SERVER-derived, signed-last context field (never
   // shadowable by the agent's itinerary), so this compares already-spent + this amount.
   'cumulative-over': (c, cfg) => (Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0)) > Number(cfg?.limit ?? 0),

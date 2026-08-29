@@ -12,13 +12,23 @@ var ATOM_REGISTRY = {
   },
   "amount-over": (c, cfg) => typeof c.amount === "number" && c.amount > Number(cfg?.limit ?? 0),
   // Deny-by-default primitive for value-moving actions. Fires on ABSENCE (like the
-  // evidence atoms below, and unlike `amount-over`): true when the context carries no
-  // usable amount — the gate cannot tell how much value the call would move, so a
-  // spend cap authored next to it would silently never fire. Author it with BLOCK as
-  // the FIRST rule of a spend policy; the cap that follows then only ever judges a
-  // known number. Opt-in: only a rule that keys it runs it, so actions that carry no
-  // amount by nature are unaffected.
-  "amount-unknown": (c) => !(typeof c.amount === "number" && Number.isFinite(c.amount)),
+  // evidence atoms below, and unlike `amount-over`) OR on a NEGATIVE amount: true when
+  // the context carries no usable amount, or one that cannot be trusted for capping —
+  // the gate cannot tell how much value the call would move, so a spend cap authored
+  // next to it would silently never fire. `amount-over` only ever fires on `> limit`,
+  // so a negative amount clears every positive cap by construction, and on a system
+  // that tracks committed spend ADDITIVELY (reserved += amount), a negative claim can
+  // net-reduce what's already committed rather than add to it — the same "cap never
+  // fires" failure as a missing amount, reached from the other side of zero. Zero
+  // itself is NOT covered here: a genuine $0 action (a read, a no-op) is a valid,
+  // known amount, not an unknown one. Author this with BLOCK as the FIRST rule of a
+  // spend policy; the cap that follows then only ever judges a known, non-negative
+  // number. Opt-in: only a rule that keys it runs it, so actions that carry no amount
+  // by nature are unaffected. The public authorize endpoint's own schema already
+  // rejects a negative amount before it reaches this atom (defense in depth, not the
+  // only layer) — this is what closes the same gap for paths that schema doesn't
+  // cover: the local/harness evaluator and the platform's own MCP tool policies.
+  "amount-unknown": (c) => !(typeof c.amount === "number" && Number.isFinite(c.amount) && c.amount >= 0),
   // Total budget: cumulativeSpend is a SERVER-derived, signed-last context field (never
   // shadowable by the agent's itinerary), so this compares already-spent + this amount.
   "cumulative-over": (c, cfg) => Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0) > Number(cfg?.limit ?? 0),
@@ -83,7 +93,7 @@ var ATOM_SPECS = [
   {
     predicate: "amount-unknown",
     label: "Amount not determinable",
-    description: "Fires when the action carries no usable amount \u2014 the gate cannot tell how much value it would move. A deny-by-default control for value-moving actions: author it with BLOCK ahead of a spend cap, otherwise an action whose amount is missing or unparseable passes the cap untested. Fires on ABSENCE, so only attach it to actions that must always carry an amount.",
+    description: "Fires when the action carries no usable amount, or a NEGATIVE one \u2014 the gate cannot trust either for capping. A deny-by-default control for value-moving actions: author it with BLOCK ahead of a spend cap, otherwise an amount that is missing, unparseable, or negative passes the cap untested (amount-over only ever fires above the limit, so a negative amount clears every positive cap). A genuine $0 amount does NOT fire this \u2014 only attach it to actions that must always carry a real, non-negative amount.",
     config: [],
     requiredContext: ["amount"]
   },
@@ -345,7 +355,9 @@ function constraintSatisfied(c, req) {
   const op = OPERATORS[c.operator];
   if (!op) return false;
   const left = Object.prototype.hasOwnProperty.call(req.values, c.leftOperand) ? req.values[c.leftOperand] : void 0;
-  return op(left, c.rightOperand);
+  if (!op(left, c.rightOperand)) return false;
+  if (c.unit && req.values["mm:currency"] !== c.unit) return false;
+  return true;
 }
 function targetOf(rule, mandate) {
   return rule.target ?? mandate.target;
@@ -437,8 +449,11 @@ function evaluate(input) {
 }
 
 // src/policy-core/canonical.ts
+function escapeField(v) {
+  return v.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+}
 function buildAuthMessage(f) {
-  return `${f.agentDid}|${f.action}|${f.amount}|${f.currency}|${f.merchant ?? ""}|${f.nonce}|${f.issuedAt}`;
+  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
 }
 
 // src/policy-core/context.ts

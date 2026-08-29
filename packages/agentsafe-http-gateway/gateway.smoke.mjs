@@ -19,8 +19,19 @@ ok(!pathMatches('/book/*', '/book/123/extra'), 'single-segment wildcard does not
 ok(pathMatches('/api/**', '/api/a/b/c'), 'tail ** absorbs the rest');
 ok(pathMatches('/quote', '/quote?ccy=USD'), 'query string is ignored');
 ok(methodMatches('*', 'POST') && !methodMatches('GET', 'POST'), 'method match ( * any / exact )');
+// A percent-encoded segment must still match its literal pattern — raw-byte comparison let
+// `/%62ook-flight` ("book-flight" with the 'b' encoded) miss `/book-flight` entirely, fall
+// through as "unmatched", and forward ungoverned to an upstream that decodes it right back
+// to the governed path.
+ok(pathMatches('/book-flight', '/%62ook-flight'), 'percent-encoded segment matches its literal pattern');
+ok(pathMatches('/book/*', '/book/%34%32'), 'percent-encoding inside a wildcard segment still matches');
+ok(!pathMatches('/health', '/health%'), 'a malformed escape compares literally (no match) instead of throwing');
 
-const routes = [{ method: 'POST', path: '/book/*', action: 'flight-purchase' }, { method: 'GET', path: '/quote', action: 'quote-read' }];
+// bind: false on both — this file is about routing/orchestration, not payload binding (that
+// has its own dedicated suite, bind-payload.smoke.mjs). The fake bodies below (`{}`, `null`)
+// would otherwise trip the DEFAULT binder's now-stricter UNBINDABLE check, since signedHeader()
+// signs a real, non-zero amount.
+const routes = [{ method: 'POST', path: '/book/*', action: 'flight-purchase', bind: false }, { method: 'GET', path: '/quote', action: 'quote-read', bind: false }];
 ok(matchRoute(routes, 'POST', '/book/99')?.action === 'flight-purchase', 'matchRoute picks the protected route');
 ok(matchRoute(routes, 'GET', '/book/99') === null, 'wrong method → no match');
 ok(matchRoute(routes, 'GET', '/health') === null, 'unprotected path → no match');
@@ -76,6 +87,17 @@ async function main() {
     const res = await gw({ method: 'POST', path: '/book/42', headers: signedHeader(), body: {} });
     ok(res.status === 502 && res.body.reasonCode === 'GOVERNANCE_ERROR', 'governance error fails closed (502)');
     ok(forwarded.length === 0, 'fail-closed does not reach upstream');
+  }
+
+  // A percent-encoded path must still be RECOGNIZED as the protected route (and therefore
+  // governed) even under the permissive default posture (denyByDefault: false) — the exact
+  // posture that used to forward an encoded path ungoverned because raw-byte matching missed it.
+  {
+    forwarded.length = 0;
+    const gw = createHttpGateway({ guard: guardFor('block', 'SOP_SPEND_CAP'), routes, forward });
+    const res = await gw({ method: 'POST', path: '/%62ook/42', headers: signedHeader(), body: {} });
+    ok(res.status === 403 && res.body.reasonCode === 'SOP_SPEND_CAP', 'percent-encoded protected path is still governed, not forwarded unchecked');
+    ok(forwarded.length === 0, 'a governed-but-encoded path never reaches upstream on a block');
   }
 
   // Allow-list posture: an unmatched route is blocked instead of forwarded.

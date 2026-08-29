@@ -84,6 +84,13 @@ payload can carry its amount somewhere a naive check never looks. `amount-unknow
 deny-by-default atom for exactly that case — an action whose value the gate can't determine
 is blocked, not silently waved through an untested cap.
 
+**0.6.2 — `amount-unknown` closes negative amounts too.** A negative `amount` (e.g. `-5`)
+previously read as "a real, known number" and sailed straight past `amount-unknown` — and
+past a naive `amount-over` cap, since `-5 > 500` is never true. An attacker submitting a
+negative value could clear a spend cap for free, or erode a cumulative-spend tracker that
+sums signed amounts over time. `amount-unknown` now fires on any non-finite, non-numeric,
+**or negative** amount; a genuine `0` still passes.
+
 ```yaml
 # .github/workflows/governance.yml
 name: Governance
@@ -120,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.6.1
+      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.6.2
         with:
           config: ./agent.metamynd.json
           require: merchants,perTxn

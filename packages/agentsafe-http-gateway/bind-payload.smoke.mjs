@@ -51,20 +51,66 @@ test('numeric string in the body matches a numeric signed amount', async () => {
   const r = await call(mk(), { amount: '250', merchant: 'skyward-air' });
   assert.equal(r.status, 200);
 });
-test('empty body binds nothing and still governs', async () => {
+test('a plain decimal with trailing zeros still matches (unambiguous everywhere)', async () => {
+  const r = await call(mk(), { amount: '250.00', merchant: 'skyward-air' });
+  assert.equal(r.status, 200);
+});
+// Number() coerces all of these to 250, so the OLD comparison treated them as a match and
+// forwarded the body verbatim — but the bytes reaching the upstream are the ORIGINAL string,
+// and an upstream doing a strict decimal parse, parseInt(_, 10), or literal string storage can
+// read the exact same bytes as something other than 250. "The bind check said it matches" is
+// only meaningful if every reasonable reader agrees what the number is.
+test('a hex-formatted amount does NOT match, even though Number() would coerce it to 250', async () => {
+  const r = await call(mk(), { amount: '0xFA', merchant: 'skyward-air' });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_NOT_BOUND');
+});
+test('a scientific-notation amount does NOT match, even though Number() would coerce it to 250', async () => {
+  const r = await call(mk(), { amount: '2.5e2', merchant: 'skyward-air' });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_NOT_BOUND');
+});
+test('a whitespace-padded amount does NOT match, even though Number() would coerce it to 250', async () => {
+  const r = await call(mk(), { amount: ' 250', merchant: 'skyward-air' });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_NOT_BOUND');
+});
+// String(["skyward-air"]) === "skyward-air", so a naive stringify-and-compare would have
+// treated a single-element array as a match even though it is a structurally different
+// value than what was signed — and how an upstream reads an array where it expected a
+// string is exactly the kind of divergence this binder exists to refuse, not assume about.
+test('a single-element array merchant does NOT match, even though String() would coerce it to the same text', async () => {
+  const r = await call(mk(), { amount: 250, merchant: ['skyward-air'] });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_NOT_BOUND'); assert.equal(r.body.field, 'merchant');
+});
+// SIGNED constrains a real amount (250) and merchant ('skyward-air'), so all four of these are
+// now UNBINDABLE, not "nothing to check" — a real signed value with no way to confirm the body
+// honors it is exactly the case this binder exists to refuse. Each was independently confirmed
+// live-exploitable under the earlier design (empty body, form-encoded body).
+test('an empty body is UNBINDABLE when the signature names a real amount/merchant', async () => {
   const r = await call(mk(), '');
-  assert.equal(r.status, 200); assert.equal(guardCalls, 1);
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE'); assert.equal(guardCalls, 0);
 });
-test('non-JSON body binds nothing (documented limitation)', async () => {
+test('a non-JSON (form-encoded) body is UNBINDABLE for the same reason — no longer an exception', async () => {
   const r = await call(mk(), 'amount=5000&merchant=evil');
-  assert.equal(r.status, 200);
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
 });
-test('an empty JSON object {} binds nothing - it carries no fields, hides none either', async () => {
+test('an empty JSON object {} is UNBINDABLE', async () => {
   const r = await call(mk(), {});
-  assert.equal(r.status, 200);
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
 });
-test('an empty JSON array [] binds nothing', async () => {
+test('an empty JSON array [] is UNBINDABLE', async () => {
   const r = await call(mk(), []);
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
+});
+// The surviving exception: nothing REAL was signed, so there is nothing to require the body to
+// echo — any shape passes through this check unbound (the mismatch/introduced-value checks above
+// still apply to whatever the body DOES happen to expose).
+test('a signed request with no real amount/merchant leaves any body shape unbound', async () => {
+  const bare = { agentDid: 'did:x', nonce: 'n', issuedAt: 'now', signature: 's' };
+  const r = await call(mk(), '', bare);
+  assert.equal(r.status, 200, 'nothing was signed, so an empty body is not suspicious');
+});
+// currency alone is never required — many real upstreams never repeat it in the body.
+test('a body that omits currency (but includes the required amount/merchant) still binds fine', async () => {
+  const r = await call(mk(), { amount: 250, merchant: 'skyward-air' }); // no currency field at all
   assert.equal(r.status, 200);
 });
 test('nested value needs a route binder - and then it blocks', async () => {
@@ -95,6 +141,35 @@ test('DEFAULT binder: a differently-named field is blocked', async () => {
 test('DEFAULT binder: UNBINDABLE is reached BEFORE the guard - burns no nonce either', async () => {
   await call(mk(), { booking: { amount: 5000 } });
   assert.equal(guardCalls, 0, 'guard.verifyRequest must not be reached');
+});
+
+// The four variants from the adversarial retest that the first UNBINDABLE fix (checking only
+// "did we find ZERO of the three fields") did not catch: each smuggles the real amount past a
+// CORRECT decoy in one of the other fields, which made `out` non-empty and skipped the
+// UNBINDABLE path entirely — only the fields that WERE found got compared, and amount, being
+// merely absent rather than present-and-wrong, was never itself flagged. Fixed by requiring
+// amount/merchant specifically, whenever the signature names a real value for them (see
+// REQUIRED_IF_SIGNED), not just checking whether the body offered nothing at all.
+test('retest #1: correct merchant decoy + nested real amount is UNBINDABLE', async () => {
+  const r = await call(mk(), { merchant: 'skyward-air', booking: { amount: 5000 } });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE'); assert.equal(forwarded, null);
+});
+test('retest #2: correct currency decoy + amount renamed to `total` is UNBINDABLE', async () => {
+  const r = await call(mk(), { currency: 'USD', total: 5000 });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
+});
+test('retest #3: correct-looking top-level amount + an extra field the tool also reads is NOT something this generic binder can see', async () => {
+  // Documented limitation, not a bug this binder can fix generically: amount/merchant both
+  // check out clean here, so binding correctly ALLOWS the call — the risk is an upstream that
+  // ALSO honors an arbitrary extra key (`surcharge`) the binder has no way to know is meaningful.
+  // The real mitigation is a route-level bind() (or a strict allowlist) for high-value routes
+  // that rejects unexpected keys outright — see the README.
+  const r = await call(mk(), { amount: 250, merchant: 'skyward-air', extra: { surcharge: 4750 } });
+  assert.equal(r.status, 200, 'amount/merchant genuinely match what was signed');
+});
+test('retest #4: correct merchant + amount renamed to `total` (no nesting) is UNBINDABLE', async () => {
+  const r = await call(mk(), { merchant: 'skyward-air', total: 5000 });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
 });
 test('bind:false restores legacy behaviour (opt-out works)', async () => {
   const r = await call(mk({ bind: false }), { amount: 5000, merchant: 'evil-corp' });

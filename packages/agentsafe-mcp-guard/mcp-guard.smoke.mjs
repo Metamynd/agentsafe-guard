@@ -67,9 +67,8 @@ const bundle = {
 const guard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
 
 /** Build a signed authorize request the way the agent guard would. */
-function signedRequest({ amount, merchant = 'amadeus', context = {}, issuedAt = new Date().toISOString(), tamper = false }) {
+function signedRequest({ amount, currency = 'USD', merchant = 'amadeus', context = {}, issuedAt = new Date().toISOString(), tamper = false }) {
   const action = 'flight-purchase';
-  const currency = 'USD';
   const nonce = crypto.randomUUID();
   const message = buildAuthMessage({ agentDid: agent.did, action, amount, currency, merchant, nonce, issuedAt });
   const signature = tamper ? agent.sign(message + 'x') : agent.sign(message);
@@ -91,7 +90,40 @@ await check('high risk → escalate', signedRequest({ amount: 100, context: { ri
 await check('disallowed merchant → block', signedRequest({ amount: 100, merchant: 'sabre' }), ['block', 'MERCHANT_NOT_ALLOWED']);
 await check('tampered signature → block', signedRequest({ amount: 100, tamper: true }), ['block', 'SIGNATURE_INVALID']);
 await check('stale request → block', signedRequest({ amount: 100, issuedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString() }), ['block', 'REQUEST_EXPIRED']);
+await check('a few seconds in the future (ordinary clock skew) → allow', signedRequest({ amount: 100, issuedAt: new Date(Date.now() + 10 * 1000).toISOString() }), ['allow', 'AUTHORIZED']);
+// Math.abs() used to treat a future issuedAt identically to a past one, accepting a request
+// signed up to 5 minutes ahead of server time — not clock skew, a pre-signing window.
+await check('minutes in the future → block (was accepted before this was fixed)', signedRequest({ amount: 100, issuedAt: new Date(Date.now() + 4 * 60 * 1000).toISOString() }), ['block', 'REQUEST_EXPIRED']);
 await check('forged itinerary cannot shadow signed $600 → block', signedRequest({ amount: 600, context: { 'mm:payAmount': 1 } }), ['block', 'SOP_SPEND_CAP']);
+
+console.log('\n— unit-bearing mandate constraint (currency) —');
+{
+  // A payAmount/cumulativeSpend constraint issued with a `unit` (currency) is only
+  // satisfied in that currency — verdictFromBundle must supply 'mm:currency' (default
+  // 'USD') to the evaluator, or a unit-bearing cap fails EVERY request regardless of
+  // amount, since undefined never equals a real unit.
+  const unitBundle = {
+    ...bundle,
+    mandates: [
+      {
+        action: 'flight-purchase',
+        document: {
+          permission: [{ target: 'flight-purchase', constraint: [{ leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 500, unit: 'USD' }] }],
+        },
+      },
+    ],
+  };
+  const unitGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => unitBundle });
+  const checkUnit = async (name, req, expect) => {
+    const v = await unitGuard.verifyRequest(req);
+    const ok = v.decision === expect[0] && v.reasonCode === expect[1];
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}  →  ${v.decision}/${v.reasonCode}`);
+  };
+  await checkUnit('within cap, implicit USD → allow', signedRequest({ amount: 100 }), ['allow', 'AUTHORIZED']);
+  await checkUnit('within cap, explicit matching USD → allow', signedRequest({ amount: 100, currency: 'USD' }), ['allow', 'AUTHORIZED']);
+  await checkUnit('same numeric amount in a DIFFERENT currency → block', signedRequest({ amount: 100, currency: 'JPY' }), ['block', 'SPEND_LIMIT_EXCEEDED']);
+}
 
 console.log('\n— operating-mode autonomy ladder at the edge (Phase 2.5b) —');
 {

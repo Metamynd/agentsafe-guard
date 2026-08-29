@@ -82,6 +82,15 @@ async function forwardToUpstream(req) {
 }
 
 async function main() {
+  if (!REQUIRE_AUTHORIZATION) {
+    console.warn(
+      `[gateway] AGENTSAFE_REQUIRE_AUTHORIZATION=false — replay and cumulative-spend protection ` +
+      `are OFF. A captured request can be resent and will re-execute every time, and many ` +
+      `separately-legal calls can add up past the mandate's TOTAL budget, because only ` +
+      `stateless per-request re-verification is running. This is an explicit opt-out of the ` +
+      `default, not a mistake to fix silently — unset the env var to restore it.`
+    );
+  }
   const guard = createMcpGuard({
     serviceDid: process.env.SERVICE_DID,
     serviceKey: process.env.SERVICE_KEY,

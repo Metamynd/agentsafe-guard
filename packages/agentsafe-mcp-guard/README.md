@@ -70,7 +70,15 @@ const bookFlight = guard.guardIncomingTool('flight-purchase', rawBookFlight);
 `policy-core`'s `amount-unknown` atom (0.3.0) is a deny-by-default check for any value-moving
 tool call whose amount the guard can't determine — a signed-transaction or nested x402 payload
 can carry its value somewhere a naive spend cap never looks, and this blocks that case instead
-of letting it slip past the cap untested.
+of letting it slip past the cap untested. As of 0.3.2 it also fires on a **negative** amount,
+which previously read as "a real, known number" and could clear a spend cap for free.
+
+**0.3.2 — freshness is no longer symmetric.** The staleness check used to compare
+`|now - issuedAt|` against the freshness window, which treated a request timestamped in the
+*future* the same as one from the past — accepting anything signed up to 5 minutes ahead of
+server time, a pre-signing window rather than ordinary clock skew. `issuedAt` may now lag by up
+to the freshness window (network/processing delay) but lead by no more than 30 seconds (clock
+skew only).
 
 ### Replay and cumulative spend (`requireAuthorization`)
 
