@@ -61,16 +61,51 @@ const bookFlight = guard.guardIncomingTool('flight-purchase', rawBookFlight);
 
 `verifyRequest`:
 1. rebuilds the canonical message (§7.3) and verifies the Ed25519 signature via **key-in-DID**;
-2. checks freshness (single-use nonce stays the gate's job);
+2. checks freshness (single-use nonce stays the gate's job **unless `requireAuthorization` is
+   set** — see below, that's the exception);
 3. fetches the agent's policy bundle from the issuer (`GET /policy/bundle/:did`, over TLS);
 4. evaluates Standards → SOPs → mandate with `policy-core` — signed fields applied last, so a
    forged `itinerary` key can't shadow the signed amount/merchant (§6.4.2).
+
+### Replay and cumulative spend (`requireAuthorization`)
+
+Re-evaluating policy per request (above) proves the request is well-formed and in-policy — it
+does **not** stop a captured, still-fresh request from being replayed, and it can't enforce the
+mandate's TOTAL budget across many separately-legal calls (each is only checked against its own
+per-transaction cap). Both are the stateful issuer gate's job, not something a stateless re-check
+can do on its own.
+
+```js
+const guard = createMcpGuard({ serviceDid, issuerApi, requireAuthorization: true });
+```
+
+When set, a PERMIT verdict (allow/observe) additionally requires `signed.authorizationId` to
+**atomically claim single-use execution** against the issuer (`AUTHORIZED → DISPATCHING`, the
+effect-safety state machine) — a second claim of the same id, whether a genuine replay or a race,
+fails, because that transition is legal exactly once. The claimed hold's own bound
+`agentDid`/`amount`/`currency` are checked against what's actually being executed, too — a claim
+alone only proves *some* real, unclaimed authorization exists; without this check, a cheap
+legitimate hold's id could be presented to unlock a completely different, more expensive
+execution (`AUTHORIZATION_AGENT_MISMATCH` / `AUTHORIZATION_AMOUNT_MISMATCH` /
+`AUTHORIZATION_CURRENCY_MISMATCH`).
+
+The `authorizationId` has to come from a **real** `guard.authorize()` call on the agent side —
+not `buildSignedRequest()`, which never talks to the network. In practice this usually needs no
+extra agent-side plumbing: `agentsafe-guard`'s default `guardTool()` path already calls the real
+remote `authorize()` for any value-bearing action (`sealValueActions`, on by default), so its
+`authorizationId` is already sitting in the `decision` object `guardTool()` hands your handler —
+thread it through to the signed request you present to this guard.
+
+Off by default: it costs a network round trip per value-bearing call, so it's a deliberate
+choice, not a strictly-dominant one. A Service happy with per-request policy re-evaluation alone
+(no replay/cumulative-spend guarantee) can skip it.
 
 Run the self-check (handshake + trustless eval, no network):
 
 ```powershell
 cd integrations\agentsafe-mcp-guard
-node mcp-guard.smoke.mjs   # PASS when every case matches
+node mcp-guard.smoke.mjs             # PASS when every case matches
+node claim-authorization.smoke.mjs   # requireAuthorization: replay, mismatch, fail-closed
 ```
 
 ## 3. Payment binding (x402, §7a)

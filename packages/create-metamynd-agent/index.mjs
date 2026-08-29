@@ -26,7 +26,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 const GUARD_VERSION = '^0.5.0';
 // The default hosted scaffold's SECOND process — the tool gateway (see scaffoldProject).
 const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
-const MCP_GUARD_VERSION = '^0.1.0';
+// 0.2.0 adds requireAuthorization (closes replay + cumulative spend) — this scaffold sets that
+// option, so a range that could resolve below 0.2.0 would silently scaffold a no-op.
+const MCP_GUARD_VERSION = '^0.2.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -457,7 +459,11 @@ const GATEWAY = process.env.GATEWAY_URL || 'http://localhost:${gatewayPort}';
 // --- Calls the gateway process instead of a local function. There is no raw bookFlight() in
 // --- this file to call directly — the tool, and any real credentials it needs, live only in
 // --- ./gateway, which independently re-verifies this signed request itself.
-async function bookFlightViaGateway(args) {
+// --- \`decision\` is guardTool()'s own verdict, already produced by the REAL remote gate for any
+// --- value-bearing action (sealValueActions, on by default) — its authorizationId is what lets
+// --- the gateway atomically claim single-use execution, closing replay + cumulative spend, not
+// --- just re-checking policy. See ./gateway/README.md.
+async function bookFlightViaGateway(args, decision) {
   const signed = guard.buildSignedRequest({
     action: '${scope}',
     amount: args.amount,
@@ -465,6 +471,7 @@ async function bookFlightViaGateway(args) {
     merchant: args.merchant,
     context: { tool: 'book-flight', riskLevel: args.riskLevel ?? 'low' },
   });
+  signed.authorizationId = decision?.authorizationId;
   const res = await fetch(GATEWAY + '/book-flight', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) },
@@ -691,17 +698,18 @@ A MetaMynd/AgentSafe-governed agent, scaffolded with \`create-metamynd-agent\`.
 
 ${gatewaySection}${
     withGateway
-      ? `**With MetaMynd's gateway, calling the tool directly and skipping the check no longer
-works** — that's what this section is about. This scaffold's default shape (agent + separate
-gateway process, port ${gatewayPort} by default) is the actual enforcement boundary for that
-specific bypass: \`guard.guardTool()\` in \`index.mjs\` is a client-side convenience, not a
-boundary — it still runs its handler in-process regardless of where the decision came from. What
-actually stops it is that \`bookFlight()\` itself only exists in \`./gateway\`, a process this one
-cannot reach into, which independently re-verifies every request against this agent's own policy
-bundle AND binds it to the actual body being executed. It does NOT track replay or cumulative
-spend across calls — see \`./gateway/README.md\`'s "Beyond this minimal slice" section. Re-scaffold
-with \`--no-gateway\` for the old single-process shape — it is NOT a separate enforcement boundary
-at all; see its own generated README for why.`
+      ? `**With MetaMynd's gateway, you can't be bypassed** — that's what this section is about.
+This scaffold's default shape (agent + separate gateway process, port ${gatewayPort} by default)
+is the actual enforcement boundary: \`guard.guardTool()\` in \`index.mjs\` is a client-side
+convenience, not a boundary — it still runs its handler in-process regardless of where the
+decision came from. What actually stops direct-call and confused-deputy bypasses is that
+\`bookFlight()\` itself only exists in \`./gateway\`, a process this one cannot reach into, which
+independently re-verifies every request against this agent's own policy bundle AND binds it to
+the actual body being executed. Replay and cumulative spend are closed too, via
+\`requireAuthorization\` — see \`./gateway/README.md\`'s "What this closes, precisely" section for
+exactly what that covers, including the one narrower gap disclosed there. Re-scaffold with
+\`--no-gateway\` for the old single-process shape — it is NOT a separate enforcement boundary at
+all; see its own generated README for why.`
       : `**Without MetaMynd, you can be bypassed** — this is that case. This scaffold has no
 separate gateway process (either \`--sandbox\`, which never provisions real credentials, or
 \`--no-gateway\` was passed): \`guard.guardTool()\` wraps a tool in the SAME process as the check
@@ -764,7 +772,11 @@ const routes = [{ method: 'POST', path: '/book-flight', action: '${scope}' }];
 
 // No serviceKey: this minimal gateway only calls verifyRequest() (re-check a signed request),
 // not the mutual-handshake methods, which are the only thing that needs it.
-const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API });
+//
+// requireAuthorization: true is what closes replay and cumulative spend, not just per-request
+// policy — it requires the agent's authorizationId (from a REAL guard.authorize() call) to
+// atomically claim single-use execution against the issuer before this gateway runs the tool.
+const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API, requireAuthorization: true });
 
 const gateway = createHttpGateway({
   guard,
@@ -841,11 +853,9 @@ function gatewayGitignore() {
 function gatewayReadme(slug, scope, port) {
   return `# ${slug}-gateway
 
-**With MetaMynd, you can't call the tool directly and skip the check.** This process is why. It
-is the **real enforcement boundary** for \`${slug}\`'s tool(s) — not \`../index.mjs\` — for that
-specific bypass. See [Beyond this minimal slice](#beyond-this-minimal-slice) below for the two
-things it does NOT yet close on its own: replaying a captured request, and spend adding up
-across many separately-legal calls.
+**With MetaMynd, you can't be bypassed.** This process is why. It is the **real enforcement
+boundary** for \`${slug}\`'s tool(s) — not \`../index.mjs\`. See
+[What this closes, precisely](#what-this-closes-precisely) below for exactly what that covers.
 
 ## Why this exists
 
@@ -861,7 +871,9 @@ This process closes that gap by being a **separate** one. The agent has no way t
 and call \`bookFlight()\` directly, because \`bookFlight()\` doesn't exist in the agent's process —
 it exists only here, and every request that reaches it has already been independently
 re-verified against this agent's OWN published policy bundle, fetched over the network by THIS
-process, not trusted from the agent's say-so.
+process, not trusted from the agent's say-so — AND bound to the actual body being executed
+(payload binding) AND to a real, single-use, stateful authorization (\`requireAuthorization\`) —
+see below for what each of those means precisely.
 
 ## Run
 
@@ -888,28 +900,36 @@ add another protected route here rather than adding a local function back in \`i
   \`bookFlight()\`.
 - \`.env.example\` — where real tool credentials go (copy to \`.env\`, fill in, never commit).
 
-## Beyond this minimal slice
+## What this closes, precisely
 
-This gateway independently re-verifies a signed request AND binds it to the actual request body
-(§9.3/§9.6 of the MAGP spec, plus payload binding — \`@metamynd/agentsafe-http-gateway\` ≥ 0.2.0).
-That closes the specific bypass this scaffold exists to close: an agent (or anything able to call
-its code) presenting one set of values while a different set actually executes.
+Four independent checks, each closing a different bypass an agent (or anything able to call its
+own code, or a network attacker) might attempt:
 
-Two things it deliberately does NOT close, named precisely rather than left implicit:
+- **Direct call.** \`bookFlight()\` doesn't exist in the agent's process. There's nothing to call.
+- **Confused deputy (payload).** The gateway re-verifies the signed request against this agent's
+  own policy AND binds it to the actual request body (payload binding,
+  \`@metamynd/agentsafe-http-gateway\` ≥ 0.2.0) — signing a cheap request while executing an
+  expensive one is refused before the tool ever runs.
+- **Replay.** \`requireAuthorization: true\` (set in \`server.mjs\`) requires the agent's
+  \`authorizationId\` — from a REAL \`guard.authorize()\` call, which \`index.mjs\` already makes for
+  any value-bearing action by default — to atomically claim single-use execution against the
+  issuer. A captured, replayed request fails the claim the second time.
+- **Cumulative spend.** The same \`authorizationId\` only exists because the real stateful gate
+  already checked it against the mandate's TOTAL budget when it was minted — not just this one
+  request's amount. Many small legal-looking calls can't add up past the mandate cap this way,
+  because each needed its own real authorization first.
 
-- **Replay.** \`verifyRequest()\` checks the signed request is fresh, not that it hasn't been used
-  before — a captured valid request can be resent within the freshness window. Single-use nonce
-  consumption is the stateful issuer gate's job, not this gateway's; this scaffold never calls it.
-- **Cumulative spend.** Each call is checked against the per-transaction cap correctly, but the
-  mandate's TOTAL budget isn't tracked here — many separately-legal calls can still add up past
-  it. The real total is only enforced where holds are actually reserved: \`POST
-  /policy/mandate/authorize\` on the issuer.
-
-Closing both means wiring the full authorize-before-execute flow — the agent calling that
-stateful endpoint first, this gateway checking a decision bound to that specific authorization —
-not just re-evaluating policy per request. See \`@metamynd/agentsafe-mcp-guard\`'s own README
-(mutual DID handshake, x402 payment binding, commitment-bound capability tokens) and
-\`demo/duffel-mcp-gateway\` in the AgentSafe repo for what that full pattern looks like.
+**One narrower gap, found while building this and disclosed rather than left implicit:** the
+claim above verifies the claimed authorization's own \`agentDid\`/\`amount\`/\`currency\` match the
+request being executed — but not \`merchant\`, because the backend's hold record doesn't currently
+store it. A same-amount, same-currency authorization legitimately obtained for one merchant could
+in principle be presented to unlock a booking with a different merchant. Closing this needs a
+small backend change (storing \`merchant\` on the hold so it can be compared too); it isn't done
+here. See \`@metamynd/agentsafe-mcp-guard\`'s own README (\`requireAuthorization\`) for the full
+mechanism, and \`demo/duffel-mcp-gateway\` in the AgentSafe repo for the fuller pattern this is a
+slice of (mutual DID handshake, x402 payment binding, commitment-bound capability tokens — which
+WOULD close the merchant gap too, by binding the whole transaction to a cryptographic commitment
+rather than comparing individual stored fields).
 `;
 }
 

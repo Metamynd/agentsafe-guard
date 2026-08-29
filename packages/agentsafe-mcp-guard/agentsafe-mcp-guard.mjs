@@ -30,8 +30,14 @@ const FRESHNESS_MS = 5 * 60 * 1000;
  *   GET /magp/policy/pubkey). When set, the guard VERIFIES the bundle signature + freshness (Phase F,
  *   §5.3.2/§5.3.3) and fails closed for value-bearing actions on an unsigned/tampered/stale bundle —
  *   so per-request enforcement needs no live MetaMynd. Omit for the legacy hash-addressed + TLS mode.
+ * @param {boolean} [cfg.requireAuthorization] when true, a PERMIT verdict (allow/observe) is only
+ *   actually granted if `signed.authorizationId` atomically claims single-use execution against the
+ *   stateful issuer gate (see claimAuthorization below) — this is what closes REPLAY and CUMULATIVE
+ *   SPEND, neither of which the stateless re-check above can enforce on its own. Off by default:
+ *   it costs a network round trip per value-bearing call, so it's a deliberate choice, not a
+ *   strictly-dominant one — a Service happy with per-request policy re-evaluation alone can skip it.
  */
-export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   const privateKey = serviceKey
@@ -74,6 +80,34 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
   }
 
   // --- Trustless re-evaluation (spec §9.3, §9.6) ---
+
+  /**
+   * Atomically claim a stateful authorization for single execution (AUTHORIZED -> DISPATCHING,
+   * the effect-safety state machine in backend/src/features/policy/mandate/effect-machine.ts). A
+   * SECOND claim of the SAME authorizationId — a replay, or a race — fails: that transition is only
+   * legal once. This is what actually stops replay and enforces the mandate's cumulative budget at
+   * a Service, because the authorizationId only exists because the agent's own authorize() call
+   * against the stateful issuer gate already checked both (agentsafe-guard.mjs's authorizeLocal()
+   * seals any value-bearing action through the real remote authorize() by default).
+   *
+   * On success, also returns the hold's OWN bound `agentDid`/`amount`/`currency` — the caller MUST
+   * compare these to the request actually being executed. A claim alone only proves "some real,
+   * unclaimed authorization exists"; without this check, a legitimately-obtained authorization for
+   * a small, honest transaction could be presented to unlock a completely different one — the same
+   * confused-deputy shape payload binding closes at the request layer, recurring one layer deeper.
+   */
+  async function claimAuthorization({ authorizationId } = {}) {
+    if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
+    if (!base) throw new Error('issuerApi is required to claim an authorization');
+    try {
+      const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, { method: 'POST' });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) return { claimed: false, reasonCode: body?.message ?? body?.data?.reasonCode ?? `AUTHORIZATION_CLAIM_HTTP_${res.status}` };
+      return { claimed: true, agentDid: body?.data?.agentDid, amount: body?.data?.amount, currency: body?.data?.currency };
+    } catch (err) {
+      return { claimed: false, reasonCode: 'AUTHORIZATION_CLAIM_UNREACHABLE', error: String(err?.message ?? err) };
+    }
+  }
 
   async function loadBundle(agentDid) {
     if (typeof fetchBundle === 'function') return fetchBundle(agentDid);
@@ -131,8 +165,9 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       if (!verifyDidSignature(agentDid, message, signature)) {
         return { decision: 'block', reasonCode: 'SIGNATURE_INVALID' };
       }
-      // 2. Freshness. (Single-use nonce consumption stays the gate's job — a Service
-      //    re-check is verification, not a second authorization.)
+      // 2. Freshness. (Single-use nonce consumption stays the gate's job by default — a Service
+      //    re-check is verification, not a second authorization. requireAuthorization below is
+      //    the opt-in exception: it DOES give the Service its own single-use claim.)
       const ts = Date.parse(issuedAt);
       if (Number.isNaN(ts) || Math.abs(Date.now() - ts) > FRESHNESS_MS) {
         return { decision: 'block', reasonCode: 'REQUEST_EXPIRED' };
@@ -167,10 +202,24 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       const verdict = verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} });
       // Mode ESCALATE floor lifts an otherwise-PERMIT (allow or observe) to human review
       // (escalate outranks observe, so a flag never masks it) — mirrors the backend gate.
-      if ((verdict.decision === 'allow' || verdict.decision === 'observe') && modeGate.decision === 'escalate') {
-        return { ...verdict, decision: 'escalate', reasonCode: modeGate.reasonCode };
+      const final = (verdict.decision === 'allow' || verdict.decision === 'observe') && modeGate.decision === 'escalate'
+        ? { ...verdict, decision: 'escalate', reasonCode: modeGate.reasonCode }
+        : verdict;
+      // 4. Stateful claim (opt-in). Re-evaluating policy per request (above) does not by itself
+      // stop REPLAY or CUMULATIVE SPEND past the mandate total — both are the stateful issuer
+      // gate's job. Only claim on an actual PERMIT: escalate/block/suspend/quarantine execute
+      // nothing, so there is nothing to protect and no reason to spend the hold's single use.
+      if (requireAuthorization && (final.decision === 'allow' || final.decision === 'observe')) {
+        const claim = await claimAuthorization({ authorizationId: signed.authorizationId });
+        if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
+        // The claim alone only proves SOME real, unclaimed authorization exists — it must also
+        // be FOR this agent and these exact values, or a cheap legitimate hold's id could be
+        // presented to unlock a completely different, more expensive execution.
+        if (claim.agentDid !== undefined && claim.agentDid !== agentDid) return { decision: 'block', reasonCode: 'AUTHORIZATION_AGENT_MISMATCH' };
+        if (claim.amount !== undefined && Number(claim.amount) !== Number(amount)) return { decision: 'block', reasonCode: 'AUTHORIZATION_AMOUNT_MISMATCH' };
+        if (claim.currency !== undefined && claim.currency !== currency) return { decision: 'block', reasonCode: 'AUTHORIZATION_CURRENCY_MISMATCH' };
       }
-      return verdict;
+      return final;
     } catch (err) {
       return { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
     }
@@ -270,7 +319,7 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
     return { settled: true, txHash: result.txHash, reasonCode: 'SETTLED' };
   }
 
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, serviceDid };
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, serviceDid };
 }
 
 /**

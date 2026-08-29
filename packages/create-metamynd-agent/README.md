@@ -137,8 +137,9 @@ npm start
 This is the other half of **without MetaMynd, you can be bypassed**: WITH it — specifically, with
 `gateway/`, the second process this scaffolds by default — calling the tool directly instead of
 through the check no longer works, the same way the hosted platform's own MCP counterparty can't
-be talked around by a compromised agent. See [Not solved by the gateway](#not-solved-by-the-gateway)
-below for the two things this specifically does **not** cover.
+be talked around by a compromised agent. See [What this closes, precisely](#what-this-closes-precisely)
+below for exactly what that covers, including the one gap found while building it that isn't
+closed yet.
 
 `guard.guardTool()` in `index.mjs` still runs — it's a fast, local, client-side pre-check that gives
 good UX (fail fast on an obviously-blocked call, no round trip) — but it is **not** what stops a
@@ -148,30 +149,39 @@ so anything able to call that handler directly gets the same result the gate wou
 What actually stops that bypass is that `bookFlight()` doesn't exist in the agent's process at all.
 It exists only in `gateway/server.mjs` — a separate process, started separately, holding any real
 tool credentials the agent process never sees — which independently re-verifies every request
-against the agent's own published policy bundle before running it, and **binds that request to the
-actual body being executed** (`@metamynd/agentsafe-http-gateway` ≥ 0.2.0) — closing a confused-deputy
-gap found during testing, where a signed cheap request could be governed while a different, expensive
-body was the one that actually ran. Same shape as the mutual counterparty check in
-[`@metamynd/agentsafe-mcp-guard`](https://www.npmjs.com/package/@metamynd/agentsafe-mcp-guard), built
-with [`@metamynd/agentsafe-http-gateway`](https://www.npmjs.com/package/@metamynd/agentsafe-http-gateway).
+against the agent's own published policy bundle before running it, **binds that request to the
+actual body being executed** (`@metamynd/agentsafe-http-gateway` ≥ 0.2.0), and requires the
+agent's `authorizationId` to atomically claim single-use execution against the real stateful gate
+(`requireAuthorization`, `@metamynd/agentsafe-mcp-guard` ≥ 0.2.0) — closing a confused-deputy gap
+and a replay/cumulative-spend gap, both found during independent testing. Same shape as the mutual
+counterparty check in [`@metamynd/agentsafe-mcp-guard`](https://www.npmjs.com/package/@metamynd/agentsafe-mcp-guard),
+built with [`@metamynd/agentsafe-http-gateway`](https://www.npmjs.com/package/@metamynd/agentsafe-http-gateway).
 It's a minimal slice of the fuller pattern proven end to end in `demo/duffel-mcp-gateway` in the
-AgentSafe repo (mutual handshake, x402 payment binding, capability tokens) — this scaffold gives you
-just the part that closes the direct-call bypass, not the whole protocol.
+AgentSafe repo (mutual handshake, x402 payment binding, capability tokens) — this scaffold gives
+you the parts that close direct-call, confused-deputy, replay, and cumulative-spend bypasses, not
+the whole protocol.
 
-#### Not solved by the gateway
+#### What this closes, precisely
 
 Named precisely, not left implicit:
 
-- **Replay.** The gateway checks a signed request is fresh, not that it hasn't been used before —
-  a captured valid request can be resent within the freshness window. Single-use nonce consumption
-  is the stateful issuer gate's job (`POST /policy/mandate/authorize`); this scaffold never calls it.
-- **Cumulative spend.** Each call is checked against the per-transaction cap correctly, but the
-  mandate's TOTAL budget isn't tracked at the gateway — many separately-legal calls can still add
-  up past it. The real total is only enforced where a hold is actually reserved: the issuer gate.
+- **Direct call.** `bookFlight()` doesn't exist in the agent's process.
+- **Confused deputy (payload).** Signing a cheap request while executing an expensive one (a
+  different amount/currency/merchant in the body than what was signed) is refused before the tool
+  runs — payload binding.
+- **Replay.** A captured, resent request fails to atomically claim single-use execution the second
+  time — `requireAuthorization`.
+- **Cumulative spend.** The claimed authorization only exists because the real stateful gate
+  already checked it against the mandate's TOTAL budget when minted, not just this one request's
+  amount — so many small legal-looking calls can't add up past the cap this way.
 
-Both require wiring the full authorize-before-execute flow (agent calls the stateful gate first,
-gateway checks a decision bound to that specific authorization) rather than per-request policy
-re-evaluation alone — see `gateway/README.md`'s own "Beyond this minimal slice" section.
+**One narrower gap, found while building this and disclosed rather than left implicit:** the claim
+above verifies the claimed authorization's own `agentDid`/`amount`/`currency` match the request —
+not `merchant`, because the backend's hold record doesn't currently store it. A same-amount,
+same-currency authorization legitimately obtained for one merchant could in principle unlock a
+booking with a different merchant. Closing this needs a small backend change (storing `merchant`
+on the hold); it isn't done here. `gateway/README.md`'s own "What this closes, precisely" section
+has the same disclosure.
 
 Pass `--no-gateway` to opt out and get the old single-process scaffold instead — e.g. if you're
 already running your own separate gateway and don't need this one. **You are back to being
