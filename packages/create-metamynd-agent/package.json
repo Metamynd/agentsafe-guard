@@ -1,7 +1,7 @@
 {
   "name": "create-metamynd-agent",
-  "version": "0.7.1",
-  "description": "Scaffold a MetaMynd/AgentSafe-governed AI agent in one command — logs in, provisions the agent (identity + mandate + SOP + Standards) in a single call, writes agent.metamynd.json plus a runnable agent + separate tool-gateway process (the real enforcement boundary). --harness scaffolds a free, local, zero-network governance harness instead.",
+  "version": "0.7.2",
+  "description": "Scaffold a MetaMynd/AgentSafe-governed AI agent in one command — logs in, provisions the agent (identity + mandate + SOP + Standards) in a single call, writes agent.metamynd.json plus a runnable agent + separate tool-gateway process that closes the direct-call bypass. --harness scaffolds a free, local, zero-network governance harness instead.",
   "type": "module",
   "bin": {
     "create-metamynd-agent": "index.mjs"

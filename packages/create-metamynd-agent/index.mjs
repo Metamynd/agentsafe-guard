@@ -28,7 +28,9 @@ const GUARD_VERSION = '^0.5.0';
 const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 const MCP_GUARD_VERSION = '^0.1.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
-const GATEWAY_VERSION = '^0.1.0';
+// 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
+// never scaffold a range that could resolve below it.
+const GATEWAY_VERSION = '^0.2.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -689,15 +691,17 @@ A MetaMynd/AgentSafe-governed agent, scaffolded with \`create-metamynd-agent\`.
 
 ${gatewaySection}${
     withGateway
-      ? `**With MetaMynd's gateway, you can't be bypassed** — that's what this section is about.
-This scaffold's default shape (agent + separate gateway process, port ${gatewayPort} by
-default) is the actual enforcement boundary: \`guard.guardTool()\` in \`index.mjs\` is a
-client-side convenience, not a boundary — it still runs its handler in-process regardless of
-where the decision came from. What actually stops a bypass is that \`bookFlight()\` itself only
-exists in \`./gateway\`, a process this one cannot reach into, which independently re-verifies
-every request against this agent's own policy bundle. Re-scaffold with \`--no-gateway\` for the
-old single-process shape — it is NOT a separate enforcement boundary; see its own generated
-README for why.`
+      ? `**With MetaMynd's gateway, calling the tool directly and skipping the check no longer
+works** — that's what this section is about. This scaffold's default shape (agent + separate
+gateway process, port ${gatewayPort} by default) is the actual enforcement boundary for that
+specific bypass: \`guard.guardTool()\` in \`index.mjs\` is a client-side convenience, not a
+boundary — it still runs its handler in-process regardless of where the decision came from. What
+actually stops it is that \`bookFlight()\` itself only exists in \`./gateway\`, a process this one
+cannot reach into, which independently re-verifies every request against this agent's own policy
+bundle AND binds it to the actual body being executed. It does NOT track replay or cumulative
+spend across calls — see \`./gateway/README.md\`'s "Beyond this minimal slice" section. Re-scaffold
+with \`--no-gateway\` for the old single-process shape — it is NOT a separate enforcement boundary
+at all; see its own generated README for why.`
       : `**Without MetaMynd, you can be bypassed** — this is that case. This scaffold has no
 separate gateway process (either \`--sandbox\`, which never provisions real credentials, or
 \`--no-gateway\` was passed): \`guard.guardTool()\` wraps a tool in the SAME process as the check
@@ -837,8 +841,11 @@ function gatewayGitignore() {
 function gatewayReadme(slug, scope, port) {
   return `# ${slug}-gateway
 
-**With MetaMynd, you can't be bypassed.** This process is why. It is the **real enforcement
-boundary** for \`${slug}\`'s tool(s) — not \`../index.mjs\`.
+**With MetaMynd, you can't call the tool directly and skip the check.** This process is why. It
+is the **real enforcement boundary** for \`${slug}\`'s tool(s) — not \`../index.mjs\` — for that
+specific bypass. See [Beyond this minimal slice](#beyond-this-minimal-slice) below for the two
+things it does NOT yet close on its own: replaying a captured request, and spend adding up
+across many separately-legal calls.
 
 ## Why this exists
 
@@ -883,10 +890,26 @@ add another protected route here rather than adding a local function back in \`i
 
 ## Beyond this minimal slice
 
-This gateway only re-verifies a signed request (§9.3/§9.6 of the MAGP spec). It does not do the
-mutual DID handshake, x402 payment binding, or commitment-bound capability tokens that a
-production Service integration would add — see \`@metamynd/agentsafe-mcp-guard\`'s own README for
-those, and \`demo/duffel-mcp-gateway\` in the AgentSafe repo for a full worked example.
+This gateway independently re-verifies a signed request AND binds it to the actual request body
+(§9.3/§9.6 of the MAGP spec, plus payload binding — \`@metamynd/agentsafe-http-gateway\` ≥ 0.2.0).
+That closes the specific bypass this scaffold exists to close: an agent (or anything able to call
+its code) presenting one set of values while a different set actually executes.
+
+Two things it deliberately does NOT close, named precisely rather than left implicit:
+
+- **Replay.** \`verifyRequest()\` checks the signed request is fresh, not that it hasn't been used
+  before — a captured valid request can be resent within the freshness window. Single-use nonce
+  consumption is the stateful issuer gate's job, not this gateway's; this scaffold never calls it.
+- **Cumulative spend.** Each call is checked against the per-transaction cap correctly, but the
+  mandate's TOTAL budget isn't tracked here — many separately-legal calls can still add up past
+  it. The real total is only enforced where holds are actually reserved: \`POST
+  /policy/mandate/authorize\` on the issuer.
+
+Closing both means wiring the full authorize-before-execute flow — the agent calling that
+stateful endpoint first, this gateway checking a decision bound to that specific authorization —
+not just re-evaluating policy per request. See \`@metamynd/agentsafe-mcp-guard\`'s own README
+(mutual DID handshake, x402 payment binding, commitment-bound capability tokens) and
+\`demo/duffel-mcp-gateway\` in the AgentSafe repo for what that full pattern looks like.
 `;
 }
 

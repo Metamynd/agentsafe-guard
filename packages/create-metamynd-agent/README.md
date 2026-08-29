@@ -135,23 +135,43 @@ npm start
 ### Separate tool gateway (default)
 
 This is the other half of **without MetaMynd, you can be bypassed**: WITH it — specifically, with
-`gateway/`, the second process this scaffolds by default — you can't be, the same way the hosted
-platform's own MCP counterparty can't be talked around by a compromised agent.
+`gateway/`, the second process this scaffolds by default — calling the tool directly instead of
+through the check no longer works, the same way the hosted platform's own MCP counterparty can't
+be talked around by a compromised agent. See [Not solved by the gateway](#not-solved-by-the-gateway)
+below for the two things this specifically does **not** cover.
 
 `guard.guardTool()` in `index.mjs` still runs — it's a fast, local, client-side pre-check that gives
 good UX (fail fast on an obviously-blocked call, no round trip) — but it is **not** what stops a
 bypass. It still calls its handler in the SAME process regardless of where the decision came from,
 so anything able to call that handler directly gets the same result the gate would have given it.
 
-What actually stops a bypass is that `bookFlight()` doesn't exist in the agent's process at all.
+What actually stops that bypass is that `bookFlight()` doesn't exist in the agent's process at all.
 It exists only in `gateway/server.mjs` — a separate process, started separately, holding any real
 tool credentials the agent process never sees — which independently re-verifies every request
-against the agent's own published policy bundle before running it (same shape as the mutual
-counterparty check in [`@metamynd/agentsafe-mcp-guard`](https://www.npmjs.com/package/@metamynd/agentsafe-mcp-guard),
-built with [`@metamynd/agentsafe-http-gateway`](https://www.npmjs.com/package/@metamynd/agentsafe-http-gateway)).
-It's a minimal slice of the same pattern proven end to end in `demo/duffel-mcp-gateway` in the
+against the agent's own published policy bundle before running it, and **binds that request to the
+actual body being executed** (`@metamynd/agentsafe-http-gateway` ≥ 0.2.0) — closing a confused-deputy
+gap found during testing, where a signed cheap request could be governed while a different, expensive
+body was the one that actually ran. Same shape as the mutual counterparty check in
+[`@metamynd/agentsafe-mcp-guard`](https://www.npmjs.com/package/@metamynd/agentsafe-mcp-guard), built
+with [`@metamynd/agentsafe-http-gateway`](https://www.npmjs.com/package/@metamynd/agentsafe-http-gateway).
+It's a minimal slice of the fuller pattern proven end to end in `demo/duffel-mcp-gateway` in the
 AgentSafe repo (mutual handshake, x402 payment binding, capability tokens) — this scaffold gives you
-just the part that closes the bypass, not the whole protocol.
+just the part that closes the direct-call bypass, not the whole protocol.
+
+#### Not solved by the gateway
+
+Named precisely, not left implicit:
+
+- **Replay.** The gateway checks a signed request is fresh, not that it hasn't been used before —
+  a captured valid request can be resent within the freshness window. Single-use nonce consumption
+  is the stateful issuer gate's job (`POST /policy/mandate/authorize`); this scaffold never calls it.
+- **Cumulative spend.** Each call is checked against the per-transaction cap correctly, but the
+  mandate's TOTAL budget isn't tracked at the gateway — many separately-legal calls can still add
+  up past it. The real total is only enforced where a hold is actually reserved: the issuer gate.
+
+Both require wiring the full authorize-before-execute flow (agent calls the stateful gate first,
+gateway checks a decision bound to that specific authorization) rather than per-request policy
+re-evaluation alone — see `gateway/README.md`'s own "Beyond this minimal slice" section.
 
 Pass `--no-gateway` to opt out and get the old single-process scaffold instead — e.g. if you're
 already running your own separate gateway and don't need this one. **You are back to being
