@@ -15,9 +15,10 @@ agent → [ HTTP gateway ] → upstream service
               │
               ├─ route not protected      → forward as-is
               └─ route protected:
+                    no signed request      → 401
+                    payload ≠ signed value → 403 PAYLOAD_NOT_BOUND (verifyRequest never called)
                     verifyRequest(signed)  → allow/observe → forward upstream (+ x-agentsafe-decision)
                                            → block/escalate → 403 (upstream never called)
-                                           → no signed request → 401
                                            → gate error       → 502 (fail closed)
 ```
 
@@ -46,6 +47,38 @@ node server.mjs   # listens on PORT (default 4000)
 `denyByDefault: true` (in `createHttpGateway`) switches to an **allow-list** posture — an unmatched
 route is blocked (`ROUTE_NOT_ALLOWED`) instead of forwarded.
 
+## Payload binding (confused deputy) — on by default since 0.2.0
+
+The signed request authorizes *specific values*; the bytes forwarded upstream are the request
+body — a different object. Before 0.2.0, nothing compared them: an agent could sign a cheap,
+in-policy request in the `x-magp-request` header while shipping an expensive, out-of-policy body,
+and the gateway would verify the header, then forward the body unchanged. Signed $250, executed
+$5000 — a real, confirmed finding, not a hypothetical.
+
+`bind` (default `defaultBindPayload`) pulls `amount`/`currency`/`merchant` out of a **JSON** body
+and compares each to the value that was actually signed — checked *before* `verifyRequest()`, so
+a tampered request is refused locally: no issuer round trip, no nonce consumed. A mismatch
+returns `403 PAYLOAD_NOT_BOUND` naming the offending field. A value the signature never mentioned
+at all also counts as a mismatch — `verifyRequest()` defaults an absent `amount`/`merchant` to
+`0`/`''`, so a body that introduces one against a signature covering neither is the same attack
+wearing a different hat.
+
+**This is secure by default, not opt-in** — the alternative leaves every existing deployment
+carrying the gap, which is the vulnerability rather than a fix for it. Pass `bind: false`
+(globally, or per route) only for a route whose body carries no value fields worth binding.
+
+**Known limitation, deliberate:** a non-JSON body (protobuf, multipart, form-encoded) or a
+nested one (`{ booking: { amount } }`) binds nothing under the default binder and passes on the
+signature alone — failing those closed would brick every reverse-proxy deployment fronting a
+non-JSON or differently-shaped upstream. Give such a route its own binder instead:
+
+```js
+routes: [{
+  method: 'POST', path: '/book/*', action: 'flight-purchase',
+  bind: (req) => { const b = JSON.parse(req.rawBody.toString('utf8')); return { amount: b.booking?.amount }; },
+}]
+```
+
 ## Embed the core
 
 ```js
@@ -55,4 +88,7 @@ const result = await handle({ method, path, headers, body });          // { stat
 ```
 
 Self-check: `node gateway.smoke.mjs` (route matching, pass-through, allow→forward, block→403,
-missing-governance→401, fail-closed, action-pinning, allow-list posture).
+missing-governance→401, fail-closed, action-pinning, allow-list posture) and
+`node bind-payload.smoke.mjs` (tampered field detection, unmentioned-value detection, runs before
+the guard, numeric-string coercion, empty/non-JSON bodies, nested-value binders, the `bind: false`
+opt-out, a throwing binder failing closed).
