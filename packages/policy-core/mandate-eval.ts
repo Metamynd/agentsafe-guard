@@ -61,7 +61,15 @@ function constraintSatisfied(c: Constraint, req: MandateRequest): boolean {
   const left = Object.prototype.hasOwnProperty.call(req.values, c.leftOperand)
     ? req.values[c.leftOperand]
     : undefined;
-  return op(left, c.rightOperand);
+  if (!op(left, c.rightOperand)) return false;
+  // A constraint stamped with a `unit` (payAmount/cumulativeSpend are always issued with
+  // one — see issueMandate) is a cap denominated in THAT currency; a bare numeric
+  // comparison treats a 100000 JPY cap and a 100000 USD request as identically "within
+  // limit," letting an attacker clear a cap by orders of magnitude just by naming a
+  // cheaper-looking currency in the request. `mm:currency` is signed-last context (see
+  // authorize()), so it can't be spoofed via an unsigned itinerary field.
+  if (c.unit && req.values['mm:currency'] !== c.unit) return false;
+  return true;
 }
 
 function targetOf(rule: Permission | Prohibition, mandate: Mandate): string | undefined {

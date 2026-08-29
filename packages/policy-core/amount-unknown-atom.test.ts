@@ -8,13 +8,12 @@ const over = ATOM_REGISTRY['amount-over'];
 const ctx = (over_: Partial<EvaluationContext>): EvaluationContext => ({ action: 'send-transaction', ...over_ });
 
 describe('amount-unknown', () => {
-  it('does not fire when a real amount is present, including zero and negatives', () => {
+  it('does not fire when a real, non-negative amount is present, including zero', () => {
     expect(atom(ctx({ amount: 1 }), {})).toBe(false);
     expect(atom(ctx({ amount: 0 }), {})).toBe(false);
-    expect(atom(ctx({ amount: -5 }), {})).toBe(false);
   });
 
-  it('fires when the amount is absent or not a usable number', () => {
+  it('fires when the amount is absent, not a usable number, or NEGATIVE', () => {
     expect(atom(ctx({}), {})).toBe(true);
     expect(atom(ctx({ amount: undefined }), {})).toBe(true);
     expect(atom(ctx({ amount: NaN as number }), {})).toBe(true);
@@ -22,12 +21,26 @@ describe('amount-unknown', () => {
     // A tinybar string off the wire is NOT an amount — it must be normalised first,
     // or a "100" would be compared against a 100 HBAR cap as if it were 100 HBAR.
     expect(atom(ctx({ amount: '5' as unknown as number }), {})).toBe(true);
+    // amount-over only ever fires ABOVE a positive limit, so a negative amount clears
+    // every such cap by construction — and on a system that tracks committed spend
+    // additively, a negative claim can net-REDUCE what's already reserved rather than
+    // add to it. Live-confirmed client-side (the local/harness evaluator has no schema
+    // boundary rejecting a negative amount the way the public authorize endpoint's
+    // AuthorizeSchema does).
+    expect(atom(ctx({ amount: -5 }), {})).toBe(true);
+    expect(atom(ctx({ amount: -0.01 }), {})).toBe(true);
   });
 
   it('covers exactly the gap amount-over leaves: a missing amount passes the cap untested', () => {
     const noAmount = ctx({});
     expect(over(noAmount, { limit: 100 })).toBe(false); // cap says "fine" about a number it never saw
     expect(atom(noAmount, {})).toBe(true); // which is why this must be authored ahead of it
+  });
+
+  it('covers the negative-amount gap the same way: amount-over never fires below its limit', () => {
+    const negative = ctx({ amount: -9000 });
+    expect(over(negative, { limit: 100 })).toBe(false); // -9000 is never > 100
+    expect(atom(negative, {})).toBe(true); // which is why this must be authored ahead of it too
   });
 
   it('is catalogued with the context field it reads', () => {

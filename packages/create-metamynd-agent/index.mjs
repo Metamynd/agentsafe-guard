@@ -36,11 +36,12 @@ const MCP_GUARD_VERSION = '^0.3.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
-// 0.3.0 fixes the follow-on gap: the DEFAULT binder only sees flat, top-level, exactly-named
-// fields, and silently skipped binding (not blocked) for anything else — nested JSON, an array,
-// a renamed or differently-cased key. Verified live: a signed $250/skyward-air request executed
-// $5000/evil-corp via `{ booking: { amount, merchant } }`. 0.3.0 fails that CLOSED instead.
-const GATEWAY_VERSION = '^0.3.0';
+// 0.3.0 was a first, INCOMPLETE attempt at the follow-on gap (checked only "did the body offer
+// NONE of the three fields" — a correct decoy in one field let the other hide anywhere). 0.4.0
+// is the actual fix: requires amount/merchant specifically, whenever the signature names a real
+// value for them. Re-tested live and closed same day; ^0.3.0 here would still resolve to the
+// broken version.
+const GATEWAY_VERSION = '^0.4.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -916,13 +917,13 @@ own code, or a network attacker) might attempt:
 - **Direct call.** \`bookFlight()\` doesn't exist in the agent's process. There's nothing to call.
 - **Confused deputy (payload).** The gateway re-verifies the signed request against this agent's
   own policy AND binds it to the actual request body (payload binding,
-  \`@metamynd/agentsafe-http-gateway\` ≥ 0.3.0) — signing a cheap request while executing an
-  expensive one is refused before the tool ever runs. The default binder fails CLOSED not just
-  on a mismatched flat field but whenever it can't find the governed fields at all — nested
-  JSON, an array, a renamed or differently-cased key. A signed \$250 request had previously been
-  able to execute \$5000 via \`{ booking: { amount, merchant } }\`, because the flat matcher found
-  nothing to compare and treated "nothing found" as "nothing to check" — fixed the same way this
-  list gets fixed: found, closed, named here.
+  \`@metamynd/agentsafe-http-gateway\` ≥ 0.4.0) — signing a cheap request while executing an
+  expensive one is refused before the tool ever runs. The default binder requires \`amount\`/
+  \`merchant\` to actually be found in the body whenever the signature names a real value for
+  them — not just "did the body offer at least one correct-looking field." A first attempt at
+  this (0.3.0) checked the weaker version and was re-tested and closed the same day: a correct
+  decoy in one field let the OTHER field hide anywhere — nested, renamed, an array, or an
+  entirely empty/non-JSON body.
 - **Replay.** \`requireAuthorization: true\` (set in \`server.mjs\`) requires the agent's
   \`authorizationId\` — from a REAL \`guard.authorize()\` call, which \`index.mjs\` already makes for
   any value-bearing action by default — to atomically claim single-use execution against the
@@ -931,10 +932,13 @@ own code, or a network attacker) might attempt:
   already checked it against the mandate's TOTAL budget when it was minted — not just this one
   request's amount. Many small legal-looking calls can't add up past the mandate cap this way,
   because each needed its own real authorization first.
-- **Amount unknown.** A signed-transaction tool or a nested payload can carry its amount
-  somewhere a naive spend cap never looks — \`amount-unknown\`
-  (\`@metamynd/agentsafe-mcp-guard\` ≥ 0.3.0) blocks by default when the gate can't determine the
-  value, instead of letting it slip past the cap untested.
+- **Amount unknown.** \`amount-unknown\` (\`@metamynd/agentsafe-mcp-guard\` ≥ 0.3.0) blocks a
+  platform tool by default when its raw bytes or a nested payload hide the amount from a naive
+  spend cap — AND this agent's OWN starter SOP (see \`agent.metamynd.json\` /
+  \`harness-rules.json\`) puts the same check ahead of its per-transaction cap. That second part
+  didn't used to be true: the SOP only ever authored \`amount-over\`, which silently does not fire
+  on a missing or string amount, so either one slipped the cap untested — the atom existing
+  wasn't the gap, this template never authoring it was.
 
 The claim above also checks the claimed authorization's own \`agentDid\`/\`amount\`/\`currency\`/
 \`merchant\` against the request actually being executed (\`@metamynd/agentsafe-mcp-guard\` ≥ 0.2.1)
@@ -1064,10 +1068,17 @@ async function runSandbox(args) {
 
 /** Mirrors defaultSopDocument() in backend/src/features/onboarding/onboarding.provision.ts —
  *  same starter rules the hosted platform issues, so a harness project behaves identically
- *  to a freshly-provisioned one before anyone edits either. */
+ *  to a freshly-provisioned one before anyone edits either.
+ *
+ *  `amount-unknown` first matters MORE here than on the hosted path: evaluateLocally() runs
+ *  entirely client-side with no schema boundary in front of it, so nothing stops a caller from
+ *  passing amount: "5000" (a string) or omitting amount entirely — `amount-over` silently does
+ *  not fire on either (`typeof c.amount === 'number'` is false), so the cap passes untested,
+ *  not safe. Ordering amount-unknown first blocks that instead of letting it through. */
 function harnessDefaultSop(perTxnMax) {
   return {
     molecules: [
+      { id: 'amount-known', name: 'Amount must be determinable', combinator: 'any', atoms: [{ id: 'a0', predicate: 'amount-unknown' }], decision: 'block', reasonCode: 'AMOUNT_NOT_DETERMINABLE' },
       { id: 'cap', name: 'Per-transaction cap', combinator: 'any', atoms: [{ id: 'a1', predicate: 'amount-over', config: { limit: perTxnMax } }], decision: 'block', reasonCode: 'SOP_SPEND_CAP' },
       { id: 'review', name: 'High-risk review', combinator: 'any', atoms: [{ id: 'a2', predicate: 'risk-at-or-above', config: { level: 'high' } }], decision: 'escalate', reasonCode: 'RISK_REVIEW' },
     ],
@@ -1139,6 +1150,7 @@ function renderConstraint(c) {
 function renderAtom(a) {
   const c = a.config || {};
   switch (a.predicate) {
+    case 'amount-unknown': return \`transaction amount must be a real, determinable number\`;
     case 'amount-over': return \`transaction amount must not exceed \${c.limit}\`;
     case 'cumulative-over': return \`cumulative spend must not exceed \${c.limit}\`;
     case 'jurisdiction-not-allowed': return \`jurisdiction must be one of [\${(c.allowed || []).join(', ')}]\`;

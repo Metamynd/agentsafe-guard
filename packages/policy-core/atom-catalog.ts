@@ -40,10 +40,12 @@ export const ATOM_SPECS: AtomSpec[] = [
     predicate: 'amount-unknown',
     label: 'Amount not determinable',
     description:
-      'Fires when the action carries no usable amount — the gate cannot tell how much value it ' +
-      'would move. A deny-by-default control for value-moving actions: author it with BLOCK ahead ' +
-      'of a spend cap, otherwise an action whose amount is missing or unparseable passes the cap ' +
-      'untested. Fires on ABSENCE, so only attach it to actions that must always carry an amount.',
+      'Fires when the action carries no usable amount, or a NEGATIVE one — the gate cannot trust ' +
+      'either for capping. A deny-by-default control for value-moving actions: author it with ' +
+      'BLOCK ahead of a spend cap, otherwise an amount that is missing, unparseable, or negative ' +
+      'passes the cap untested (amount-over only ever fires above the limit, so a negative amount ' +
+      'clears every positive cap). A genuine $0 amount does NOT fire this — only attach it to ' +
+      'actions that must always carry a real, non-negative amount.',
     config: [],
     requiredContext: ['amount'],
   },

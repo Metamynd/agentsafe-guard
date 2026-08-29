@@ -13,8 +13,10 @@
 // PAYLOAD BINDING (see `bind` below): the signed request authorizes SPECIFIC VALUES, but the
 // bytes we forward upstream are the request body — a different object. Governing the header
 // while executing the body is a confused-deputy gap: an agent signs a cheap, in-policy request
-// and ships an expensive one. The gateway therefore refuses to forward a body whose governed
-// value fields disagree with the ones that were signed.
+// and ships an expensive one. The gateway therefore refuses to forward a body that either
+// disagrees with what was signed, OR cannot be shown to carry the signed amount/merchant at all
+// (nested, renamed, differently-cased, absent, non-JSON) — judged against what the SIGNED
+// request actually constrains, not against whatever shape the body happens to expose.
 
 import { matchRoute } from './route-match.mjs';
 
@@ -37,62 +39,118 @@ export function defaultExtractGovernance(req) {
 export const BOUND_FIELDS = ['amount', 'currency', 'merchant'];
 
 /**
- * Sentinel returned by `defaultBindPayload` (and usable by a custom `bind(req)`) for "there IS a
- * body, and it IS parseable JSON, but none of the governed fields are visible at the top level."
+ * Sentinel returned by `defaultBindPayload` (and usable by a custom `bind(req)`) for "the signed
+ * request constrains a real value here, and this body cannot be shown to carry it."
  *
- * That is the dangerous case, not the safe one: a JSON body almost always carries its value
- * fields somewhere — nested (`{ booking: { amount } }`), an array, a differently-cased key
- * (`Amount`), or a differently-named one (`total`) — and a flat top-level matcher cannot rule
- * out that the signed amount/merchant have simply been moved out of its sight. Treating that as
- * "nothing to bind" is exactly the confused-deputy gap this module exists to close: sign a cheap
- * in-policy request, ship an expensive one nested one level deeper than the matcher looks.
  * `createHttpGateway` fails a route CLOSED on this sentinel (`PAYLOAD_UNBINDABLE`) unless the
- * route opts out (`bind: false`) or supplies its own `bind(req)` that actually finds the fields.
+ * route opts out (`bind: false`) or supplies its own `bind(req, signed)` that actually finds the
+ * fields — the supported way to constrain a nested, renamed, or non-JSON payload.
  */
 export const UNBINDABLE = Symbol('agentsafe-http-gateway:unbindable');
 
 /**
- * Default payload binder: pull the governed value fields out of a JSON body.
+ * Fields whose PRESENCE at the body's top level is REQUIRED whenever the signed request names a
+ * real value for them — not just compared when they happen to show up.
  *
- * Returns `null` — safe to proceed unbound — only when there is truly nothing to compare: no
- * body at all, an empty body, or a body that isn't JSON. That last one is a deliberate, narrow
- * exception: a reverse proxy fronts upstreams whose payloads it cannot parse at all (protobuf,
- * multipart, form-encoded), and failing those closed would brick every such deployment.
- *
- * Returns `UNBINDABLE` — fails the route CLOSED — for a body that IS valid JSON but does not
- * carry any governed field at its top level. Give the route its own `bind(req)` if it genuinely
- * carries the amount/merchant somewhere this flat matcher cannot see; that is the supported way
- * to constrain a nested or renamed payload, not silently letting it through unbound.
+ * `currency` is deliberately excluded from this list: plenty of real upstreams never repeat it
+ * in the body at all (single-currency APIs, currency implied by the route or a header), and
+ * requiring it would brick those deployments for a field that, alone, is rarely the attack. It
+ * is still COMPARED when the body does include it (see the loop in createHttpGateway) — just not
+ * required. `amount` and `merchant` are exactly the two fields an attacker profits from moving:
+ * how much moves, and who it moves to.
  */
-export function defaultBindPayload(req) {
-  const raw = req.rawBody ?? req.body;
-  if (raw == null) return null;
-  let parsed = raw;
-  if (typeof raw === 'string' || raw instanceof Uint8Array) {
-    const text = typeof raw === 'string' ? raw : Buffer.from(raw).toString('utf8');
-    if (!text.trim()) return null;
-    try { parsed = JSON.parse(text); } catch { return null; } // genuinely not JSON — can't help it
-  }
-  if (!parsed || typeof parsed !== 'object') return null; // a JSON scalar/null carries no fields
-  if (Object.keys(parsed).length === 0) return null; // {} / [] — genuinely empty, nothing hidden
-  const out = {};
-  for (const f of BOUND_FIELDS) if (parsed[f] !== undefined) out[f] = parsed[f];
-  return Object.keys(out).length ? out : UNBINDABLE;
+const REQUIRED_IF_SIGNED = ['amount', 'merchant'];
+
+/** Does the signed request name a REAL value for this field, as opposed to the default
+ *  verifyRequest() itself would apply to an absent one (amount 0, merchant '')? A field the
+ *  signer never cared about in the first place has nothing for the body to be required to echo. */
+function isMeaningfulSignedValue(field, value) {
+  if (value === undefined || value === null) return false;
+  if (field === 'amount') { const n = Number(value); return Number.isFinite(n) && n !== 0; }
+  return String(value) !== '';
 }
 
 /**
- * Whether a payload value matches the value that was signed. `amount` is compared numerically
- * (a JSON body may carry "500" where the signer sent 500); the rest as strings. Note the signed
- * defaults verifyRequest() itself applies — amount 0, merchant '' — so a payload that introduces
- * a value the signed request never mentioned counts as a MISMATCH, which is the whole point.
+ * Default payload binder: pull the governed value fields out of a JSON body, and REQUIRE that
+ * `amount`/`merchant` be found there whenever the signed request actually constrains them.
+ *
+ * The earlier version of this function only asked "does the body carry NONE of the governed
+ * fields" — treating a body that offered even one correct-looking field (or none at all) as
+ * either fully bound or safely inert. Verified live: none of that holds. A decoy top-level
+ * `merchant` matching the signed one, paired with the real amount nested one level down
+ * (`{ merchant: 'skyward-air', booking: { amount: 5000 } }`), passed every prior check — the
+ * merchant compared clean, and `amount` being merely ABSENT from the top level (not present-and-
+ * wrong) was never itself treated as suspicious. Same shape with the amount renamed (`total`)
+ * instead of nested. An entirely empty body, or a form-encoded one, was explicitly exempted by
+ * the earlier design as "nothing to compare" — also live-exploitable, for the same reason: a
+ * signed real amount with nothing in the body to check it against is not evidence of safety.
+ *
+ * So the standard is no longer "found nothing → assume nothing to bind." It is "the signed
+ * request names a real amount/merchant → the body MUST expose that field, present and matching,
+ * or the request fails CLOSED (`UNBINDABLE`)" — including when the body is empty, non-JSON, or
+ * an array. The one surviving exception: a signed request that never names a real amount OR
+ * merchant at all (both absent/default) has nothing this binder is entitled to require, so any
+ * body — any shape, or none — passes through this check unbound, same as always.
+ */
+export function defaultBindPayload(req, signed) {
+  const required = REQUIRED_IF_SIGNED.filter((f) => isMeaningfulSignedValue(f, signed?.[f]));
+  const whenUnconfirmed = required.length > 0 ? UNBINDABLE : null;
+
+  const raw = req.rawBody ?? req.body;
+  if (raw == null) return whenUnconfirmed;
+  let parsed = raw;
+  if (typeof raw === 'string' || raw instanceof Uint8Array) {
+    const text = typeof raw === 'string' ? raw : Buffer.from(raw).toString('utf8');
+    if (!text.trim()) return whenUnconfirmed;
+    try { parsed = JSON.parse(text); } catch { return whenUnconfirmed; } // genuinely not JSON
+  }
+  if (!parsed || typeof parsed !== 'object') return whenUnconfirmed; // a JSON scalar/null
+
+  const out = {};
+  for (const f of BOUND_FIELDS) if (parsed[f] !== undefined) out[f] = parsed[f];
+  if (required.some((f) => out[f] === undefined)) return UNBINDABLE;
+  return Object.keys(out).length ? out : whenUnconfirmed;
+}
+
+/**
+ * Parse a value as a canonical decimal amount — a JS number, or a string matching a plain
+ * decimal (`-?123` or `-?123.45`). Deliberately NOT what `Number()` accepts: no hex (`"0xFA"`),
+ * no exponent notation (`"2.5e2"`), no leading/trailing whitespace (`" 250"`). `Number()` coerces
+ * all of those to the value JS computes, but the forwarded body reaches the upstream VERBATIM —
+ * a strict decimal parser, `parseInt(_, 10)`, or literal string storage on that end can read the
+ * exact same bytes differently. The bind check saying "matches" is only meaningful if every
+ * reasonable reader agrees what the number is; returns NaN for anything that isn't unambiguous.
+ */
+function parseCanonicalAmount(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  if (typeof value !== 'string' || !/^-?\d+(\.\d+)?$/.test(value)) return NaN;
+  return Number(value);
+}
+
+/**
+ * Whether a payload value matches the value that was signed. `amount` is compared as a
+ * canonical decimal (a JSON body may carry "500" where the signer sent 500, but not "0x1F4" or
+ * "5e2" — see parseCanonicalAmount); the rest as strings. Note the signed defaults
+ * verifyRequest() itself applies — amount 0, merchant '' — so a payload that introduces a value
+ * the signed request never mentioned counts as a MISMATCH, which is the whole point.
  */
 export function boundValueMatches(field, signedValue, payloadValue) {
   if (field === 'amount') {
-    const a = Number(signedValue ?? 0);
-    const b = Number(payloadValue);
+    const a = parseCanonicalAmount(signedValue ?? 0);
+    const b = parseCanonicalAmount(payloadValue);
     return Number.isFinite(a) && Number.isFinite(b) && a === b;
   }
+  // A single-element array (or any non-scalar) stringifies identically to its scalar
+  // content — String(["acme"]) === "acme" — so a body carrying `"merchant": ["acme"]`
+  // would pass this check even though it is structurally a different value than what was
+  // signed, and how a given upstream reads an array where a string was expected is exactly
+  // the kind of divergence this binder exists to refuse rather than guess about.
+  if (isNonScalar(signedValue) || isNonScalar(payloadValue)) return false;
   return String(signedValue ?? '') === String(payloadValue ?? '');
+}
+
+function isNonScalar(v) {
+  return v !== null && typeof v === 'object';
 }
 
 /**
@@ -102,12 +160,13 @@ export function boundValueMatches(field, signedValue, payloadValue) {
  *   forward — async (req) => { status, headers, body }: performs the upstream call. Injected for tests.
  *   extractGovernance — override the signed-request extractor (default: x-magp-request header).
  *   denyByDefault — when true, an UNMATCHED route is blocked (allow-list posture) instead of forwarded.
- *   bind    — payload binder (default: defaultBindPayload). A route's own `bind` wins. Pass
- *             `false` to disable binding entirely and restore pre-0.1.2 behaviour — do that only
- *             for routes that carry no value fields, since it reopens the confused-deputy gap.
- *             Returning `UNBINDABLE` (see defaultBindPayload) fails the route CLOSED — a route
- *             whose value fields are nested/renamed/differently-cased needs its own `bind(req)`
- *             that actually finds them, not silent pass-through.
+ *   bind    — payload binder, called as `bind(req, signed)` (default: defaultBindPayload). A
+ *             route's own `bind` wins. Pass `false` to disable binding entirely and restore
+ *             pre-0.1.2 behaviour — do that only for routes that carry no value fields, since it
+ *             reopens the confused-deputy gap. Returning `UNBINDABLE` (see defaultBindPayload)
+ *             fails the route CLOSED — a route whose value fields are nested/renamed/differently-
+ *             cased needs its own `bind(req, signed)` that actually finds them, not silent
+ *             pass-through.
  *
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
@@ -141,7 +200,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     if (binder) {
       let payload;
       try {
-        payload = binder(req);
+        payload = binder(req, request);
       } catch (err) {
         // Fail CLOSED: if we cannot read the payload, we cannot claim the signature covers it.
         return { status: 502, body: { decision: 'block', reasonCode: 'BIND_ERROR', error: String(err?.message ?? err) } };

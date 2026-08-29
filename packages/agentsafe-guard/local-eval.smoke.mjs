@@ -117,6 +117,31 @@ for (const c of cases) {
   console.log(`${ok ? 'ok  ' : 'FAIL'}  contained agent → denied at the edge (before rule eval)  →  ${cv.decision}/${cv.reasonCode}`);
 }
 
+// A mandate constraint issued with a `unit` (currency) — evaluateLocally must supply
+// 'mm:currency' (defaulting to 'USD') to the values map, or a unit-bearing cap fails
+// EVERY request regardless of amount, since undefined never equals a real unit.
+{
+  const unitBundle = {
+    mandate: {
+      permission: [{ target: 'flight-purchase', constraint: [{ leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 500, unit: 'USD' }] }],
+    },
+  };
+  const withinCapUsd = guard.evaluateLocally({ ...unitBundle, request: { action: 'flight-purchase', amount: 100 } });
+  const ok1 = withinCapUsd.decision === 'allow';
+  if (!ok1) failed++;
+  console.log(`${ok1 ? 'ok  ' : 'FAIL'}  a unit-bearing cap still allows a within-cap request (implicit USD default)  →  ${withinCapUsd.decision}/${withinCapUsd.reasonCode}`);
+
+  const explicitUsd = guard.evaluateLocally({ ...unitBundle, request: { action: 'flight-purchase', amount: 100, currency: 'USD' } });
+  const ok2 = explicitUsd.decision === 'allow';
+  if (!ok2) failed++;
+  console.log(`${ok2 ? 'ok  ' : 'FAIL'}  a unit-bearing cap allows the same request with currency explicitly matching  →  ${explicitUsd.decision}/${explicitUsd.reasonCode}`);
+
+  const wrongCurrency = guard.evaluateLocally({ ...unitBundle, request: { action: 'flight-purchase', amount: 100, currency: 'JPY' } });
+  const ok3 = wrongCurrency.decision === 'block';
+  if (!ok3) failed++;
+  console.log(`${ok3 ? 'ok  ' : 'FAIL'}  a unit-bearing cap blocks the same numeric amount in a DIFFERENT currency  →  ${wrongCurrency.decision}/${wrongCurrency.reasonCode}`);
+}
+
 // Phase 2.5b: the operating-mode autonomy ladder rides as a sibling and biases the
 // EDGE verdict identically to the backend gate (READ_ONLY blocks value-bearing,
 // RESTRICTED/SUPERVISED escalate, reads always pass, a rule block still outranks).

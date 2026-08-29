@@ -8,8 +8,22 @@
 
 /** Split a URL path into non-empty segments (ignoring query + trailing slash). */
 export function segments(path) {
-  const p = String(path || '').split('?')[0];
-  return p.split('/').filter(Boolean);
+  const raw = String(path || '').split('?')[0];
+  // Decode percent-encoding before matching: the upstream this gateway forwards to
+  // (server.mjs sends the ORIGINAL, still-encoded req.path — only this comparison is
+  // decoded) almost universally decodes the path itself before its own routing. Matching
+  // on raw bytes let `/%62ook-flight` miss a configured `/book-flight` route, fall through
+  // as "unmatched", and forward straight through with NO signature check, NO policy
+  // evaluation, and NO payload binding — while the upstream decoded it right back to the
+  // governed path and executed it. A malformed escape falls back to the raw segment
+  // rather than throwing, so it compares literally instead of crashing the gateway.
+  let decoded;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    decoded = raw;
+  }
+  return decoded.split('/').filter(Boolean);
 }
 
 /**

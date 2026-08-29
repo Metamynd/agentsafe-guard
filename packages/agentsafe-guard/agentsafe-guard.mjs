@@ -226,7 +226,7 @@ export function createGuard(opts = {}) {
       const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
       return { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
     }
-    const { action, amount = 0, merchant = '', context = {}, cumulativeSpend = amount, now } = request;
+    const { action, amount = 0, currency = 'USD', merchant = '', context = {}, cumulativeSpend = amount, now } = request;
     // Operating-mode autonomy ladder (Phase 2.5b): the trust-driven posture rides as a
     // SIBLING (like `contained`) and biases the edge verdict identically to the gate.
     // READ_ONLY denies a value-bearing action up-front; SUPERVISED/RESTRICTED only
@@ -251,6 +251,12 @@ export function createGuard(opts = {}) {
               'mm:payAmount': amount,
               'mm:cumulativeSpend': cumulativeSpend,
               'mm:merchant': merchant,
+              // A payAmount/cumulativeSpend constraint issued with a `unit` (currency) is
+              // only satisfied in that currency (see mandate-eval.ts's constraintSatisfied)
+              // — omitting this here would make EVERY unit-bearing cap fail regardless of
+              // amount, since undefined never equals a real unit. Defaults to 'USD' to match
+              // the same default this file already uses for authorize()/buildSignedRequest().
+              'mm:currency': currency,
             }),
           }
         : undefined,
@@ -417,7 +423,7 @@ export function createGuard(opts = {}) {
    *
    * @param {string} action
    * @param {(args:any, decision:any)=>any} handler
-   * @param {(args:any)=>{amount?:number,merchant?:string,context?:object}} mapArgs
+   * @param {(args:any)=>{amount?:number,currency?:string,merchant?:string,context?:object}} mapArgs
    * @param {object|((args:any)=>object|Promise<object>)} getBundle  { standards, sops, mandate } (or a resolver)
    */
   function guardToolLocal(action, handler, mapArgs = (a) => a, getBundle = {}, toolOpts = {}) {
@@ -425,9 +431,9 @@ export function createGuard(opts = {}) {
     return async (args) => {
       let decision;
       try {
-        const { amount, merchant, context } = mapArgs(args);
+        const { amount, currency, merchant, context } = mapArgs(args);
         const bundle = typeof getBundle === 'function' ? await getBundle(args) : getBundle;
-        decision = evaluateLocally({ ...bundle, request: { action, amount, merchant, context } });
+        decision = evaluateLocally({ ...bundle, request: { action, amount, currency, merchant, context } });
       } catch (err) {
         decision = { decision: 'block', reasonCode: 'LOCAL_EVAL_ERROR', error: String(err?.message ?? err) };
       }

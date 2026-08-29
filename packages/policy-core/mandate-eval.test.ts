@@ -29,7 +29,9 @@ const flightMandate: Mandate = {
 };
 
 function req(values: Record<string, unknown>, now = '2026-08-01T09:00:00Z'): MandateRequest {
-  return { target: 'mm:flight-purchase', now, values };
+  // Matches flightMandate's 'USD'-unit constraints by default; a test asserting the
+  // currency check itself overrides 'mm:currency' explicitly.
+  return { target: 'mm:flight-purchase', now, values: { 'mm:currency': 'USD', ...values } };
 }
 
 describe('evaluateMandate — happy path', () => {
@@ -70,6 +72,30 @@ describe('evaluateMandate — spend limits', () => {
       req({ 'mm:payAmount': 1000, 'mm:cumulativeSpend': 1000, 'mm:merchant': 'amadeus' }),
     );
     expect(r.decision).toBe('allow');
+  });
+
+  it('blocks a numerically-within-cap amount quoted in a DIFFERENT currency than the mandate was issued in', () => {
+    // The cap is 1000 units of a 'USD'-denominated mandate. 800 JPY is worth a tiny
+    // fraction of 800 USD — the numeric comparison alone would wrongly allow this.
+    const r = evaluateMandate(
+      flightMandate,
+      req({ 'mm:payAmount': 800, 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus', 'mm:currency': 'JPY' }),
+    );
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+    expect(r.matched?.constraint?.leftOperand).toBe('mm:payAmount');
+  });
+
+  it('a constraint with no `unit` is unaffected by currency (e.g. merchant scope, routes)', () => {
+    const r = evaluateMandate(
+      flightMandate,
+      req({ 'mm:payAmount': 100, 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus', 'mm:currency': 'JPY' }),
+    );
+    // payAmount/cumulativeSpend still fail (wrong currency vs their 'USD' unit)...
+    expect(r.decision).toBe('block');
+    // ...but merchant scope itself never carries a unit, so it isn't what fails here —
+    // confirmed by the reported constraint being the amount, not the merchant.
+    expect(r.matched?.constraint?.leftOperand).not.toBe('mm:merchant');
   });
 });
 

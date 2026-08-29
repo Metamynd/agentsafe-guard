@@ -150,7 +150,7 @@ What actually stops that bypass is that `bookFlight()` doesn't exist in the agen
 It exists only in `gateway/server.mjs` — a separate process, started separately, holding any real
 tool credentials the agent process never sees — which independently re-verifies every request
 against the agent's own published policy bundle before running it, **binds that request to the
-actual body being executed** (`@metamynd/agentsafe-http-gateway` ≥ 0.3.0), and requires the
+actual body being executed** (`@metamynd/agentsafe-http-gateway` ≥ 0.4.0), and requires the
 agent's `authorizationId` to atomically claim single-use execution against the real stateful gate
 (`requireAuthorization`, `@metamynd/agentsafe-mcp-guard` ≥ 0.3.0) — closing a confused-deputy gap
 and a replay/cumulative-spend gap, both found during independent testing. Same shape as the mutual
@@ -167,22 +167,27 @@ Named precisely, not left implicit:
 
 - **Direct call.** `bookFlight()` doesn't exist in the agent's process.
 - **Confused deputy (payload).** Signing a cheap request while executing an expensive one (a
-  different amount/currency/merchant in the body than what was signed) is refused before the tool
-  runs — payload binding (`@metamynd/agentsafe-http-gateway` ≥ 0.3.0). The default binder fails
-  the request CLOSED, not just when it finds a mismatched flat field, but also when it can't find
-  the governed fields at all — nested JSON, an array, a renamed or differently-cased key. That
-  gap was found and closed the same way: a signed $250/skyward-air request had previously been
-  able to execute $5000/evil-corp via `{ booking: { amount, merchant } }`, because the flat
-  matcher found nothing to compare and treated "nothing found" as "nothing to check."
+  different amount/merchant in the body than what was signed) is refused before the tool runs —
+  payload binding (`@metamynd/agentsafe-http-gateway` ≥ 0.4.0). The default binder requires
+  `amount`/`merchant` to actually be found in the body whenever the signed request names a real
+  value for them — not just "did the body offer at least one correct-looking field." A first
+  attempt at this (0.3.0) checked the weaker version and was re-tested and closed the same day: a
+  correct decoy in one field (e.g. a matching `merchant`) let the OTHER field hide anywhere —
+  nested, renamed, an array, or an entirely empty/non-JSON body.
 - **Replay.** A captured, resent request fails to atomically claim single-use execution the second
   time — `requireAuthorization`.
 - **Cumulative spend.** The claimed authorization only exists because the real stateful gate
   already checked it against the mandate's TOTAL budget when minted, not just this one request's
   amount — so many small legal-looking calls can't add up past the cap this way.
-- **Amount unknown.** A signed-transaction tool (raw bytes) or a nested x402 payload carries its
-  amount somewhere a naive spend cap never looks — `amount-unknown` (`@metamynd/agentsafe-guard`
-  ≥ 0.6.0, `@metamynd/agentsafe-mcp-guard` ≥ 0.3.0) blocks by default when the gate can't
-  determine the value, instead of letting it slip past the cap untested.
+- **Amount unknown.** Two separate places this matters, both actually authored, not just
+  available: the platform's own custodial-signing tools (`@metamynd/agentsafe-guard` ≥ 0.6.0,
+  `@metamynd/agentsafe-mcp-guard` ≥ 0.3.0) block by default when a signed-transaction tool's raw
+  bytes or a nested x402 payload hide the amount from a naive spend cap — AND this agent's own
+  starter SOP puts the same `amount-unknown` check ahead of its per-transaction cap (both the
+  hosted default and `--harness`'s local one). The atom existing was not the gap: for a while
+  this SOP still only ever authored `amount-over`, which silently does not fire on a missing or
+  string amount (`typeof c.amount === 'number'` is false either way) — a real, live-confirmed way
+  to slip a booking's cap untested. Fixed at the template, not just the atom registry.
 
 The claim above also checks `agentDid`/`amount`/`currency`/`merchant` together against the
 request being executed (`@metamynd/agentsafe-mcp-guard` ≥ 0.2.1) — a same-amount, same-currency

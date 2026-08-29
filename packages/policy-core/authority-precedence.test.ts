@@ -71,7 +71,7 @@ const verdictFor = (action: string, amount: number) =>
     mandateRequest: {
       target: action,
       now: NOW,
-      values: { 'mm:payAmount': amount, 'mm:cumulativeSpend': amount },
+      values: { 'mm:payAmount': amount, 'mm:cumulativeSpend': amount, 'mm:currency': 'USD' },
     },
   });
 
