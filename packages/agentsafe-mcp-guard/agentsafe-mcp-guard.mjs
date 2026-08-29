@@ -90,11 +90,12 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
    * against the stateful issuer gate already checked both (agentsafe-guard.mjs's authorizeLocal()
    * seals any value-bearing action through the real remote authorize() by default).
    *
-   * On success, also returns the hold's OWN bound `agentDid`/`amount`/`currency` — the caller MUST
-   * compare these to the request actually being executed. A claim alone only proves "some real,
-   * unclaimed authorization exists"; without this check, a legitimately-obtained authorization for
-   * a small, honest transaction could be presented to unlock a completely different one — the same
-   * confused-deputy shape payload binding closes at the request layer, recurring one layer deeper.
+   * On success, also returns the hold's OWN bound `agentDid`/`amount`/`currency`/`merchant` — the
+   * caller MUST compare these to the request actually being executed. A claim alone only proves
+   * "some real, unclaimed authorization exists"; without this check, a legitimately-obtained
+   * authorization for a small, honest transaction could be presented to unlock a completely
+   * different one — the same confused-deputy shape payload binding closes at the request layer,
+   * recurring one layer deeper.
    */
   async function claimAuthorization({ authorizationId } = {}) {
     if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
@@ -103,7 +104,7 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, { method: 'POST' });
       const body = await res.json().catch(() => null);
       if (!res.ok) return { claimed: false, reasonCode: body?.message ?? body?.data?.reasonCode ?? `AUTHORIZATION_CLAIM_HTTP_${res.status}` };
-      return { claimed: true, agentDid: body?.data?.agentDid, amount: body?.data?.amount, currency: body?.data?.currency };
+      return { claimed: true, agentDid: body?.data?.agentDid, amount: body?.data?.amount, currency: body?.data?.currency, merchant: body?.data?.merchant };
     } catch (err) {
       return { claimed: false, reasonCode: 'AUTHORIZATION_CLAIM_UNREACHABLE', error: String(err?.message ?? err) };
     }
@@ -218,6 +219,7 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         if (claim.agentDid !== undefined && claim.agentDid !== agentDid) return { decision: 'block', reasonCode: 'AUTHORIZATION_AGENT_MISMATCH' };
         if (claim.amount !== undefined && Number(claim.amount) !== Number(amount)) return { decision: 'block', reasonCode: 'AUTHORIZATION_AMOUNT_MISMATCH' };
         if (claim.currency !== undefined && claim.currency !== currency) return { decision: 'block', reasonCode: 'AUTHORIZATION_CURRENCY_MISMATCH' };
+        if (claim.merchant !== undefined && claim.merchant !== merchant) return { decision: 'block', reasonCode: 'AUTHORIZATION_MERCHANT_MISMATCH' };
       }
       return final;
     } catch (err) {

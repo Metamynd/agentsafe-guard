@@ -58,10 +58,10 @@ const mk = (opts = {}) => createMcpGuard({ serviceDid: service.did, fetchBundle:
 const t = [];
 const test = (name, fn) => t.push([name, fn]);
 
-test('a genuine, matching claim permits the request', async () => {
-  const restore = withMockClaim(() => ({ status: 200, body: { success: true, data: { ok: true, effectState: 'dispatching', agentDid: agent.did, amount: 250, currency: 'USD' } } }));
+test('a genuine, matching claim (including merchant) permits the request', async () => {
+  const restore = withMockClaim(() => ({ status: 200, body: { success: true, data: { ok: true, effectState: 'dispatching', agentDid: agent.did, amount: 250, currency: 'USD', merchant: 'skyward-air' } } }));
   try {
-    const r = await mk().verifyRequest(signedRequest({ amount: 250, authorizationId: 'auth-1' }));
+    const r = await mk().verifyRequest(signedRequest({ amount: 250, merchant: 'skyward-air', authorizationId: 'auth-1' }));
     assert.equal(r.decision, 'allow');
   } finally { restore(); }
 });
@@ -124,6 +124,27 @@ test('a claimed hold for a DIFFERENT currency is refused', async () => {
   try {
     const r = await mk().verifyRequest(signedRequest({ amount: 250, currency: 'USD', authorizationId: 'auth-x' }));
     assert.equal(r.decision, 'block'); assert.equal(r.reasonCode, 'AUTHORIZATION_CURRENCY_MISMATCH');
+  } finally { restore(); }
+});
+
+test('a claimed hold for a DIFFERENT merchant is refused — closes the merchant-swap gap', async () => {
+  // Same agent, same amount, same currency — only the merchant differs. Before this check,
+  // this exact case was the disclosed residual gap: a same-amount/currency authorization
+  // legitimately obtained for one merchant could unlock a booking with a different one.
+  const restore = withMockClaim(() => ({ status: 200, body: { success: true, data: { ok: true, agentDid: agent.did, amount: 250, currency: 'USD', merchant: 'legit-merchant' } } }));
+  try {
+    const r = await mk().verifyRequest(signedRequest({ amount: 250, merchant: 'evil-corp', authorizationId: 'auth-merchant-swap' }));
+    assert.equal(r.decision, 'block'); assert.equal(r.reasonCode, 'AUTHORIZATION_MERCHANT_MISMATCH');
+  } finally { restore(); }
+});
+
+test('a hold from a not-yet-migrated backend (no merchant field) is not falsely blocked', async () => {
+  // claim.merchant === undefined must SKIP the check, the same way amount/currency do —
+  // backward compatible with a backend response that predates this field existing at all.
+  const restore = withMockClaim(() => ({ status: 200, body: { success: true, data: { ok: true, agentDid: agent.did, amount: 250, currency: 'USD' } } }));
+  try {
+    const r = await mk().verifyRequest(signedRequest({ amount: 250, merchant: 'skyward-air', authorizationId: 'auth-no-merchant-field' }));
+    assert.equal(r.decision, 'allow');
   } finally { restore(); }
 });
 
