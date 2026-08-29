@@ -37,15 +37,32 @@ export function defaultExtractGovernance(req) {
 export const BOUND_FIELDS = ['amount', 'currency', 'merchant'];
 
 /**
+ * Sentinel returned by `defaultBindPayload` (and usable by a custom `bind(req)`) for "there IS a
+ * body, and it IS parseable JSON, but none of the governed fields are visible at the top level."
+ *
+ * That is the dangerous case, not the safe one: a JSON body almost always carries its value
+ * fields somewhere — nested (`{ booking: { amount } }`), an array, a differently-cased key
+ * (`Amount`), or a differently-named one (`total`) — and a flat top-level matcher cannot rule
+ * out that the signed amount/merchant have simply been moved out of its sight. Treating that as
+ * "nothing to bind" is exactly the confused-deputy gap this module exists to close: sign a cheap
+ * in-policy request, ship an expensive one nested one level deeper than the matcher looks.
+ * `createHttpGateway` fails a route CLOSED on this sentinel (`PAYLOAD_UNBINDABLE`) unless the
+ * route opts out (`bind: false`) or supplies its own `bind(req)` that actually finds the fields.
+ */
+export const UNBINDABLE = Symbol('agentsafe-http-gateway:unbindable');
+
+/**
  * Default payload binder: pull the governed value fields out of a JSON body.
  *
- * Returns null when there is nothing to bind — an empty body, a body that is not JSON, or JSON
- * that mentions none of the governed fields. That is deliberate: a reverse proxy fronts upstreams
- * whose payloads it cannot parse (protobuf, multipart, form-encoded), and failing those closed
- * would brick every such deployment. It also means an OPAQUE BODY IS NOT BOUND — if your governed
- * route carries the amount somewhere this cannot see (a non-JSON encoding, or nested JSON such as
- * `{ booking: { amount } }`), give the route its own `bind(req)` that digs it out. Without one,
- * the signature still gates the call but does not constrain that payload.
+ * Returns `null` — safe to proceed unbound — only when there is truly nothing to compare: no
+ * body at all, an empty body, or a body that isn't JSON. That last one is a deliberate, narrow
+ * exception: a reverse proxy fronts upstreams whose payloads it cannot parse at all (protobuf,
+ * multipart, form-encoded), and failing those closed would brick every such deployment.
+ *
+ * Returns `UNBINDABLE` — fails the route CLOSED — for a body that IS valid JSON but does not
+ * carry any governed field at its top level. Give the route its own `bind(req)` if it genuinely
+ * carries the amount/merchant somewhere this flat matcher cannot see; that is the supported way
+ * to constrain a nested or renamed payload, not silently letting it through unbound.
  */
 export function defaultBindPayload(req) {
   const raw = req.rawBody ?? req.body;
@@ -54,12 +71,13 @@ export function defaultBindPayload(req) {
   if (typeof raw === 'string' || raw instanceof Uint8Array) {
     const text = typeof raw === 'string' ? raw : Buffer.from(raw).toString('utf8');
     if (!text.trim()) return null;
-    try { parsed = JSON.parse(text); } catch { return null; } // not JSON → nothing to bind
+    try { parsed = JSON.parse(text); } catch { return null; } // genuinely not JSON — can't help it
   }
-  if (!parsed || typeof parsed !== 'object') return null;
+  if (!parsed || typeof parsed !== 'object') return null; // a JSON scalar/null carries no fields
+  if (Object.keys(parsed).length === 0) return null; // {} / [] — genuinely empty, nothing hidden
   const out = {};
   for (const f of BOUND_FIELDS) if (parsed[f] !== undefined) out[f] = parsed[f];
-  return Object.keys(out).length ? out : null;
+  return Object.keys(out).length ? out : UNBINDABLE;
 }
 
 /**
@@ -87,6 +105,9 @@ export function boundValueMatches(field, signedValue, payloadValue) {
  *   bind    — payload binder (default: defaultBindPayload). A route's own `bind` wins. Pass
  *             `false` to disable binding entirely and restore pre-0.1.2 behaviour — do that only
  *             for routes that carry no value fields, since it reopens the confused-deputy gap.
+ *             Returning `UNBINDABLE` (see defaultBindPayload) fails the route CLOSED — a route
+ *             whose value fields are nested/renamed/differently-cased needs its own `bind(req)`
+ *             that actually finds them, not silent pass-through.
  *
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
@@ -124,6 +145,16 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       } catch (err) {
         // Fail CLOSED: if we cannot read the payload, we cannot claim the signature covers it.
         return { status: 502, body: { decision: 'block', reasonCode: 'BIND_ERROR', error: String(err?.message ?? err) } };
+      }
+      if (payload === UNBINDABLE) {
+        // Fail CLOSED: a JSON body is present but none of the governed fields are visible at
+        // the top level — nested, renamed, differently-cased, or an array. We cannot rule out
+        // that the real amount/merchant just moved out of sight, so we refuse rather than
+        // silently forward a body the signature cannot be shown to cover.
+        return {
+          status: 403,
+          body: { decision: 'block', reasonCode: 'PAYLOAD_UNBINDABLE', action: route.action },
+        };
       }
       if (payload) {
         for (const field of BOUND_FIELDS) {

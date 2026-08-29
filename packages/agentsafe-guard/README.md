@@ -25,7 +25,7 @@ re-implement the gate:
 ([markdown](https://metamynd.ai/specs/magp-v1.0.md))
 
 It defines agent identity, the canonical signed message (§8.3), the sixteen-stage order of
-checks (§8.5), all 59 reason codes (Appendix A), delegation narrowing (§5.4), and evidence
+checks (§8.5), all 62 reason codes (Appendix A), delegation narrowing (§5.4), and evidence
 you can verify offline without MetaMynd (§13.4). If you are writing a client in a language
 other than JavaScript, read §8.3.3–8.3.5 first: key encoding, number stringification and
 signed-vs-sent field identity each surface only as `SIGNATURE_INVALID`.
@@ -78,6 +78,12 @@ you state *our agents must carry a merchant allow-list* and find out when one do
 `--json` for machine-readable output. Evaluation is local and pure: no holds are minted, no
 nonces spent, no budget consumed, and a run costs one GET.
 
+**0.6.0 — `amount-unknown`.** The same discipline applied to the amount itself: a spend cap
+is only as good as the number it's checked against, and a signed-transaction or nested x402
+payload can carry its amount somewhere a naive check never looks. `amount-unknown` is a
+deny-by-default atom for exactly that case — an action whose value the gate can't determine
+is blocked, not silently waved through an untested cap.
+
 ```yaml
 # .github/workflows/governance.yml
 name: Governance
@@ -114,7 +120,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.5.2
+      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.6.1
         with:
           config: ./agent.metamynd.json
           require: merchants,perTxn

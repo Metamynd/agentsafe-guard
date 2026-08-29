@@ -23,16 +23,24 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // Must track the guard's MINOR line, not just its major. On a 0.x package `^0.4.0` means
 // >=0.4.0 <0.5.0, so leaving this at ^0.4.0 would scaffold an agent whose `npm test` runs
 // `agentsafe-guard verify` against a guard that has no such command.
-const GUARD_VERSION = '^0.5.0';
+// 0.6.0 adds the amount-unknown atom (deny-by-default when a value-moving action's amount
+// can't be determined) — this was already missed once (this constant sat at ^0.5.0 through the
+// whole 0.6.0 release), silently scaffolding every new project without that protection.
+const GUARD_VERSION = '^0.6.0';
 // The default hosted scaffold's SECOND process — the tool gateway (see scaffoldProject).
 const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.2.0 adds requireAuthorization (closes replay + cumulative spend) — this scaffold sets that
 // option, so a range that could resolve below 0.2.0 would silently scaffold a no-op.
-const MCP_GUARD_VERSION = '^0.2.0';
+// 0.3.0 adds the same amount-unknown atom as the guard, above — same reasoning, same miss.
+const MCP_GUARD_VERSION = '^0.3.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
-const GATEWAY_VERSION = '^0.2.0';
+// 0.3.0 fixes the follow-on gap: the DEFAULT binder only sees flat, top-level, exactly-named
+// fields, and silently skipped binding (not blocked) for anything else — nested JSON, an array,
+// a renamed or differently-cased key. Verified live: a signed $250/skyward-air request executed
+// $5000/evil-corp via `{ booking: { amount, merchant } }`. 0.3.0 fails that CLOSED instead.
+const GATEWAY_VERSION = '^0.3.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -908,8 +916,13 @@ own code, or a network attacker) might attempt:
 - **Direct call.** \`bookFlight()\` doesn't exist in the agent's process. There's nothing to call.
 - **Confused deputy (payload).** The gateway re-verifies the signed request against this agent's
   own policy AND binds it to the actual request body (payload binding,
-  \`@metamynd/agentsafe-http-gateway\` ≥ 0.2.0) — signing a cheap request while executing an
-  expensive one is refused before the tool ever runs.
+  \`@metamynd/agentsafe-http-gateway\` ≥ 0.3.0) — signing a cheap request while executing an
+  expensive one is refused before the tool ever runs. The default binder fails CLOSED not just
+  on a mismatched flat field but whenever it can't find the governed fields at all — nested
+  JSON, an array, a renamed or differently-cased key. A signed \$250 request had previously been
+  able to execute \$5000 via \`{ booking: { amount, merchant } }\`, because the flat matcher found
+  nothing to compare and treated "nothing found" as "nothing to check" — fixed the same way this
+  list gets fixed: found, closed, named here.
 - **Replay.** \`requireAuthorization: true\` (set in \`server.mjs\`) requires the agent's
   \`authorizationId\` — from a REAL \`guard.authorize()\` call, which \`index.mjs\` already makes for
   any value-bearing action by default — to atomically claim single-use execution against the
@@ -918,6 +931,10 @@ own code, or a network attacker) might attempt:
   already checked it against the mandate's TOTAL budget when it was minted — not just this one
   request's amount. Many small legal-looking calls can't add up past the mandate cap this way,
   because each needed its own real authorization first.
+- **Amount unknown.** A signed-transaction tool or a nested payload can carry its amount
+  somewhere a naive spend cap never looks — \`amount-unknown\`
+  (\`@metamynd/agentsafe-mcp-guard\` ≥ 0.3.0) blocks by default when the gate can't determine the
+  value, instead of letting it slip past the cap untested.
 
 The claim above also checks the claimed authorization's own \`agentDid\`/\`amount\`/\`currency\`/
 \`merchant\` against the request actually being executed (\`@metamynd/agentsafe-mcp-guard\` ≥ 0.2.1)

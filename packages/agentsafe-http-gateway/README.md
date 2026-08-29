@@ -45,9 +45,19 @@ node server.mjs   # listens on PORT (default 4000)
 ```
 
 `denyByDefault: true` (in `createHttpGateway`) switches to an **allow-list** posture — an unmatched
-route is blocked (`ROUTE_NOT_ALLOWED`) instead of forwarded.
+route is blocked (`ROUTE_NOT_ALLOWED`) instead of forwarded. `server.mjs` defaults this **off**
+(a proxy fronting a wider API legitimately wants most routes to pass through), but warns loudly
+at startup that it's off, and reads `AGENTSAFE_DENY_BY_DEFAULT=true` to flip it — found live: an
+unsigned `POST /transfer-funds` on an undeclared route passed straight through, HTTP 200.
 
-## Payload binding (confused deputy) — on by default since 0.2.0
+`server.mjs` also defaults `requireAuthorization: true` on its guard (env
+`AGENTSAFE_REQUIRE_AUTHORIZATION=false` to opt out) — without it, the guard only does stateless
+per-request re-verification, which cannot stop a captured request being replayed or catch many
+separately-legal calls adding up past the mandate's TOTAL budget. Found live, both real: 5/5
+replays of a captured request executed; 50×$250 with no authorization at all cleared a $10,000
+mandate cap.
+
+## Payload binding (confused deputy) — on by default since 0.2.0, fails CLOSED since 0.3.0
 
 The signed request authorizes *specific values*; the bytes forwarded upstream are the request
 body — a different object. Before 0.2.0, nothing compared them: an agent could sign a cheap,
@@ -67,10 +77,21 @@ wearing a different hat.
 carrying the gap, which is the vulnerability rather than a fix for it. Pass `bind: false`
 (globally, or per route) only for a route whose body carries no value fields worth binding.
 
-**Known limitation, deliberate:** a non-JSON body (protobuf, multipart, form-encoded) or a
-nested one (`{ booking: { amount } }`) binds nothing under the default binder and passes on the
-signature alone — failing those closed would brick every reverse-proxy deployment fronting a
-non-JSON or differently-shaped upstream. Give such a route its own binder instead:
+**0.3.0 — closed the follow-on gap.** Through 0.2.x, a body that WAS valid JSON but didn't carry
+`amount`/`currency`/`merchant` at the *top level* — nested (`{ booking: { amount } }`), a JSON
+array, a renamed field (`total`), or a differently-cased one (`Amount`) — bound nothing and
+passed on the signature alone, same as a genuinely unparseable body. That was the unsafe default:
+most real payloads nest, and this was a real, live-confirmed bypass — a signed $250/skyward-air
+request executed $5000/evil-corp via `{ booking: { amount, merchant } }`, because the flat
+matcher found nothing to compare and the gateway treated "found nothing" as "nothing to check."
+
+The default binder now distinguishes the two cases. A body with **nothing in it at all** (empty,
+absent, or not JSON — protobuf, multipart, form-encoded) still binds nothing and passes on the
+signature alone; failing THAT closed would brick every proxy fronting a non-JSON upstream, which
+is the one narrow exception this module still defends. A body that **is** valid JSON but simply
+doesn't expose the governed fields where the flat matcher looks now fails CLOSED —
+`403 PAYLOAD_UNBINDABLE` — because there is no way to rule out that the real values just moved
+out of sight. Give such a route its own binder to keep it working correctly instead of blocked:
 
 ```js
 routes: [{

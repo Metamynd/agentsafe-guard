@@ -59,10 +59,42 @@ test('non-JSON body binds nothing (documented limitation)', async () => {
   const r = await call(mk(), 'amount=5000&merchant=evil');
   assert.equal(r.status, 200);
 });
+test('an empty JSON object {} binds nothing - it carries no fields, hides none either', async () => {
+  const r = await call(mk(), {});
+  assert.equal(r.status, 200);
+});
+test('an empty JSON array [] binds nothing', async () => {
+  const r = await call(mk(), []);
+  assert.equal(r.status, 200);
+});
 test('nested value needs a route binder - and then it blocks', async () => {
   const gw = mk({}, { bind: (req) => { const b = JSON.parse(req.rawBody.toString('utf8')); return { amount: b.booking?.amount }; } });
   const r = await call(gw, { booking: { amount: 5000 } });
   assert.equal(r.body.reasonCode, 'PAYLOAD_NOT_BOUND');
+});
+// The exploit as reported: sign $250/skyward-air, ship the REAL values one level deeper than
+// the DEFAULT binder looks. Before the UNBINDABLE fix these all forwarded with status 200 —
+// the flat top-level matcher found none of amount/currency/merchant, returned null, and the
+// gateway treated "found nothing" as "nothing to check" instead of "cannot confirm the match".
+test('DEFAULT binder: a nested payload is blocked, not silently forwarded', async () => {
+  const r = await call(mk(), { booking: { amount: 5000, merchant: 'evil-corp' } });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE'); assert.equal(forwarded, null);
+});
+test('DEFAULT binder: a JSON array payload is blocked', async () => {
+  const r = await call(mk(), [{ amount: 5000, merchant: 'evil-corp' }]);
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
+});
+test('DEFAULT binder: capitalized field names are blocked (exact key match only)', async () => {
+  const r = await call(mk(), { Amount: 5000, Merchant: 'evil-corp' });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
+});
+test('DEFAULT binder: a differently-named field is blocked', async () => {
+  const r = await call(mk(), { total: 5000, vendor: 'evil-corp' });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
+});
+test('DEFAULT binder: UNBINDABLE is reached BEFORE the guard - burns no nonce either', async () => {
+  await call(mk(), { booking: { amount: 5000 } });
+  assert.equal(guardCalls, 0, 'guard.verifyRequest must not be reached');
 });
 test('bind:false restores legacy behaviour (opt-out works)', async () => {
   const r = await call(mk({ bind: false }), { amount: 5000, merchant: 'evil-corp' });

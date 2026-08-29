@@ -22,6 +22,14 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
     return have !== undefined && need !== undefined && have >= need;
   },
   'amount-over': (c, cfg) => typeof c.amount === 'number' && c.amount > Number(cfg?.limit ?? 0),
+  // Deny-by-default primitive for value-moving actions. Fires on ABSENCE (like the
+  // evidence atoms below, and unlike `amount-over`): true when the context carries no
+  // usable amount — the gate cannot tell how much value the call would move, so a
+  // spend cap authored next to it would silently never fire. Author it with BLOCK as
+  // the FIRST rule of a spend policy; the cap that follows then only ever judges a
+  // known number. Opt-in: only a rule that keys it runs it, so actions that carry no
+  // amount by nature are unaffected.
+  'amount-unknown': (c) => !(typeof c.amount === 'number' && Number.isFinite(c.amount)),
   // Total budget: cumulativeSpend is a SERVER-derived, signed-last context field (never
   // shadowable by the agent's itinerary), so this compares already-spent + this amount.
   'cumulative-over': (c, cfg) => (Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0)) > Number(cfg?.limit ?? 0),

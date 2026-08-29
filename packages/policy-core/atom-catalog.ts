@@ -37,6 +37,17 @@ export const ATOM_SPECS: AtomSpec[] = [
     requiredContext: ['amount'],
   },
   {
+    predicate: 'amount-unknown',
+    label: 'Amount not determinable',
+    description:
+      'Fires when the action carries no usable amount — the gate cannot tell how much value it ' +
+      'would move. A deny-by-default control for value-moving actions: author it with BLOCK ahead ' +
+      'of a spend cap, otherwise an action whose amount is missing or unparseable passes the cap ' +
+      'untested. Fires on ABSENCE, so only attach it to actions that must always carry an amount.',
+    config: [],
+    requiredContext: ['amount'],
+  },
+  {
     predicate: 'cumulative-over',
     label: 'Total budget over limit',
     description: 'Fires when cumulative spend (already-spent + this transaction) exceeds a configured total budget.',
