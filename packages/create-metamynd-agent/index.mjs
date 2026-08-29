@@ -919,17 +919,13 @@ own code, or a network attacker) might attempt:
   request's amount. Many small legal-looking calls can't add up past the mandate cap this way,
   because each needed its own real authorization first.
 
-**One narrower gap, found while building this and disclosed rather than left implicit:** the
-claim above verifies the claimed authorization's own \`agentDid\`/\`amount\`/\`currency\` match the
-request being executed — but not \`merchant\`, because the backend's hold record doesn't currently
-store it. A same-amount, same-currency authorization legitimately obtained for one merchant could
-in principle be presented to unlock a booking with a different merchant. Closing this needs a
-small backend change (storing \`merchant\` on the hold so it can be compared too); it isn't done
-here. See \`@metamynd/agentsafe-mcp-guard\`'s own README (\`requireAuthorization\`) for the full
-mechanism, and \`demo/duffel-mcp-gateway\` in the AgentSafe repo for the fuller pattern this is a
-slice of (mutual DID handshake, x402 payment binding, commitment-bound capability tokens — which
-WOULD close the merchant gap too, by binding the whole transaction to a cryptographic commitment
-rather than comparing individual stored fields).
+The claim above also checks the claimed authorization's own \`agentDid\`/\`amount\`/\`currency\`/
+\`merchant\` against the request actually being executed (\`@metamynd/agentsafe-mcp-guard\` ≥ 0.2.1)
+— a same-amount, same-currency authorization legitimately obtained for one merchant cannot unlock
+a booking with a different one; that gap was found while building this and closed, not left open.
+See \`@metamynd/agentsafe-mcp-guard\`'s own README (\`requireAuthorization\`) for the full mechanism,
+and \`demo/duffel-mcp-gateway\` in the AgentSafe repo for the fuller pattern this is a slice of
+(mutual DID handshake, x402 payment binding, commitment-bound capability tokens).
 `;
 }
 

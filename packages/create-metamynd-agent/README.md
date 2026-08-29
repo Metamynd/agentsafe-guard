@@ -175,13 +175,11 @@ Named precisely, not left implicit:
   already checked it against the mandate's TOTAL budget when minted, not just this one request's
   amount — so many small legal-looking calls can't add up past the cap this way.
 
-**One narrower gap, found while building this and disclosed rather than left implicit:** the claim
-above verifies the claimed authorization's own `agentDid`/`amount`/`currency` match the request —
-not `merchant`, because the backend's hold record doesn't currently store it. A same-amount,
-same-currency authorization legitimately obtained for one merchant could in principle unlock a
-booking with a different merchant. Closing this needs a small backend change (storing `merchant`
-on the hold); it isn't done here. `gateway/README.md`'s own "What this closes, precisely" section
-has the same disclosure.
+The claim above also checks `agentDid`/`amount`/`currency`/`merchant` together against the
+request being executed (`@metamynd/agentsafe-mcp-guard` ≥ 0.2.1) — a same-amount, same-currency
+authorization legitimately obtained for one merchant cannot unlock a booking with a different
+one. That gap was found while building this and closed, not left open; `gateway/README.md`'s own
+"What this closes, precisely" section names it the same way.
 
 Pass `--no-gateway` to opt out and get the old single-process scaffold instead — e.g. if you're
 already running your own separate gateway and don't need this one. **You are back to being

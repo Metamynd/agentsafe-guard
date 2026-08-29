@@ -83,11 +83,14 @@ When set, a PERMIT verdict (allow/observe) additionally requires `signed.authori
 **atomically claim single-use execution** against the issuer (`AUTHORIZED → DISPATCHING`, the
 effect-safety state machine) — a second claim of the same id, whether a genuine replay or a race,
 fails, because that transition is legal exactly once. The claimed hold's own bound
-`agentDid`/`amount`/`currency` are checked against what's actually being executed, too — a claim
-alone only proves *some* real, unclaimed authorization exists; without this check, a cheap
-legitimate hold's id could be presented to unlock a completely different, more expensive
+`agentDid`/`amount`/`currency`/`merchant` are checked against what's actually being executed, too
+— a claim alone only proves *some* real, unclaimed authorization exists; without this check, a
+cheap legitimate hold's id could be presented to unlock a completely different, more expensive
 execution (`AUTHORIZATION_AGENT_MISMATCH` / `AUTHORIZATION_AMOUNT_MISMATCH` /
-`AUTHORIZATION_CURRENCY_MISMATCH`).
+`AUTHORIZATION_CURRENCY_MISMATCH` / `AUTHORIZATION_MERCHANT_MISMATCH`). A field the backend
+response omits (e.g. an older, not-yet-migrated deployment with no `merchant` column) is skipped,
+not treated as a mismatch — this degrades gracefully, it doesn't silently under-check going
+forward once the backend does report it.
 
 The `authorizationId` has to come from a **real** `guard.authorize()` call on the agent side —
 not `buildSignedRequest()`, which never talks to the network. In practice this usually needs no
