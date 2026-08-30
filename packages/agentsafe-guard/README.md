@@ -25,7 +25,7 @@ re-implement the gate:
 ([markdown](https://metamynd.ai/specs/magp-v1.0.md))
 
 It defines agent identity, the canonical signed message (§8.3), the sixteen-stage order of
-checks (§8.5), all 62 reason codes (Appendix A), delegation narrowing (§5.4), and evidence
+checks (§8.5), all 63 reason codes (Appendix A), delegation narrowing (§5.4), and evidence
 you can verify offline without MetaMynd (§13.4). If you are writing a client in a language
 other than JavaScript, read §8.3.3–8.3.5 first: key encoding, number stringification and
 signed-vs-sent field identity each surface only as `SIGNATURE_INVALID`.
@@ -98,6 +98,13 @@ mismatch), but a prohibition only fires when every one of its own constraints is
 so the identical "mismatch → not satisfied" rule let a prohibition like `payAmount gteq 1000
 unit USD` be silently skipped by declaring any other currency, including a mere case
 difference (`'usd'` vs `'USD'`). The currency comparison is also now case-insensitive.
+
+**0.6.5 — `IDENTITY_KEY_MISMATCH`, a new reason code (now 63 total).** The backend gate
+now cross-checks a resolved agent's registered public key against the key embedded in its
+own self-certifying DID (`did:hedera` / `did:key`) before trusting a signature against it —
+free, local, no network round-trip, since the DID already carries its own proof. Nothing in
+this package's own evaluation changes; documented here because the count in this README and
+the linked spec moved.
 
 ```yaml
 # .github/workflows/governance.yml
