@@ -25,7 +25,7 @@ re-implement the gate:
 ([markdown](https://metamynd.ai/specs/magp-v1.0.md))
 
 It defines agent identity, the canonical signed message (§8.3), the sixteen-stage order of
-checks (§8.5), all 63 reason codes (Appendix A), delegation narrowing (§5.4), and evidence
+checks (§8.5), all 64 reason codes (Appendix A), delegation narrowing (§5.4), and evidence
 you can verify offline without MetaMynd (§13.4). If you are writing a client in a language
 other than JavaScript, read §8.3.3–8.3.5 first: key encoding, number stringification and
 signed-vs-sent field identity each surface only as `SIGNATURE_INVALID`.
@@ -105,6 +105,12 @@ own self-certifying DID (`did:hedera` / `did:key`) before trusting a signature a
 free, local, no network round-trip, since the DID already carries its own proof. Nothing in
 this package's own evaluation changes; documented here because the count in this README and
 the linked spec moved.
+
+**0.6.6 — `SPEND_PATTERN_ANOMALY`, a new reason code (now 64 total).** The backend gate can
+now escalate an otherwise-permitted decision whose amount deviates sharply from an agent's
+OWN recorded spend history — a baseline the platform's trust-graph engine learns, not a
+threshold a human pre-sets. Opt-in (`SPEND_ANOMALY_MODE=on`), off by default. Nothing in this
+package's own evaluation changes; documented here because the count moved again.
 
 ```yaml
 # .github/workflows/governance.yml
