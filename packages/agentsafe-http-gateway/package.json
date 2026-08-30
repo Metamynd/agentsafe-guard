@@ -19,7 +19,7 @@
   ],
   "scripts": {
     "start": "node server.mjs",
-    "test": "node gateway.smoke.mjs && node bind-payload.smoke.mjs"
+    "test": "node gateway.smoke.mjs && node bind-payload.smoke.mjs && node bind-payload.fuzz.mjs"
   },
   "dependencies": {
     "@metamynd/agentsafe-mcp-guard": "^0.3.3"
