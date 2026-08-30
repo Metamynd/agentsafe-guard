@@ -1,0 +1,47 @@
+{
+  "name": "@metamynd/magp-evidence",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "MAGP Phase E — the lawful selective-disclosure auditor: verify a holder-opened evidence record (Merkle inclusion + on-chain root + tx-commitment opening) with MetaMynd offline. Reproduces the backend's leaf/commitment construction. Zero dependencies.",
+  "main": "magp-evidence.mjs",
+  "exports": { ".": "./magp-evidence.mjs", "./package.json": "./package.json" },
+  "bin": { "magp-auditor": "./auditor.mjs" },
+  "files": [
+    "magp-evidence.mjs",
+    "auditor.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": { "test": "node magp-evidence.test.mjs" },
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "hedera",
+    "hcs",
+    "merkle-proof",
+    "evidence",
+    "audit",
+    "disclosure",
+    "mirror-node",
+    "trustless",
+    "magp",
+    "metamynd",
+    "agentsafe"
+  ],
+  "author": "MetaMynd",
+  "license": "MIT",
+  "homepage": "https://metamynd.ai/en/developers/spec",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Metamynd/agentsafe-guard.git",
+    "directory": "packages/magp-evidence"
+  },
+  "bugs": {
+    "url": "https://github.com/Metamynd/agentsafe-guard/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
