@@ -1,0 +1,49 @@
+{
+  "name": "@metamynd/magp-hcs2",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "MAGP Phase D — decentralized discovery: resolve did:hedera documents + service endpoints from the DID's own HCS registry topic via a public Hedera mirror node, trustlessly, with MetaMynd offline. Zero dependencies.",
+  "main": "magp-hcs2.mjs",
+  "exports": { ".": "./magp-hcs2.mjs", "./package.json": "./package.json" },
+  "files": [
+    "magp-hcs2.mjs",
+    "magp-hcs2.live-demo.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": { "test": "node magp-hcs2.test.mjs" },
+  "devDependencies": {
+    "@hashgraph/sdk": "^2.81.0",
+    "dotenv": "^17.4.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "hedera",
+    "hcs",
+    "did",
+    "did:hedera",
+    "decentralized-identity",
+    "mirror-node",
+    "trustless",
+    "magp",
+    "metamynd",
+    "agentsafe"
+  ],
+  "author": "MetaMynd",
+  "license": "MIT",
+  "homepage": "https://metamynd.ai/en/developers/spec",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Metamynd/agentsafe-guard.git",
+    "directory": "packages/magp-hcs2"
+  },
+  "bugs": {
+    "url": "https://github.com/Metamynd/agentsafe-guard/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
