@@ -148,6 +148,35 @@ test('a hold from a not-yet-migrated backend (no merchant field) is not falsely 
   } finally { restore(); }
 });
 
+test('a degraded claim (real fields omitted from the response) still allows, but warns — the tripwire for a future backend regression', async () => {
+  const restore = withMockClaim(() => ({ status: 200, body: { success: true, data: { ok: true } } })); // agentDid/amount/currency/merchant ALL omitted
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (msg) => warnings.push(msg);
+  try {
+    const r = await mk().verifyRequest(signedRequest({ amount: 250, merchant: 'skyward-air', authorizationId: 'auth-degraded' }));
+    assert.equal(r.decision, 'allow', 'a genuinely absent field must still be tolerated, not blocked');
+    assert.ok(warnings.some((w) => w.includes('omitted agentDid')), 'must warn about the omitted agentDid');
+    assert.ok(warnings.some((w) => w.includes('omitted amount')), 'must warn about the omitted amount on a value-bearing request');
+    assert.ok(warnings.some((w) => w.includes('omitted currency')), 'must warn about the omitted currency on a value-bearing request');
+    assert.ok(warnings.some((w) => w.includes('omitted merchant')), 'must warn about the omitted merchant when one was signed');
+  } finally { console.warn = realWarn; restore(); }
+});
+
+test('a zero-amount (read) request omitting amount/currency from the claim does not warn about them', async () => {
+  const restore = withMockClaim(() => ({ status: 200, body: { success: true, data: { ok: true, agentDid: agent.did } } }));
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (msg) => warnings.push(msg);
+  try {
+    const r = await mk().verifyRequest(signedRequest({ amount: 0, merchant: '', authorizationId: 'auth-read' }));
+    assert.equal(r.decision, 'allow');
+    assert.ok(!warnings.some((w) => w.includes('omitted amount')), 'a genuinely zero-amount request has no amount to have omitted');
+    assert.ok(!warnings.some((w) => w.includes('omitted currency')), 'no currency claim was ever meaningful for a non-value request');
+    assert.ok(!warnings.some((w) => w.includes('omitted merchant')), 'no merchant was signed, so there is nothing to have omitted');
+  } finally { console.warn = realWarn; restore(); }
+});
+
 test('a claimed hold for a DIFFERENT agent is refused', async () => {
   const restore = withMockClaim(() => ({ status: 200, body: { success: true, data: { ok: true, agentDid: 'did:hedera:testnet:someone-else_0.0.999', amount: 250, currency: 'USD' } } }));
   try {

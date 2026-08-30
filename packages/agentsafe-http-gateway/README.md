@@ -124,6 +124,34 @@ malformed escape falls back to comparing the raw bytes rather than throwing). Se
 === "acme"`, so a body carrying `"merchant": ["acme"]` used to pass as a match even though
 it's a structurally different value than what was signed.
 
+**0.4.3 — a signed amount of exactly 0 no longer drops amount out of the required set.**
+`amount` used to be exempted from binding whenever the signed value was `0`, on the theory
+that it meant "the caller never populated amount." It doesn't: the public authorize
+endpoint's own schema accepts a genuine `$0` request as a real, deliberate authorization,
+and `amount-unknown`/`amount-over` both treat `0` as known rather than absent. Exempting it
+here meant a `$0`-authorized request to a real merchant dropped `amount` out of the required
+set entirely — a matching top-level `merchant` satisfied the only remaining requirement, and
+a real amount hidden elsewhere in the body (nested, renamed) rode through completely
+unchecked. `amount` is now required whenever it was signed as any finite number, including
+`0`. A route whose amount is genuinely never a concept should opt out via `bind: false` or
+its own `bind(req, signed)`, per the pattern below — not rely on this heuristic guessing
+which case it is.
+
+**0.4.4 — the required-field set is no longer derived from the signed request at all.**
+0.4.3 closed the explicit `amount: 0` case, but not an equivalent one: `verifyRequest()`
+destructures `amount = 0` before rebuilding the canonical message, so a signed blob that
+OMITS the `amount` key entirely verifies against the exact same signature an explicit `0`
+would — an attacker gains nothing by choosing one form over the other, and either one still
+dropped `amount` out of the required set under 0.4.3's fix. There is no signed-request-shaped
+heuristic that can close both at once, because they are the same bytes. `defaultBindPayload`
+now requires `route.valueFields` (default `['amount', 'merchant']`) unconditionally, ignoring
+the signed request's content entirely — a genuinely value-less route must say so explicitly
+with `valueFields: []` (or `bind: false`), not rely on the signed request implying it:
+
+```js
+routes: [{ method: 'POST', path: '/health-check', action: 'ping', valueFields: [] }]
+```
+
 Give a route its own binder — `(req, signed) => ({ amount, merchant, ... })` — when it genuinely
 carries the value somewhere this flat matcher can't see, so it keeps working correctly instead of
 being blocked:
@@ -135,12 +163,54 @@ routes: [{
 }]
 ```
 
-**What this still can't do anything about:** a body whose amount/merchant genuinely match what
-was signed, but which ALSO carries an extra key an upstream happens to honor (a `surcharge` field
-that silently inflates the real charge past what the binder checked). A generic three-field
-binder has no way to know which arbitrary extra keys a specific upstream treats as meaningful —
-that's what a route-level `bind()` with a strict allowlist (reject any top-level key you don't
-explicitly expect) is for, on any route where the cost of getting this wrong is high.
+**By default, this still can't do anything about:** a body whose amount/merchant genuinely
+match what was signed, but which ALSO carries an extra key an upstream happens to honor (a
+`surcharge` field that silently inflates the real charge past what the binder checked). A
+generic three-field binder has no way to know which arbitrary extra keys a specific upstream
+treats as meaningful BY DEFAULT — that's what `route.allowedFields` (0.4.7, below) is for.
+
+**0.4.5 — raised the `agentsafe-mcp-guard` floor to `^0.3.3`.** This package's canonical
+signed-message format must match the guard's exactly (both sides run policy-core's
+`buildAuthMessage`) — 0.3.3 escapes `\`/`|` before joining fields, and a deployment that
+resolves an older guard on one side (the previous `^0.3.0` floor allowed as far back as
+0.3.0) would silently fail signature verification for any field containing one of those
+characters, for reasons that would not be obvious in the field. The gateway also now logs
+the guard version it actually resolved at startup, since a lockfile override can still
+diverge from the declared floor.
+
+**0.4.6 — deprecation warning for routes with no explicit binding decision.** A protected
+route with an `action` but neither `valueFields` nor `bind` set has always used the default
+heuristic (`DEFAULT_VALUE_FIELDS`, currently `['amount', 'merchant']`) — safe, but an operator
+who never read this file had no way to know that's happening, or whether the default actually
+describes their route's real value fields. `createHttpGateway` now logs a startup warning
+naming any such route. Nothing about request handling changes — this is purely additional
+visibility, and a **future major version will refuse to start** instead of warning. Silence it
+by setting `route.valueFields` explicitly (even to the current default, to say "yes, I looked,
+this is right"), `route.bind` (a function), or `route.bind: false`.
+
+**0.4.7 — `route.allowedFields`: an opt-in strict allowlist, and currency-as-required.**
+Two residual gaps the default binder is deliberately loose about, both closed by fields a
+route can now declare explicitly:
+
+- `route.allowedFields` (a list of top-level body keys) rejects any key not on it —
+  `PAYLOAD_UNBINDABLE`, same as any other unconfirmable shape — closing the additive-hidden-
+  field gap above. It also refuses an array body outright, and requires `amount` to actually
+  be a JS number rather than a decimal-equal string (`"250"` still passes `boundValueMatches`
+  by value, but forwards to the upstream as a different TYPE than was signed — fine generally,
+  worth refusing on a route strict enough to opt into this).
+- `currency` was never required by default (see `DEFAULT_VALUE_FIELDS` above) — but it always
+  COULD be, by simply listing it: `valueFields: ['amount', 'currency', 'merchant']`. Do this on
+  any route whose governing mandate carries a `unit`-bearing spend constraint (see
+  `agentsafe-guard`'s mandate-currency fix), so a body that omits currency can't silently drift
+  from what the cap was actually authorized in.
+
+```js
+routes: [{
+  method: 'POST', path: '/book/*', action: 'flight-purchase',
+  valueFields: ['amount', 'currency', 'merchant'], // currency now required too
+  allowedFields: ['amount', 'currency', 'merchant', 'riskLevel'], // nothing else allowed
+}]
+```
 
 ## Embed the core
 

@@ -49,51 +49,60 @@ export const BOUND_FIELDS = ['amount', 'currency', 'merchant'];
 export const UNBINDABLE = Symbol('agentsafe-http-gateway:unbindable');
 
 /**
- * Fields whose PRESENCE at the body's top level is REQUIRED whenever the signed request names a
- * real value for them — not just compared when they happen to show up.
+ * Fields whose PRESENCE at the body's top level is REQUIRED BY DEFAULT for any route using
+ * the default binder — unconditionally, regardless of anything the SIGNED request declares.
+ * Override per-route with `route.valueFields` (an empty array for a route with no value
+ * fields at all — though `bind: false` is the more direct way to say that).
  *
- * `currency` is deliberately excluded from this list: plenty of real upstreams never repeat it
- * in the body at all (single-currency APIs, currency implied by the route or a header), and
- * requiring it would brick those deployments for a field that, alone, is rarely the attack. It
- * is still COMPARED when the body does include it (see the loop in createHttpGateway) — just not
- * required. `amount` and `merchant` are exactly the two fields an attacker profits from moving:
- * how much moves, and who it moves to.
+ * This used to be computed FROM the signed request instead: `amount`/`merchant` were only
+ * required when the signed value looked "meaningful," which handed the requirement's own
+ * on/off switch to the party the binder exists to distrust. Two equivalent ways were found
+ * to flip it off: sign `amount: 0` (amount-unknown/amount-over already treat a genuine $0 as
+ * a real, valid, non-blocking amount, and the public authorize endpoint's own schema accepts
+ * it — this is not a contrived edge case), or omit `amount` from the signed JSON entirely —
+ * cryptographically IDENTICAL to signing 0, since every verifier destructures `amount = 0`
+ * before rebuilding the canonical message, so an absent key and an explicit zero verify
+ * against the exact same signature. Either way, a matching top-level `merchant` then
+ * satisfied the only remaining requirement, and a real amount hidden elsewhere in the body
+ * (nested, renamed) rode through completely unchecked. There is no signed-request-shaped
+ * heuristic that closes both forms at once, because they are the same bytes — the required
+ * set has to come from something the signer does not control.
+ *
+ * `currency` is deliberately excluded from the default: plenty of real upstreams never
+ * repeat it in the body at all (single-currency APIs, currency implied by the route or a
+ * header), and requiring it would brick those deployments for a field that, alone, is
+ * rarely the attack. It is still COMPARED when the body does include it (see the loop in
+ * createHttpGateway) — just not required by default. `amount` and `merchant` are exactly
+ * the two fields an attacker profits from moving: how much moves, and who it moves to.
  */
-const REQUIRED_IF_SIGNED = ['amount', 'merchant'];
-
-/** Does the signed request name a REAL value for this field, as opposed to the default
- *  verifyRequest() itself would apply to an absent one (amount 0, merchant '')? A field the
- *  signer never cared about in the first place has nothing for the body to be required to echo. */
-function isMeaningfulSignedValue(field, value) {
-  if (value === undefined || value === null) return false;
-  if (field === 'amount') { const n = Number(value); return Number.isFinite(n) && n !== 0; }
-  return String(value) !== '';
-}
+const DEFAULT_VALUE_FIELDS = ['amount', 'merchant'];
 
 /**
- * Default payload binder: pull the governed value fields out of a JSON body, and REQUIRE that
- * `amount`/`merchant` be found there whenever the signed request actually constrains them.
+ * Default payload binder: pull the governed value fields out of a JSON body, and REQUIRE
+ * that every field in `route.valueFields` (default: `amount`, `merchant`) be found there,
+ * present and matching — full stop, not conditioned on what the signed request happens to
+ * declare (see DEFAULT_VALUE_FIELDS for why).
  *
- * The earlier version of this function only asked "does the body carry NONE of the governed
- * fields" — treating a body that offered even one correct-looking field (or none at all) as
- * either fully bound or safely inert. Verified live: none of that holds. A decoy top-level
- * `merchant` matching the signed one, paired with the real amount nested one level down
- * (`{ merchant: 'skyward-air', booking: { amount: 5000 } }`), passed every prior check — the
- * merchant compared clean, and `amount` being merely ABSENT from the top level (not present-and-
- * wrong) was never itself treated as suspicious. Same shape with the amount renamed (`total`)
- * instead of nested. An entirely empty body, or a form-encoded one, was explicitly exempted by
- * the earlier design as "nothing to compare" — also live-exploitable, for the same reason: a
- * signed real amount with nothing in the body to check it against is not evidence of safety.
+ * Earlier versions of this function asked "does the body carry NONE of the governed
+ * fields" (only fully-bound or safely-inert), then "does the SIGNED request name a real
+ * value for this field" (see DEFAULT_VALUE_FIELDS above for why that was still exploitable).
+ * Verified live at each stage: a decoy top-level `merchant` matching the signed one, paired
+ * with the real amount nested one level down (`{ merchant: 'skyward-air', booking: { amount:
+ * 5000 } }`) or renamed (`total`), passed every prior check. An entirely empty body, or a
+ * form-encoded one, was also explicitly exempted at one point as "nothing to compare" — also
+ * live-exploitable, for the same reason: a required field with nothing in the body to check
+ * it against is not evidence of safety.
  *
- * So the standard is no longer "found nothing → assume nothing to bind." It is "the signed
- * request names a real amount/merchant → the body MUST expose that field, present and matching,
- * or the request fails CLOSED (`UNBINDABLE`)" — including when the body is empty, non-JSON, or
- * an array. The one surviving exception: a signed request that never names a real amount OR
- * merchant at all (both absent/default) has nothing this binder is entitled to require, so any
- * body — any shape, or none — passes through this check unbound, same as always.
+ * So the standard is "every field this route declares as value-bearing MUST be present in
+ * the body and match, or the request fails CLOSED (`UNBINDABLE`)" — including when the body
+ * is empty, non-JSON, or an array. A route with no value fields at all sets
+ * `valueFields: []` (or uses `bind: false`), so any body shape passes through this check
+ * unbound — a decision the route operator makes explicitly, not one inferred from the
+ * signed request.
  */
-export function defaultBindPayload(req, signed) {
-  const required = REQUIRED_IF_SIGNED.filter((f) => isMeaningfulSignedValue(f, signed?.[f]));
+export function defaultBindPayload(req, signed, route) {
+  const required = route?.valueFields ?? DEFAULT_VALUE_FIELDS;
+  const allowedFields = route?.allowedFields; // optional strict allowlist — see below
   const whenUnconfirmed = required.length > 0 ? UNBINDABLE : null;
 
   const raw = req.rawBody ?? req.body;
@@ -105,6 +114,24 @@ export function defaultBindPayload(req, signed) {
     try { parsed = JSON.parse(text); } catch { return whenUnconfirmed; } // genuinely not JSON
   }
   if (!parsed || typeof parsed !== 'object') return whenUnconfirmed; // a JSON scalar/null
+
+  // Strict mode (opt-in via `route.allowedFields`): amount/merchant genuinely matching what
+  // was signed is not, by itself, evidence the request is safe to forward — a body can carry
+  // an ADDITIVE key (`surcharge`, `feeOverride`, ...) this generic binder has no way to know
+  // an upstream also honors. Left off by default (a residual, documented limitation — see
+  // README), because a fixed three-field binder cannot know a specific upstream's full schema
+  // without being told. A route that declares its complete expected shape here gets that
+  // extra key refused outright instead of silently forwarded.
+  if (allowedFields) {
+    if (Array.isArray(parsed)) return UNBINDABLE; // a strict route never expects an array body
+    if (Object.keys(parsed).some((k) => !allowedFields.includes(k))) return UNBINDABLE;
+    // A decimal-equal numeric string ("250") still matches boundValueMatches's canonical
+    // comparison, but forwards to the upstream VERBATIM as a string — a different type than
+    // was signed. Low-risk generally (still decimal-equal, not a hex/exponent divergence — see
+    // parseCanonicalAmount), but a route that opted into strict typing via allowedFields is
+    // exactly the tier where a type mismatch, not just a value mismatch, should be refused.
+    if (typeof parsed.amount === 'string') return UNBINDABLE;
+  }
 
   const out = {};
   for (const f of BOUND_FIELDS) if (parsed[f] !== undefined) out[f] = parsed[f];
@@ -160,19 +187,52 @@ function isNonScalar(v) {
  *   forward — async (req) => { status, headers, body }: performs the upstream call. Injected for tests.
  *   extractGovernance — override the signed-request extractor (default: x-magp-request header).
  *   denyByDefault — when true, an UNMATCHED route is blocked (allow-list posture) instead of forwarded.
- *   bind    — payload binder, called as `bind(req, signed)` (default: defaultBindPayload). A
- *             route's own `bind` wins. Pass `false` to disable binding entirely and restore
- *             pre-0.1.2 behaviour — do that only for routes that carry no value fields, since it
- *             reopens the confused-deputy gap. Returning `UNBINDABLE` (see defaultBindPayload)
- *             fails the route CLOSED — a route whose value fields are nested/renamed/differently-
- *             cased needs its own `bind(req, signed)` that actually finds them, not silent
- *             pass-through.
+ *   bind    — payload binder, called as `bind(req, signed, route)` (default: defaultBindPayload,
+ *             which requires `route.valueFields` — default `['amount', 'merchant']` — present
+ *             and matching in the body, regardless of what the SIGNED request itself declares;
+ *             see defaultBindPayload/DEFAULT_VALUE_FIELDS for why the required set must not be
+ *             derived from the signed request). A route's own `bind` wins; a route's own
+ *             `valueFields: []` opts a genuinely value-less route out of the default's
+ *             requirement without disabling binding entirely. Pass `bind: false` to disable
+ *             binding altogether and restore pre-0.1.2 behaviour — do that only for routes that
+ *             carry no value fields, since it reopens the confused-deputy gap. Returning
+ *             `UNBINDABLE` (see defaultBindPayload) fails the route CLOSED — a route whose value
+ *             fields are nested/renamed/differently-cased needs its own `bind(req, signed)` that
+ *             actually finds them, not silent pass-through. `route.allowedFields` (optional) is
+ *             a strict allowlist: any top-level body key not in it is UNBINDABLE, closing the
+ *             residual gap where an upstream honors an extra key (e.g. `surcharge`) alongside
+ *             an honestly-matching amount/merchant — see defaultBindPayload.
+ *
+ * DEPRECATION WINDOW: any route with an `action` and neither `bind` nor `valueFields` set logs
+ * a loud startup warning naming the route — it still works (the default heuristic above is
+ * safe), but a future version will refuse to start instead of silently guessing. Set
+ * `valueFields` explicitly (even to the current default) to silence it.
  *
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
  */
 export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload } = {}) {
   if (typeof forward !== 'function') throw new Error('createHttpGateway requires a forward(req) function');
+
+  // Deprecation window: a protected route with an `action` but no EXPLICIT binding decision
+  // silently gets the default heuristic (DEFAULT_VALUE_FIELDS) — safe today (see
+  // DEFAULT_VALUE_FIELDS/defaultBindPayload), but an operator who never read this file has no
+  // way to know that's happening, or that the default's ['amount','merchant'] might not
+  // describe THEIR route's actual value fields. Warn now, loudly, naming the route; a future
+  // major version will refuse to start instead of guessing. Silence it by setting
+  // `route.valueFields` (even to the current default, to say "yes, I looked, this is right"),
+  // `route.bind` (a function), or `route.bind: false`.
+  for (const route of routes) {
+    if (route?.action && route.bind === undefined && route.valueFields === undefined) {
+      console.warn(
+        `[gateway] route "${route.method ?? '*'} ${route.path}" (action: "${route.action}") has no explicit ` +
+        `payload-binding decision and is using the default heuristic (requires ${DEFAULT_VALUE_FIELDS.join('/')} ` +
+        `present and matching in the body). Set route.valueFields (e.g. ['amount','merchant'], or [] if this ` +
+        `route carries no value fields), route.bind:false, or a custom route.bind(req, signed, route) — a ` +
+        `future version will refuse to start instead of guessing. See README "Payload binding".`,
+      );
+    }
+  }
 
   return async function handle(req) {
     const route = matchRoute(routes, req.method, req.path);
@@ -200,7 +260,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     if (binder) {
       let payload;
       try {
-        payload = binder(req, request);
+        payload = binder(req, request, route);
       } catch (err) {
         // Fail CLOSED: if we cannot read the payload, we cannot claim the signature covers it.
         return { status: 502, body: { decision: 'block', reasonCode: 'BIND_ERROR', error: String(err?.message ?? err) } };

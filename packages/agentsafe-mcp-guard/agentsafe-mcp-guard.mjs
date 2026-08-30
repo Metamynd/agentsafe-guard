@@ -229,7 +229,19 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
         // The claim alone only proves SOME real, unclaimed authorization exists — it must also
         // be FOR this agent and these exact values, or a cheap legitimate hold's id could be
-        // presented to unlock a completely different, more expensive execution.
+        // presented to unlock a completely different, more expensive execution. Each check is
+        // skipped when the claim response omits that field — tolerated for a Service pinned
+        // against an older, not-yet-migrated issuer whose response predates the field (see
+        // backend markEffect()'s own note) — but a value-bearing request with a real signed
+        // amount/merchant omitted from the claim is exactly the "field genuinely absent vs.
+        // issuer regressed" ambiguity that note warns about, so it's surfaced rather than
+        // silently trusted: this is the ONE place a future backend change could quietly
+        // re-open the confused-deputy gap this claim exists to close, and nothing else here
+        // would notice.
+        if (claim.agentDid === undefined) console.warn('[mcp-guard] claim response omitted agentDid — binding degraded to "some valid unclaimed authorization exists"');
+        if (Number(amount) > 0 && claim.amount === undefined) console.warn('[mcp-guard] claim response omitted amount for a value-bearing request — amount binding degraded');
+        if (Number(amount) > 0 && claim.currency === undefined) console.warn('[mcp-guard] claim response omitted currency for a value-bearing request — currency binding degraded');
+        if (merchant && claim.merchant === undefined) console.warn('[mcp-guard] claim response omitted merchant for a request that signed one — merchant binding degraded');
         if (claim.agentDid !== undefined && claim.agentDid !== agentDid) return { decision: 'block', reasonCode: 'AUTHORIZATION_AGENT_MISMATCH' };
         if (claim.amount !== undefined && Number(claim.amount) !== Number(amount)) return { decision: 'block', reasonCode: 'AUTHORIZATION_AMOUNT_MISMATCH' };
         if (claim.currency !== undefined && claim.currency !== currency) return { decision: 'block', reasonCode: 'AUTHORIZATION_CURRENCY_MISMATCH' };

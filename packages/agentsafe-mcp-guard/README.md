@@ -80,6 +80,25 @@ server time, a pre-signing window rather than ordinary clock skew. `issuedAt` ma
 to the freshness window (network/processing delay) but lead by no more than 30 seconds (clock
 skew only).
 
+**0.3.4 — a mandate's currency check no longer lets a PROHIBITION be dodged by relabeling
+the currency.** A payAmount/cumulativeSpend constraint issued with a `unit` (currency) is
+only satisfied in that currency — correct for a PERMISSION (fail closed to deny on a
+mismatch), but a prohibition only fires when every one of its own constraints is satisfied,
+so the identical "mismatch → not satisfied" rule let a prohibition like `payAmount gteq 1000
+unit USD` be silently skipped by declaring any other currency, including a mere case
+difference (`'usd'` vs `'USD'`). The currency comparison is also now case-insensitive.
+
+**0.3.5 — a degraded claim now warns instead of only being silently tolerated.**
+`claimAuthorization()`'s per-field cross-checks each skip when the issuer's claim response
+omits that field — a deliberate, documented rolling-upgrade tolerance for a Service pinned
+against an older backend whose response predates one of these fields existing at all. That
+tolerance was never meant to also mask a REGRESSION on an otherwise-current backend: this
+version logs (`console.warn`) whenever a value-bearing request's claim response omits
+`agentDid`/`amount`/`currency`, or a request that signed a real `merchant` gets a claim
+response that omits it — the one place a future backend change could quietly re-open the
+confused-deputy gap this check exists to close, with nothing else here able to notice. The
+decision is unchanged (still tolerated, not blocked) — this is visibility, not a new refusal.
+
 ### Replay and cumulative spend (`requireAuthorization`)
 
 Re-evaluating policy per request (above) proves the request is well-formed and in-policy — it

@@ -21,8 +21,17 @@
 //     API, but only when it's the posture you actually meant)
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { createMcpGuard } from '@metamynd/agentsafe-mcp-guard';
 import { createHttpGateway } from './gateway.mjs';
+
+// The two packages' canonical signed-message format must match exactly (policy-core's
+// buildAuthMessage) — mismatched versions verify signatures byte-for-byte differently for any
+// field containing `\` or `|` (see agentsafe-mcp-guard 0.3.3's escaping fix). package.json's own
+// `^0.3.3` floor keeps npm from resolving an older, incompatible mcp-guard, but a monorepo/lockfile
+// override could still do it — logging what actually resolved at runtime makes that visible.
+const require = createRequire(import.meta.url);
+const RESOLVED_MCP_GUARD_VERSION = require('@metamynd/agentsafe-mcp-guard/package.json').version;
 
 const UPSTREAM = (process.env.AGENTSAFE_UPSTREAM || '').replace(/\/$/, '');
 const PORT = Number(process.env.PORT || 4000);
@@ -128,6 +137,7 @@ async function main() {
 
   server.listen(PORT, () => {
     console.log(`[gateway] AgentSafe HTTP interception gateway on :${PORT} → upstream ${UPSTREAM || '(none)'} (${routes.length} protected route(s))`);
+    console.log(`[gateway] resolved @metamynd/agentsafe-mcp-guard@${RESOLVED_MCP_GUARD_VERSION}`);
   });
 }
 

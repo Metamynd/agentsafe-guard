@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/agentsafe-http-gateway",
-  "version": "0.4.2",
+  "version": "0.4.7",
   "description": "Generic HTTP interception gateway (SAFR §17) — a zero-dependency reverse proxy that governs arbitrary HTTP calls through the AgentSafe gate before forwarding upstream.",
   "type": "module",
   "main": "gateway.mjs",
@@ -22,7 +22,7 @@
     "test": "node gateway.smoke.mjs && node bind-payload.smoke.mjs"
   },
   "dependencies": {
-    "@metamynd/agentsafe-mcp-guard": "^0.3.0"
+    "@metamynd/agentsafe-mcp-guard": "^0.3.3"
   },
   "engines": {
     "node": ">=18"

@@ -55,21 +55,42 @@ function reasonFor(constraint: Constraint | undefined): string {
   return REASON_BY_OPERAND[constraint.leftOperand] ?? `CONSTRAINT_FAILED:${constraint.leftOperand}`;
 }
 
-function constraintSatisfied(c: Constraint, req: MandateRequest): boolean {
+/**
+ * Whether `c` holds against `req`.
+ *
+ * A constraint stamped with a `unit` (payAmount/cumulativeSpend are always issued with one
+ * — see issueMandate) is a threshold denominated in THAT currency; a bare numeric
+ * comparison treats a 100000 JPY cap and a 100000 USD request as identically "at the
+ * limit," letting an attacker clear a cap by orders of magnitude just by naming a
+ * cheaper-looking currency (or, letting a value-based PROHIBITION be dodged the same way —
+ * see below). `mm:currency` is signed-last context (see authorize()), so it can't be
+ * spoofed via an unsigned itinerary field. Compared case-insensitively: currency codes are
+ * conventionally uppercase, but a legitimately-lowercase 'usd' must still count as a match
+ * rather than being treated as a mismatch (which would itself be exploitable — see below).
+ *
+ * `strict` governs how a MISMATCHED (or unreadable) currency resolves, because "satisfied"
+ * means opposite things depending on which rule reads it:
+ *   - A PERMISSION requires every constraint to be PROVEN true to grant. An unverifiable
+ *     currency must not count as proof — fail closed by treating it as NOT satisfied
+ *     (`strict: true`).
+ *   - A PROHIBITION requires every constraint to be PROVEN true to FIRE (block). Reusing
+ *     the same "unverifiable → not satisfied" rule here fails OPEN: `every()` would then
+ *     skip firing the prohibition entirely, so a value-based prohibition like
+ *     `payAmount gteq 1000 unit USD` is silently dodged by declaring any other currency —
+ *     including a case difference before the fix above. An unverifiable currency must
+ *     instead count as NOT ruling the dangerous condition out — fail closed the OTHER way,
+ *     by treating it as satisfied (`strict: false`), so the prohibition still fires.
+ */
+function constraintSatisfied(c: Constraint, req: MandateRequest, strict: boolean): boolean {
   const op = OPERATORS[c.operator];
   if (!op) return false; // unknown operator -> fail closed
   const left = Object.prototype.hasOwnProperty.call(req.values, c.leftOperand)
     ? req.values[c.leftOperand]
     : undefined;
-  if (!op(left, c.rightOperand)) return false;
-  // A constraint stamped with a `unit` (payAmount/cumulativeSpend are always issued with
-  // one — see issueMandate) is a cap denominated in THAT currency; a bare numeric
-  // comparison treats a 100000 JPY cap and a 100000 USD request as identically "within
-  // limit," letting an attacker clear a cap by orders of magnitude just by naming a
-  // cheaper-looking currency in the request. `mm:currency` is signed-last context (see
-  // authorize()), so it can't be spoofed via an unsigned itinerary field.
-  if (c.unit && req.values['mm:currency'] !== c.unit) return false;
-  return true;
+  if (!c.unit) return op(left, c.rightOperand);
+  const currency = req.values['mm:currency'];
+  const unitMatches = typeof currency === 'string' && currency.toUpperCase() === c.unit.toUpperCase();
+  return unitMatches ? op(left, c.rightOperand) : !strict;
 }
 
 function targetOf(rule: Permission | Prohibition, mandate: Mandate): string | undefined {
@@ -150,7 +171,7 @@ export function evaluateMandate(mandate: Mandate, req: MandateRequest): MandateR
   //    (no constraints = an unconditional prohibition for that target).
   for (const p of mandate.prohibition ?? []) {
     if (targetOf(p, mandate) !== req.target) continue;
-    const fires = (p.constraint ?? []).every((c) => constraintSatisfied(c, req));
+    const fires = (p.constraint ?? []).every((c) => constraintSatisfied(c, req, false));
     if (fires) {
       return {
         decision: p.enforcement ?? 'block',
@@ -172,12 +193,12 @@ export function evaluateMandate(mandate: Mandate, req: MandateRequest): MandateR
 
   // A permission grants when ALL its constraints hold (no constraints = always).
   for (const p of perms) {
-    const failing = (p.constraint ?? []).find((c) => !constraintSatisfied(c, req));
+    const failing = (p.constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
     if (!failing) return { decision: 'allow', reasonCode: 'AUTHORIZED' };
   }
 
   // None granted — report the first failing constraint of the first permission.
-  const firstFail = (perms[0].constraint ?? []).find((c) => !constraintSatisfied(c, req));
+  const firstFail = (perms[0].constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
   return {
     decision: firstFail?.onFail ?? 'block',
     reasonCode: reasonFor(firstFail),
