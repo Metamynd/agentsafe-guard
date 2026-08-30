@@ -212,6 +212,19 @@ routes: [{
 }]
 ```
 
+**0.4.8 — `bind-payload.fuzz.mjs`: property-based fuzzing for the binder.** The tests above
+(and the historical attack scripts in
+[`agentsafe-cleanroom`](https://github.com/Metamynd/agentsafe-cleanroom)) each encode ONE
+known-attack shape — a decoy top-level field, one renamed field, one hex string. This test
+instead generates hundreds of random hiding strategies per run (nesting the real amount/
+merchant at a random depth, renaming them, wrapping in an array, omitting them, plus random
+canonical/non-canonical numeric-string formats) and asserts the invariant every one of those
+tests only checks a single instance of: the bound payload must never claim a match unless
+the governed fields are genuinely present and matching at the body's top level. No dependency
+is added — this package ships zero-dependency, so the fuzzer is hand-rolled with only
+`Math.random()`-equivalent (xorshift32) and Node built-ins, wired into `npm test` alongside
+the existing smoke suite. Purely a test-time addition; nothing about request handling changes.
+
 ## Embed the core
 
 ```js
