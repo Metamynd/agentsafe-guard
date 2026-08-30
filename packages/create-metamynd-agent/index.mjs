@@ -777,7 +777,12 @@ async function bookFlight(args) {
 
 // One protected route: only a request signed by this agent, for exactly this action, and
 // re-verified against this agent's own mandate/SOP, reaches bookFlight() below.
-const routes = [{ method: 'POST', path: '/book-flight', action: '${scope}' }];
+//
+// valueFields is explicit on purpose, not left to the gateway's own default (which would be
+// this exact list anyway): a route with a real amount/merchant should always say so itself,
+// rather than relying on a library default to guess right. A route with NO value concept at
+// all (a read, a status check) should set valueFields: [] instead — see the gateway's README.
+const routes = [{ method: 'POST', path: '/book-flight', action: '${scope}', valueFields: ['amount', 'merchant'] }];
 
 // No serviceKey: this minimal gateway only calls verifyRequest() (re-check a signed request),
 // not the mutual-handshake methods, which are the only thing that needs it.
@@ -917,13 +922,18 @@ own code, or a network attacker) might attempt:
 - **Direct call.** \`bookFlight()\` doesn't exist in the agent's process. There's nothing to call.
 - **Confused deputy (payload).** The gateway re-verifies the signed request against this agent's
   own policy AND binds it to the actual request body (payload binding,
-  \`@metamynd/agentsafe-http-gateway\` ≥ 0.4.0) — signing a cheap request while executing an
-  expensive one is refused before the tool ever runs. The default binder requires \`amount\`/
-  \`merchant\` to actually be found in the body whenever the signature names a real value for
-  them — not just "did the body offer at least one correct-looking field." A first attempt at
-  this (0.3.0) checked the weaker version and was re-tested and closed the same day: a correct
-  decoy in one field let the OTHER field hide anywhere — nested, renamed, an array, or an
-  entirely empty/non-JSON body.
+  \`@metamynd/agentsafe-http-gateway\` ≥ 0.4.5) — signing a cheap request while executing an
+  expensive one is refused before the tool ever runs. This route's \`valueFields: ['amount',
+  'merchant']\` (see \`server.mjs\`) is an explicit, server-controlled requirement, not a guess
+  inferred from anything the signed request itself declares — that distinction is what closes
+  the full history below, not just the most recent case in it. Earlier attempts checked
+  progressively weaker versions of "is this real": 0.3.0 only refused a body offering NONE of
+  the governed fields (a correct decoy in one field let the other hide nested, renamed, an
+  array, or an entirely empty/non-JSON body); 0.4.0–0.4.2 required a field only when the
+  SIGNED request's own value for it looked "real," which a signer could defeat by signing
+  \`amount: 0\` — or, identically, by never signing an amount at all, since both verify against
+  the exact same canonical message. \`valueFields\` moves the requirement to something the
+  signer never controls at all.
 - **Replay.** \`requireAuthorization: true\` (set in \`server.mjs\`) requires the agent's
   \`authorizationId\` — from a REAL \`guard.authorize()\` call, which \`index.mjs\` already makes for
   any value-bearing action by default — to atomically claim single-use execution against the

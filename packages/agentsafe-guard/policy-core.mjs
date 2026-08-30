@@ -351,13 +351,14 @@ function reasonFor(constraint) {
   if (!constraint) return "CONSTRAINT_FAILED";
   return REASON_BY_OPERAND[constraint.leftOperand] ?? `CONSTRAINT_FAILED:${constraint.leftOperand}`;
 }
-function constraintSatisfied(c, req) {
+function constraintSatisfied(c, req, strict) {
   const op = OPERATORS[c.operator];
   if (!op) return false;
   const left = Object.prototype.hasOwnProperty.call(req.values, c.leftOperand) ? req.values[c.leftOperand] : void 0;
-  if (!op(left, c.rightOperand)) return false;
-  if (c.unit && req.values["mm:currency"] !== c.unit) return false;
-  return true;
+  if (!c.unit) return op(left, c.rightOperand);
+  const currency = req.values["mm:currency"];
+  const unitMatches = typeof currency === "string" && currency.toUpperCase() === c.unit.toUpperCase();
+  return unitMatches ? op(left, c.rightOperand) : !strict;
 }
 function targetOf(rule, mandate) {
   return rule.target ?? mandate.target;
@@ -379,7 +380,7 @@ function evaluateMandate(mandate, req) {
   }
   for (const p of mandate.prohibition ?? []) {
     if (targetOf(p, mandate) !== req.target) continue;
-    const fires = (p.constraint ?? []).every((c) => constraintSatisfied(c, req));
+    const fires = (p.constraint ?? []).every((c) => constraintSatisfied(c, req, false));
     if (fires) {
       return {
         decision: p.enforcement ?? "block",
@@ -397,10 +398,10 @@ function evaluateMandate(mandate, req) {
     };
   }
   for (const p of perms) {
-    const failing = (p.constraint ?? []).find((c) => !constraintSatisfied(c, req));
+    const failing = (p.constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
     if (!failing) return { decision: "allow", reasonCode: "AUTHORIZED" };
   }
-  const firstFail = (perms[0].constraint ?? []).find((c) => !constraintSatisfied(c, req));
+  const firstFail = (perms[0].constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
   return {
     decision: firstFail?.onFail ?? "block",
     reasonCode: reasonFor(firstFail),

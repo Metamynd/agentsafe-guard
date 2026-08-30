@@ -91,6 +91,14 @@ negative value could clear a spend cap for free, or erode a cumulative-spend tra
 sums signed amounts over time. `amount-unknown` now fires on any non-finite, non-numeric,
 **or negative** amount; a genuine `0` still passes.
 
+**0.6.4 — a mandate's currency check no longer lets a PROHIBITION be dodged by relabeling
+the currency.** A payAmount/cumulativeSpend constraint issued with a `unit` (currency) is
+only satisfied in that currency — correct for a PERMISSION (fail closed to deny on a
+mismatch), but a prohibition only fires when every one of its own constraints is satisfied,
+so the identical "mismatch → not satisfied" rule let a prohibition like `payAmount gteq 1000
+unit USD` be silently skipped by declaring any other currency, including a mere case
+difference (`'usd'` vs `'USD'`). The currency comparison is also now case-insensitive.
+
 ```yaml
 # .github/workflows/governance.yml
 name: Governance
@@ -127,7 +135,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.6.2
+      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.6.4
         with:
           config: ./agent.metamynd.json
           require: merchants,perTxn

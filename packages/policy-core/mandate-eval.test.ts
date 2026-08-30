@@ -187,6 +187,59 @@ describe('evaluateMandate — prohibitions win', () => {
   });
 });
 
+describe('evaluateMandate — a unit-bearing PROHIBITION cannot be dodged by currency', () => {
+  // A currency mismatch on a PERMISSION constraint must deny (proven above); reusing that
+  // same "mismatch -> not satisfied" rule for a PROHIBITION fails OPEN instead, because a
+  // prohibition only fires when every() constraint is satisfied — "not satisfied" on the
+  // amount constraint would silently skip the prohibition, no matter how large the amount.
+  const highValueProhibited: Mandate = {
+    permission: [{ target: 'mm:flight-purchase' }], // unconditional permission (prohibition wins first)
+    prohibition: [
+      {
+        target: 'mm:flight-purchase',
+        constraint: [{ leftOperand: 'mm:payAmount', operator: 'gteq', rightOperand: 1000, unit: 'USD' }],
+        reasonCode: 'HIGH_VALUE_BLOCKED',
+      },
+    ],
+  };
+
+  it('fires the prohibition for a large amount in the matching currency', () => {
+    const r = evaluateMandate(highValueProhibited, req({ 'mm:payAmount': 1500, 'mm:currency': 'USD' }));
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('HIGH_VALUE_BLOCKED');
+  });
+
+  it('still fires when the matching currency is declared in a different case (usd)', () => {
+    const r = evaluateMandate(highValueProhibited, req({ 'mm:payAmount': 1500, 'mm:currency': 'usd' }));
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('HIGH_VALUE_BLOCKED');
+  });
+
+  it('still fires when a DIFFERENT currency is declared for the same large amount — the reported bypass', () => {
+    // 0.3.3's regression: declaring 'JPY' (or any other currency) made constraintSatisfied
+    // return false for this constraint, so every() never fired the prohibition at all —
+    // the exact same numeric amount that blocks in USD sailed through as an unconditional
+    // permission grant just by relabeling the currency.
+    const r = evaluateMandate(highValueProhibited, req({ 'mm:payAmount': 1500, 'mm:currency': 'JPY' }));
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('HIGH_VALUE_BLOCKED');
+  });
+
+  it('does not fire for a genuinely small amount in the matching currency', () => {
+    const r = evaluateMandate(highValueProhibited, req({ 'mm:payAmount': 100, 'mm:currency': 'USD' }));
+    expect(r.decision).toBe('allow');
+  });
+
+  it('a MISMATCHED currency fires the prohibition even for a small amount — unverifiable, so treated as unsafe', () => {
+    // Deliberate: once the currency can't be confirmed, the amount comparison in that
+    // currency is unverifiable, not "known small" — a prohibition resolves that ambiguity
+    // toward blocking, the same direction amount-unknown resolves an unreadable amount.
+    const r = evaluateMandate(highValueProhibited, req({ 'mm:payAmount': 1, 'mm:currency': 'JPY' }));
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('HIGH_VALUE_BLOCKED');
+  });
+});
+
 describe('budget helpers — two-phase hold/capture', () => {
   it('computes remaining budget net of spent and holds', () => {
     expect(remainingBudget({ cap: 1000, spent: 200, held: 100 })).toBe(700);
