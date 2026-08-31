@@ -99,13 +99,36 @@ response that omits it — the one place a future backend change could quietly r
 confused-deputy gap this check exists to close, with nothing else here able to notice. The
 decision is unchanged (still tolerated, not blocked) — this is visibility, not a new refusal.
 
-### Replay and cumulative spend (`requireAuthorization`)
+**0.3.6 — two gaps a security review found in what this guard actually enforces, not just what
+its docs claimed.** First: `requireAuthorization`'s doc only ever named replay and cumulative
+spend as what it closes, but rate limits, circuit breakers, and spend-pattern anomaly detection
+are equally stateful and equally invisible to the stateless bundle re-check — the doc undersold
+its own scope. A value-bearing call permitted with `requireAuthorization` off now logs a warning
+naming all five. Second: `guardIncomingTool`'s capability check only ran when the CALLER chose to
+include `signed.capability` — an agent could simply omit it and the "authorize $150, execute
+$5,000" protection never engaged, verifier configured or not. New `requireCapability: true` makes
+an omitted capability a hard block (`CAPABILITY_REQUIRED`) instead of a silent pass-through. Both
+off by default — existing embeds are unchanged.
+
+### Replay, cumulative spend, rate limits, breakers, spend anomalies (`requireAuthorization`)
 
 Re-evaluating policy per request (above) proves the request is well-formed and in-policy — it
 does **not** stop a captured, still-fresh request from being replayed, and it can't enforce the
 mandate's TOTAL budget across many separately-legal calls (each is only checked against its own
-per-transaction cap). Both are the stateful issuer gate's job, not something a stateless re-check
-can do on its own.
+per-transaction cap). Neither is something a stateless re-check can do on its own: both, like
+rate limits, circuit breakers, and spend-pattern anomaly detection, key off the agent's history
+on the issuer's side, which never travels to this guard's stateless bundle re-check. **All of
+these are the stateful issuer gate's job.** `requireAuthorization` is the one setting that closes
+all of them at once, because it forces the exact request back through that gate before this
+Service executes anything. Left off, a value-bearing call permitted here logs a warning saying
+exactly that, so the gap is visible in your own logs rather than silent:
+
+```
+[mcp-guard] "flight-purchase" (amount=100) permitted in trustless mode — rate-limit,
+circuit-breaker, replay, cumulative-spend, and spend-anomaly floors are stateful and were NOT
+re-verified against live issuer state. Set requireAuthorization:true for custodial/value-bearing
+surfaces.
+```
 
 ```js
 const guard = createMcpGuard({ serviceDid, issuerApi, requireAuthorization: true });
@@ -198,6 +221,19 @@ when a request carries a signed capability, `guardIncomingTool` requires it to a
 transaction** — the host reconstructs the tx and verifies MetaMynd's signature offline (via
 `checkCapabilityBinding` from `magp-bind`), so "authorize $150, execute $5,000" is rejected in the
 prod guard, not just the demo gateway. No verifier configured → opt-in (unchanged).
+
+Presenting a capability is otherwise the **caller's** choice: an agent can simply omit
+`signed.capability` and the check above never runs, verifier configured or not. Set
+`requireCapability: true` to close that omission — a PERMIT with no capability is then blocked
+(`CAPABILITY_REQUIRED`) instead of silently passing through unbound:
+
+```js
+const guard = createMcpGuard({ serviceDid, verifyCapability, requireCapability: true });
+```
+
+Off by default, so an existing integration whose callers don't yet present a capability keeps
+working unchanged. Turn it on for any Service where the decision-token binding is meant to be
+mandatory, not opt-in.
 
 Holds carry an expiry (§7a.4): if not captured, the reservation auto-voids and the budget returns
 to the cap; a party can also void explicitly via `POST /policy/mandate/authorize/:id/void`.

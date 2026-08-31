@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/agentsafe-mcp-guard",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Zero-dependency trustless governance for the SERVICE side. An MCP server or API re-verifies a calling agent's signed request against the agent's own published policy \u00e2\u20ac\u201d so an agent that ignores its own guard still cannot make your service act.",
   "type": "module",
   "main": "./agentsafe-mcp-guard.mjs",

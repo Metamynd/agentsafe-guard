@@ -42,8 +42,22 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   SPEND, neither of which the stateless re-check above can enforce on its own. Off by default:
  *   it costs a network round trip per value-bearing call, so it's a deliberate choice, not a
  *   strictly-dominant one — a Service happy with per-request policy re-evaluation alone can skip it.
+ *
+ *   The stateless re-check ALSO cannot see the issuer's other STATEFUL floors — rate limits,
+ *   circuit breakers, and spend-pattern anomaly detection all key off the agent's server-side
+ *   history, which never travels to the edge. `requireAuthorization` is the one mechanism that
+ *   closes all of these at once, because it forces the exact request through the stateful gate
+ *   before this Service will execute it. A value-bearing call permitted here with
+ *   `requireAuthorization` OFF logs a warning for exactly this reason — see guardIncomingTool.
+ * @param {boolean} [cfg.requireCapability] when true AND `verifyCapability` is configured, a PERMIT
+ *   verdict for a call with NO `signed.capability` is now BLOCKED (`CAPABILITY_REQUIRED`) rather than
+ *   silently passing through unbound. Without this, capability binding is opt-in from the CALLER's
+ *   side — an agent can simply omit `capability` and the "authorize $150, execute $5,000" check below
+ *   never runs at all, since it only fires when the field is present. Off by default (an existing
+ *   integrator's un-capability-aware callers must keep working); set true on any Service where
+ *   capability binding is meant to be mandatory, not opt-in.
  */
-export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   const privateKey = serviceKey
@@ -273,19 +287,39 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       // exact transaction — the host reconstructs the tx + verifies MetaMynd's signature OFFLINE,
       // so "authorize $150, execute $5,000" (authorize-A / execute-B) is rejected HERE, in the
       // prod guard, not just the demo gateway. No verifier configured → unchanged (opt-in).
-      if (signed?.capability && typeof verifyCapability === 'function') {
-        let bind;
-        try { bind = await verifyCapability(signed); }
-        catch (err) { bind = { ok: false, reasonCode: 'CAPABILITY_CHECK_ERROR', error: String(err?.message ?? err) }; }
-        if (!bind?.ok) {
-          const err = new Error(`MCP guard CAPABILITY "${action}": ${bind?.reasonCode ?? 'CAPABILITY_INVALID'}`);
+      //
+      // Presenting a capability is the CALLER's choice, not this guard's: an agent can simply
+      // omit `signed.capability` and this whole check is skipped, verifier or not — that is
+      // exactly the omission `requireCapability` closes. Without it, capability binding is
+      // opt-in from the wrong side of the trust boundary.
+      if (typeof verifyCapability === 'function') {
+        if (signed?.capability) {
+          let bind;
+          try { bind = await verifyCapability(signed); }
+          catch (err) { bind = { ok: false, reasonCode: 'CAPABILITY_CHECK_ERROR', error: String(err?.message ?? err) }; }
+          if (!bind?.ok) {
+            const err = new Error(`MCP guard CAPABILITY "${action}": ${bind?.reasonCode ?? 'CAPABILITY_INVALID'}`);
+            err.name = 'GovernanceBlocked';
+            err.governance = { decision: 'block', reasonCode: bind?.reasonCode ?? 'CAPABILITY_INVALID' };
+            throw err;
+          }
+        } else if (requireCapability) {
+          const err = new Error(`MCP guard CAPABILITY "${action}": CAPABILITY_REQUIRED`);
           err.name = 'GovernanceBlocked';
-          err.governance = { decision: 'block', reasonCode: bind?.reasonCode ?? 'CAPABILITY_INVALID' };
+          err.governance = { decision: 'block', reasonCode: 'CAPABILITY_REQUIRED' };
           throw err;
         }
       }
       if (decision.decision === 'observe') {
         console.warn(`[mcp-guard] OBSERVE "${action}": ${decision.reasonCode} — served under monitoring`);
+      }
+      // Trustless mode cannot see the issuer's stateful floors (see requireAuthorization's own
+      // doc above) — surface that as a loud, per-call signal rather than a silent gap, so an
+      // operator serving real value through this path finds out from their own logs rather
+      // than from an incident. Gated on value-bearing (amount > 0): a free/read action has
+      // nothing for those floors to protect, so warning on it would just be noise.
+      if (!requireAuthorization && Number(signed?.amount) > 0) {
+        console.warn(`[mcp-guard] "${action}" (amount=${signed.amount}) permitted in trustless mode — rate-limit, circuit-breaker, replay, cumulative-spend, and spend-anomaly floors are stateful and were NOT re-verified against live issuer state. Set requireAuthorization:true for custodial/value-bearing surfaces.`);
       }
       return handler(signed, ...rest);
     };
