@@ -102,6 +102,52 @@ const ok = (cond, name, extra = '') => { if (!cond) failed++; console.log(`${con
   ran = false;
   const noCap = await tool(signed({}));
   ok(ran && noCap.booked === 'PNR', 'capability: absent → opt-in (proceeds on the governance verdict)');
+
+  // requireCapability: true flips the omission from opt-in-pass to a hard block — this is the
+  // gap a security review found: without this flag, a caller can just drop `capability` and
+  // skip the whole check above, verifier configured or not.
+  const strictGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle, verifyCapability, requireCapability: true });
+  const strictTool = strictGuard.guardIncomingTool('flight-purchase', async () => { ran = true; return { booked: 'PNR' }; });
+
+  ran = false;
+  let threw2 = null;
+  try { await strictTool(signed({})); } catch (e) { threw2 = e; }
+  ok(threw2 && threw2.name === 'GovernanceBlocked' && threw2.governance.reasonCode === 'CAPABILITY_REQUIRED', 'requireCapability: omitting capability is now blocked', threw2?.governance?.reasonCode);
+  ok(ran === false, 'requireCapability: the tool never runs when capability is required but missing');
+
+  // A bound capability still proceeds — requireCapability only closes the OMISSION gap, it
+  // doesn't change behavior for a caller that already presents one.
+  ran = false;
+  const strictGood = await strictTool(signed({ capability: 'CAP-OK' }));
+  ok(ran && strictGood.booked === 'PNR', 'requireCapability: a bound token still proceeds');
+}
+
+// ─── (C) Trustless-mode value-bearing calls warn that stateful floors were skipped ──────────
+{
+  const bundle = {
+    subject: agent.did,
+    mandates: [{ action: 'flight-purchase', document: { permission: [{ target: 'flight-purchase', constraint: [{ leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 1000 }] }] } }],
+  };
+  const guard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
+  const tool = guard.guardIncomingTool('flight-purchase', async () => ({ booked: 'PNR' }));
+
+  function signed(amount) {
+    const action = 'flight-purchase', currency = 'USD', merchant = 'amadeus', nonce = crypto.randomUUID(), issuedAt = new Date().toISOString();
+    const signature = agent.sign(buildAuthMessage({ agentDid: agent.did, action, amount, currency, merchant, nonce, issuedAt }));
+    return { agentDid: agent.did, action, amount, currency, merchant, itinerary: {}, nonce, issuedAt, signature };
+  }
+
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (msg) => warnings.push(msg);
+  try {
+    await tool(signed(100));
+    await tool(signed(0));
+  } finally {
+    console.warn = originalWarn;
+  }
+  const valueWarnings = warnings.filter((w) => /trustless mode/.test(w));
+  ok(valueWarnings.length === 1, 'trustless-mode warning: fires once for the value-bearing call, not the zero-amount one', `${valueWarnings.length} warning(s)`);
 }
 
 if (failed === 0) { console.log('\nPASS — durable settlement anti-reuse + prod capability binding'); process.exit(0); }
