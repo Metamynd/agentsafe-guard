@@ -11,6 +11,7 @@
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate } from './policy-core.mjs';
+import { envelopeHashFor } from './governance-envelope.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
 
@@ -120,6 +121,20 @@ export function createGuard(opts = {}) {
     return crypto.sign(null, Buffer.from(message, 'utf8'), privateKey).toString('hex');
   }
 
+  // Tier 1 context-claim binding (opt-in, docs/design/context-claim-binding.md): when
+  // on, sign the GovernanceEnvelope hash too, so a counterparty/gate can prove the
+  // agent's OWN key attested to the context it submitted — not just the signed action
+  // subset. Off by default: a bare request stays a valid degenerate envelope, exactly
+  // like today, and the wire body carries no envelopeSignature field at all.
+  const signContext = opts.signContext ?? cfg?.signContext ?? false;
+  function envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }) {
+    if (!signContext) return undefined;
+    // The hash is independent of `signature` (excluded from what it commits to — see
+    // governance-envelope.ts), so an empty placeholder here is exact, not approximate.
+    const hash = envelopeHashFor({ agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt, signature: '' });
+    return sign(hash);
+  }
+
   // --- Enforcement mode (spec §9.2 + local-first plan) --------------------------------------
   // 'local' (DEFAULT): decide the rule layer LOCALLY against a cached signed bundle — a
   //   block/escalate needs no network; an allowed VALUE action is still sealed by the remote
@@ -158,7 +173,11 @@ export function createGuard(opts = {}) {
     const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, nonce, issuedAt });
     // trace/materiality are GovernanceEnvelope fields (SAFR §5) — unsigned metadata; the
     // signed message stays the action subset, so verification is unchanged.
-    return { agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt, signature: sign(message) };
+    return {
+      agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt,
+      signature: sign(message),
+      envelopeSignature: envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }),
+    };
   }
 
   /**
@@ -176,9 +195,14 @@ export function createGuard(opts = {}) {
       const res = await fetch(`${base}/policy/mandate/authorize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // trace/materiality (SAFR §5 envelope) ride as unsigned metadata; JSON.stringify
-        // drops them when undefined, so an agent that omits them sends the legacy body.
-        body: JSON.stringify({ agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt, signature: sign(message) }),
+        // trace/materiality (SAFR §5 envelope) and envelopeSignature (Tier 1, opt-in) ride
+        // as unsigned-message metadata; JSON.stringify drops them when undefined, so an
+        // agent that omits them (or leaves signContext off) sends the legacy body.
+        body: JSON.stringify({
+          agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt,
+          signature: sign(message),
+          envelopeSignature: envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }),
+        }),
       });
       const body = await res.json().catch(() => null);
       return body?.data ?? { decision: 'block', reasonCode: `GATE_HTTP_${res.status}` };

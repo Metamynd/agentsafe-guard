@@ -26,7 +26,10 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.6.0 adds the amount-unknown atom (deny-by-default when a value-moving action's amount
 // can't be determined) — this was already missed once (this constant sat at ^0.5.0 through the
 // whole 0.6.0 release), silently scaffolding every new project without that protection.
-const GUARD_VERSION = '^0.6.0';
+// 0.7.0 adds the opt-in `signContext` envelope signature (Tier 1 context-claim binding) —
+// no scaffolded behavior changes (off by default), but the floor must still cover the real
+// current version regardless, per this repo's standing internal-pin invariant.
+const GUARD_VERSION = '^0.7.0';
 // The default hosted scaffold's SECOND process — the tool gateway (see scaffoldProject).
 const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.2.0 adds requireAuthorization (closes replay + cumulative spend) — this scaffold sets that
@@ -87,7 +90,9 @@ ${c.b('Options')}
   --harness            No login, no KYB, no network at all: a free local governance harness —
                        your own rules, your own identity, decided entirely on this machine. See
                        README#harness. Not for enterprise use (no anchored identity/evidence,
-                       no cross-party trust) — that is what the hosted platform adds.
+                       no cross-party trust) — that is what the hosted platform adds. Add
+                       --gateway for a second local process that closes the cooperative-only
+                       gap too, still free and offline (see --gateway below).
   --sandbox            No login, no KYB: scaffold against the shared sandbox agent (fastest start)
   --config <file>      A JSON policy file (name/scope/limits + simple "rules") — see README#config-file.
                        Flags below still override individual fields from the file. Works with
@@ -112,7 +117,12 @@ ${c.b('Options')}
   --no-gateway         Hosted flow only: skip the separate tool-gateway process (see
                        README#separate-tool-gateway-default) and scaffold the old
                        single-process example instead. Not a separate enforcement boundary.
-  --gateway-port <n>   Hosted flow only: the gateway process's port (default 4401)
+  --gateway            --harness only: ALSO scaffold a second local process (still zero
+                       network, zero account) that independently re-verifies every request
+                       against the same rules file, using the real @metamynd/agentsafe-mcp-guard.
+                       Off by default. Does not close nonce replay/cumulative spend — see the
+                       generated README#--gateway for exactly what it does and does not.
+  --gateway-port <n>   The gateway process's port, hosted flow or --harness --gateway (default 4401)
   --port <n>           --harness only: the local dashboard's port (default 4400)
   --yes, -y            Non-interactive: use flags/env/defaults, never prompt
   -h, --help           Show this help
@@ -252,6 +262,40 @@ function generateAgentKeypair() {
     publicKeyHex: publicKey.export({ format: 'der', type: 'spki' }).toString('hex'),
     privateKeyHex: privateKey.export({ format: 'der', type: 'pkcs8' }).toString('hex'),
   };
+}
+
+// did:key (base58btc multibase over an Ed25519-multicodec-prefixed raw public key) — mirrors
+// backend/src/features/agent-identity/did.util.ts / magp-did.mjs's buildDidKey exactly, so a
+// did:key this CLI mints is resolvable by any real MAGP verifier (agentsafe-guard,
+// agentsafe-mcp-guard) with zero network calls: the public key is embedded in the DID string
+// itself. Reimplemented inline (not imported) — this CLI stays zero-dependency, and it is
+// ~15 lines of pure math, not something worth a package for.
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function base58(bytes) {
+  let zeros = 0;
+  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+  const digits = [];
+  for (let i = zeros; i < bytes.length; i++) {
+    let carry = bytes[i];
+    for (let j = 0; j < digits.length; j++) { carry += digits[j] << 8; digits[j] = carry % 58; carry = (carry / 58) | 0; }
+    while (carry > 0) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+  }
+  let out = '';
+  for (let k = 0; k < zeros; k++) out += BASE58_ALPHABET[0];
+  for (let q = digits.length - 1; q >= 0; q--) out += BASE58_ALPHABET[digits[q]];
+  return out;
+}
+const ED25519_MULTICODEC = Uint8Array.of(0xed, 0x01);
+const ED25519_SPKI_PREFIX_LEN = 12; // 302a300506032b6570032100 — fixed for every Ed25519 SPKI DER key
+/** The RAW 32-byte Ed25519 public key from this CLI's own DER/SPKI hex export. */
+function rawPublicKeyFromSpkiHex(publicKeyHex) {
+  return Buffer.from(publicKeyHex, 'hex').subarray(ED25519_SPKI_PREFIX_LEN);
+}
+function buildDidKey(publicKeyBytes) {
+  const prefixed = new Uint8Array(ED25519_MULTICODEC.length + publicKeyBytes.length);
+  prefixed.set(ED25519_MULTICODEC, 0);
+  prefixed.set(publicKeyBytes, ED25519_MULTICODEC.length);
+  return `did:key:z${base58(prefixed)}`;
 }
 
 // Sign a BYOK challenge exactly as the gate verifies it: Ed25519 over the UTF-8 bytes of the raw
@@ -1118,11 +1162,14 @@ function harnessMandate({ scope, currency, maxAmount, perTxnMax, merchants }) {
   };
 }
 
-/** A clearly-local, clearly-not-anchored identifier — `guard.agentDid` is just a signing
- *  subject in the local path (never resolved against Hedera), but the format should not
- *  read as a verified did:hedera when it is not one. */
+/** A genuine did:key — self-certifying (the verification key is embedded in the DID itself,
+ *  §4.1.2), clearly NOT a did:hedera (never resolved against Hedera, never anchored) but still
+ *  a REAL, resolvable DID: any MAGP verifier can check a signature against it completely
+ *  offline. This matters once --gateway is on (below): the harness's second local process
+ *  verifies the agent's requests via key-in-DID, exactly like a real did:hedera counterparty
+ *  would, just with no chain underneath it. */
 function harnessAgentDid(publicKeyHex) {
-  return `did:key:local-${crypto.createHash('sha256').update(publicKeyHex, 'hex').digest('hex').slice(0, 32)}`;
+  return buildDidKey(rawPublicKeyFromSpkiHex(publicKeyHex));
 }
 
 function harnessRulesFile(mandate, sopDocument) {
@@ -1133,6 +1180,128 @@ function harnessRulesFile(mandate, sopDocument) {
       sops: [{ standardKey: 'sop', document: sopDocument }],
       standards: [],
     },
+    null,
+    2,
+  ) + '\n';
+}
+
+// ---------- --harness --gateway: a second local process, still zero network -----------------
+//
+// Everything above is ONE process: guardToolLocal() decides, and the SAME process holds the
+// tool. "Without MetaMynd, you can be bypassed" (the harness README says so directly) — call
+// bookFlight() instead of gatedBookFlight() and nothing stops you, because there is no
+// counterparty in the loop to disagree with you.
+//
+// --gateway adds one: a SEPARATE local process, using the real @metamynd/agentsafe-mcp-guard
+// (the same package a production Service uses), that independently re-verifies every signed
+// request against the SAME metamynd-rules.json — not by trusting the agent process, by
+// checking the Ed25519 signature itself via the agent's did:key (key-in-DID, §4.1.2, fully
+// offline). Still no account, still no network call, still free.
+//
+// What this DOES close: the agent process lying to itself. A compromised or dishonest agent
+// that skips its own guardToolLocal() call, or calls bookFlight() directly, gets nothing —
+// the tool only runs in the gateway process now.
+//
+// What this does NOT close (be precise, this is a local demo, not the hosted platform):
+// nonce replay and cumulative-spend across many calls. Those need a STATEFUL authority — the
+// hosted gate's `requireAuthorization` claims a real, single-use authorizationId against a
+// database. A local harness has no such database (that is the whole point of --harness), so
+// this gateway does per-request re-evaluation only, same as the hosted gateway's baseline
+// before `requireAuthorization` is added. The README says so.
+
+function harnessGatewayServerFile(scope, gatewayPort, agentDid) {
+  return `#!/usr/bin/env node
+// harness-gateway.mjs — a SEPARATE process from your agent. It holds the tool (bookFlight
+// below never runs anywhere else) and independently re-verifies every request against
+// ../metamynd-rules.json using the REAL @metamynd/agentsafe-mcp-guard — the same package a
+// production Service uses, just pointed at a local file instead of a hosted issuer. See
+// ../README.md#--gateway for exactly what this does and does not close.
+import { readFileSync } from 'node:fs';
+import http from 'node:http';
+import { createMcpGuard } from '${MCP_GUARD_PKG}';
+
+const PORT = Number(process.env.PORT || ${gatewayPort});
+// The agent's did:key, fixed at scaffold time — a request claiming to be any OTHER agentDid
+// fails BUNDLE_SUBJECT_MISMATCH, not just an unmatched-signature error, because the bundle
+// this gateway serves is only ever this one agent's.
+const AGENT_DID = '${agentDid}';
+
+// Reshapes the harness's own rules-file shape ({mandate, sops:[{standardKey,document}],
+// standards:[{standardKey,document}]}) into what agentsafe-mcp-guard's verifyRequest expects
+// ({mandates:[{action,document}], sops:[{id,document}], standards:[{key,document}]}) — a pure
+// format adapter, not a second source of truth: both this and index.mjs's dashboard read the
+// SAME ../metamynd-rules.json.
+function bundleFromRules(rules) {
+  return {
+    mandates: [{ action: '${scope}', document: rules.mandate }],
+    sops: (rules.sops ?? []).map((s) => ({ id: s.standardKey, document: s.document })),
+    standards: (rules.standards ?? []).map((s) => ({ key: s.standardKey, document: s.document })),
+  };
+}
+
+// No serviceKey: this gateway only calls verifyRequest() (re-check a signed request), not the
+// mutual-handshake methods, which are the only thing that needs one. No issuerApi either — the
+// whole point of --harness is no network; fetchBundle reads the SAME rules file the dashboard
+// and your agent process both read, so editing it takes effect on the next request everywhere.
+const guard = createMcpGuard({
+  serviceDid: 'did:local:${scope}-gateway',
+  fetchBundle: async (agentDid) => {
+    if (agentDid !== AGENT_DID) return { subject: AGENT_DID, mandates: [], sops: [], standards: [] };
+    const rules = JSON.parse(readFileSync('../metamynd-rules.json', 'utf8'));
+    return { subject: AGENT_DID, ...bundleFromRules(rules) };
+  },
+});
+
+// One protected route per gated action in index.mjs. A path with no route below is refused —
+// there is nothing to fall through TO; this gateway IS the tool, not a proxy in front of one.
+const ROUTES = {
+  '/book-flight': { action: '${scope}', run: async (args) => ({ pnr: 'PNR-DEMO', ...args }) },
+  '/raise-limit': { action: 'permissions.update', run: async (args) => ({ updated: true, ...args }) },
+};
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const route = ROUTES[req.url];
+  const send = (status, body, decision) => {
+    const headers = { 'content-type': 'application/json' };
+    if (decision) headers['x-agentsafe-decision'] = decision;
+    res.writeHead(status, headers);
+    res.end(JSON.stringify(body));
+  };
+  if (req.method !== 'POST' || !route) return send(404, { decision: 'block', reasonCode: 'NO_SUCH_ROUTE' });
+  try {
+    const raw = await readBody(req);
+    const { signed, args } = JSON.parse(raw.toString('utf8') || '{}');
+    const verdict = await guard.verifyRequest({ ...signed, action: route.action });
+    if (verdict.decision !== 'allow' && verdict.decision !== 'observe') {
+      console.log('[harness-gateway] ' + verdict.decision.toUpperCase() + ' ' + req.url + ' — ' + verdict.reasonCode + ' (re-evaluated independently, did not trust the agent)');
+      return send(403, verdict, verdict.decision);
+    }
+    console.log('[harness-gateway] ALLOW ' + req.url + ' — running the real tool here, not in the agent process');
+    return send(200, await route.run(args ?? {}), verdict.decision);
+  } catch (err) {
+    return send(502, { decision: 'block', reasonCode: 'GATEWAY_ERROR', error: String(err?.message ?? err) });
+  }
+});
+
+server.listen(PORT, () => {
+  console.log('[harness-gateway] listening on :' + PORT + ' — the only place your tools run.');
+  console.log('[harness-gateway] re-verifying against ../metamynd-rules.json, independently of index.mjs.');
+});
+`;
+}
+
+function harnessGatewayPackageJson(slug) {
+  return JSON.stringify(
+    { name: slug + '-harness-gateway', version: '0.1.0', private: true, type: 'module', scripts: { start: 'node harness-gateway.mjs' }, dependencies: { [MCP_GUARD_PKG]: MCP_GUARD_VERSION } },
     null,
     2,
   ) + '\n';
@@ -1508,13 +1677,15 @@ setInterval(refresh, 3000);
 `;
 }
 
-function harnessIndexFile(scope, perTxnMax, port) {
+function harnessIndexFile(scope, perTxnMax, port, withGateway, gatewayPort) {
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
   return `// index.mjs — your agent, governed entirely on this machine. No account, no network call
 // for a decision: guardToolLocal() decides allow/block/escalate against ./metamynd-rules.json
 // (edit it directly, or at the dashboard). An escalate is held here for YOU to approve —
-// there is no hosted owner queue in this mode, so open the dashboard URL printed below.
+// there is no hosted owner queue in this mode, so open the dashboard URL printed below.${withGateway ? `
+// Your tools run in ./harness-gateway.mjs, a SEPARATE process — it independently re-verifies
+// every signed request for itself. See README.md#--gateway for what that closes.` : ''}
 import { readFileSync } from 'node:fs';
 import { createGuard } from '${GUARD_PKG}';
 import { startDashboard } from './harness-server.mjs';
@@ -1531,22 +1702,41 @@ const dashboard = startDashboard({
   rulesPath: './metamynd-rules.json',
   logPath: './metamynd-harness.log.jsonl',
 });
-console.log('\\x1b[2m  dashboard: ' + dashboard.url + ' (rules, approvals, decision log)\\x1b[0m\\n');
+console.log('\\x1b[2m  dashboard: ' + dashboard.url + ' (rules, approvals, decision log)\\x1b[0m');
+${withGateway ? `console.log('\\x1b[2m  gateway  : http://localhost:${gatewayPort} (a SEPARATE process — run \\'npm start\\' in ./harness-gateway first)\\x1b[0m\\n');` : `console.log('');`}
 
 // Reads the CURRENT rules file fresh every call — editing it (by hand, or at the dashboard)
 // takes effect on the next decision, no restart, matching the "no redeploy" experience the
-// hosted platform gives you.
+// hosted platform gives you. The gateway process (below, when scaffolded) reads the SAME file.
 const getBundle = () => JSON.parse(readFileSync('./metamynd-rules.json', 'utf8'));
-
+${withGateway ? `
+const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://localhost:${gatewayPort}';
+// Calls the gateway process instead of a local function — there is no raw bookFlight() or
+// raiseOwnLimit() in THIS file to call directly. buildSignedRequest() is pure (no network, no
+// issuer): it builds and signs the same canonical message a real gate would verify, entirely
+// offline, using this agent's own did:key — the gateway verifies that signature for itself.
+async function callGateway(path, action, args) {
+  const signed = guard.buildSignedRequest({ action, amount: args.amount, currency: 'USD', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel ?? 'low' } });
+  const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ signed, args }) });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
+    err.name = 'GovernanceBlocked';
+    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR' };
+    throw err;
+  }
+  return body;
+}
+` : `
 // --- Your real tool. Replace the body with your actual implementation. ---
 async function bookFlight(args) {
   return { pnr: 'PNR-DEMO', ...args };
 }
-
+`}
 // --- The GATED version. Register THIS with your agent instead of the raw handler. ---
 const gatedBookFlight = guard.guardToolLocal(
   '${scope}',                                   // = your mandate scope
-  bookFlight,
+  ${withGateway ? `(args) => callGateway('/book-flight', '${scope}', args)` : 'bookFlight'},
   (a) => ({                                     // map tool args → gate inputs
     amount: a.amount,
     merchant: a.merchant,
@@ -1556,14 +1746,14 @@ const gatedBookFlight = guard.guardToolLocal(
 );
 
 // --- A tool the agent was NEVER granted. Wrapping it is the demonstration: there is no
-// --- rule anywhere forbidding this. The mandate simply never mentioned the action.
+// --- rule anywhere forbidding this. The mandate simply never mentioned the action.${withGateway ? '' : `
 async function raiseOwnLimit(args) {
   return { updated: true, ...args };          // never runs, and that is the point
-}
+}`}
 
 const gatedRaiseOwnLimit = guard.guardToolLocal(
   'permissions.update',                       // an action NOT in the mandate
-  raiseOwnLimit,
+  ${withGateway ? `(args) => callGateway('/raise-limit', 'permissions.update', args)` : 'raiseOwnLimit'},
   (a) => ({ amount: a.amount, merchant: a.merchant, context: { tool: 'permissions-update' } }),
   getBundle,
 );
@@ -1639,7 +1829,23 @@ console.log(dim('   - step 4 needed no rule to stop it. The agent could not wide
 console.log(dim('     authority, because it cannot name an action nobody delegated to it.'));
 console.log(dim('   - the blocked call never reached your tool at all.'));
 console.log(dim('   - every decision is in ./metamynd-harness.log.jsonl - yours, locally.'));
+console.log('');${withGateway ? `
+console.log(bold('  Checked twice, by two processes.') + ' bookFlight() lives in ./harness-gateway.mjs -');
+console.log(dim('  not here. It independently re-verified every attempt above against the SAME'));
+console.log(dim('  ./metamynd-rules.json, over a signed request, before running your tool.'));
 console.log('');
+console.log(dim('  What --gateway does NOT close: nonce replay and cumulative spend across many'));
+console.log(dim('  calls. Those need a STATEFUL authority (the hosted gate\\'s requireAuthorization'));
+console.log(dim('  claims a real, single-use id against a database) - a local harness has none.'));
+console.log(dim('  See README.md#--gateway for exactly what this does and does not prove.'));
+console.log('');
+console.log('  Edit ./metamynd-rules.json (or the dashboard) and run again - the outcome');
+console.log(dim('  changes, in BOTH processes, from the one file. That is the point.'));
+console.log('');
+console.log(dim('  Ready for more than one machine, a queue someone else can approve from,'));
+console.log(dim('  anchored evidence, KYC/KYB-backed identity, or nonce/cumulative-spend closure?'));
+console.log(dim('  That is the hosted platform - drop --harness and provision there; the same'));
+console.log(dim('  guardTool() call keeps working, sealed by a real gate instead of this file.'));` : `
 console.log(bold('  Without MetaMynd, you can be bypassed.') + ' bookFlight() above runs in THIS');
 console.log(dim('  process - call it directly instead of gatedBookFlight and nothing stops you.'));
 console.log(dim('  --harness proves your policy logic; it does not enforce it against that.'));
@@ -1647,10 +1853,11 @@ console.log('');
 console.log('  Edit ./metamynd-rules.json (or the dashboard) and run again - the outcome');
 console.log(dim('  changes. This file does not. That is the point.'));
 console.log('');
-console.log(dim('  Ready for more than one machine, a queue someone else can approve from,'));
-console.log(dim('  anchored evidence, or KYC/KYB-backed identity, AND a separate gateway process'));
-console.log(dim('  that closes the bypass above? That is the hosted platform - drop --harness'));
-console.log(dim('  and provision there; the same guardTool() call keeps working.'));
+console.log(dim('  Ready for a SEPARATE process that closes the bypass above, still free and'));
+console.log(dim('  local? Re-scaffold with --gateway. Ready for more than one machine, a queue'));
+console.log(dim('  someone else can approve from, anchored evidence, or KYC/KYB-backed identity?'));
+console.log(dim('  That is the hosted platform - drop --harness and provision there; the same'));
+console.log(dim('  guardTool() call keeps working.'));`}
 console.log('');
 dashboard.close();
 `;
@@ -1671,7 +1878,7 @@ function harnessPackageJson(slug) {
   ) + '\n';
 }
 
-function harnessReadme(slug, scope, port) {
+function harnessReadme(slug, scope, port, withGateway, gatewayPort) {
   return `# ${slug}
 
 A free, local MetaMynd/AgentSafe governance harness — your own rules, your own identity,
@@ -1680,8 +1887,8 @@ decided entirely on this machine. No account, no network call for a decision.
 ## Run
 
 \`\`\`bash
-npm install
-npm start
+npm install${withGateway ? ' && (cd harness-gateway && npm install)' : ''}
+${withGateway ? `(cd harness-gateway && npm start &)   # the second process, in the background\n` : ''}npm start
 \`\`\`
 
 You should see an ALLOW, a BLOCK (over the per-transaction cap), an ESCALATE (high risk —
@@ -1689,18 +1896,45 @@ open the dashboard to approve it), and a BLOCK (an action outside the mandate en
 
 ## Files
 
-- \`agent.metamynd.json\` — your local identity (a generated Ed25519 keypair; \`agentDid\` is a
-  local label, not an anchored/verifiable one). **Contains a secret key — never commit it.**
+- \`agent.metamynd.json\` — your local identity: a generated Ed25519 keypair, and a REAL
+  \`did:key\` (self-certifying — the verification key is embedded in the DID itself, so a
+  signature against it is checkable completely offline). Not anchored to Hedera; that's the
+  hosted platform. **Contains a secret key — never commit it.**
 - \`metamynd-rules.json\` — your rules: the mandate (scope + spend limits) and SOP (extra checks).
-  Edit it directly, or at the dashboard. Reloaded on every decision — no restart.
+  Edit it directly, or at the dashboard. Reloaded on every decision — no restart${withGateway ? ', in BOTH processes' : ''}.
 - \`metamynd-harness.log.jsonl\` — every decision this agent made, append-only.
 - \`harness-server.mjs\` — the local dashboard (port ${port}): rules, pending approvals, decision log.
 - \`index.mjs\` — wraps a tool with \`guard.guardToolLocal(...)\`; the tool only runs when the
-  LOCAL rules permit it.
+  LOCAL rules permit it${withGateway ? ', AND the SEPARATE gateway process (below) independently agrees' : ''}.${withGateway ? `
+- \`harness-gateway/harness-gateway.mjs\` — a SECOND process. Your tools live HERE now, not in
+  \`index.mjs\`. It re-verifies every signed request for itself against the SAME
+  \`../metamynd-rules.json\`, using the real \`@metamynd/agentsafe-mcp-guard\` — the identical
+  package a production Service uses, just pointed at a local file instead of a hosted issuer.` : ''}
 
 ## What this is not
 
-**Without MetaMynd, you can be bypassed.** Everything below is why, precisely.
+${withGateway ? `**\`--gateway\` closes one real gap, not every gap.** Precisely:
+
+**Closed:** the agent process lying to itself. Call \`gatedBookFlight\`'s underlying handler
+directly (or skip \`index.mjs\` and hand a forged/altered request straight to
+\`harness-gateway.mjs\`) — either way, the gateway independently re-verifies the Ed25519
+signature and re-evaluates the SAME rules file for itself. There is no raw \`bookFlight()\` left
+in \`index.mjs\` to call for a shortcut, and a signature over an altered amount/merchant fails
+verification regardless of which process sent it.
+
+**NOT closed:** nonce replay and cumulative spend across many calls. Those need a STATEFUL
+authority — the hosted gate's \`requireAuthorization\` atomically claims a real, single-use
+\`authorizationId\` against a database before a Service executes anything (see
+\`@metamynd/agentsafe-mcp-guard\`'s own README). A local harness has no database; that is the
+whole point of \`--harness\`. \`harness-gateway.mjs\` re-checks POLICY per request, which is
+real and worth having, but replaying the exact same signed request twice is NOT refused here
+the way it would be against the hosted gate.
+
+Also not closed by \`--gateway\` alone: cross-party trust (nobody but you can verify this agent's
+identity or its decisions), evidence anyone but you can audit, a dashboard reachable when this
+machine is off, an owner queue someone else can approve from. That's the hosted platform
+(\`npx create-metamynd-agent\`, without \`--harness\`) — same \`guardTool()\` call, same rules
+shape, so upgrading later is a config change, not a rewrite.` : `**Without MetaMynd, you can be bypassed.** Everything below is why, precisely.
 
 No anchored/verifiable identity, no cross-party trust, no evidence anyone but you can audit,
 no dashboard reachable when this machine is off, no owner queue someone else can approve from.
@@ -1711,9 +1945,11 @@ It is also **not a separate enforcement boundary**. \`guardToolLocal()\` (in \`i
 cooperative library this process embeds — call the tool handler directly instead of the guarded
 one and nothing stops you, because there is no second party in the loop to disagree with you.
 That's structural, not a bug: use this harness to govern your own agent's own honest behavior,
-not as a defense against an agent (or a person) actively trying to get around it. The hosted
-platform's default scaffold doesn't have this gap, because a SEPARATE gateway process re-verifies
-the agent's signed authority for itself instead of trusting that the agent's own guard ran.
+not as a defense against an agent (or a person) actively trying to get around it. Re-scaffold
+with \`--gateway\` for a SECOND local process that closes exactly this, still free and offline
+(see README#--gateway once scaffolded) — or drop \`--harness\` entirely for the hosted platform's
+default scaffold, which has this gap closed AND closes nonce replay/cumulative spend, because a
+SEPARATE gateway process re-verifies the agent's signed authority against a real, stateful gate.`}
 `;
 }
 
@@ -1739,6 +1975,8 @@ async function runHarness(args) {
   const merchantsRaw = await pick('merchants', 'Allowed merchants (comma-sep, blank = any)', Array.isArray(fileConfig?.merchants) ? fileConfig.merchants.join(',') : '');
   const merchants = String(merchantsRaw).split(',').map((s) => s.trim()).filter(Boolean);
   const port = Number(args.port) || 4400;
+  const withGateway = !!args.gateway;
+  const gatewayPort = Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT;
   const slug = slugify(name);
   const outDir = resolve(String(args.out || (interactive ? await ask(rl, 'Output directory', `./${slug}`) : `./${slug}`)));
   rl?.close();
@@ -1759,18 +1997,32 @@ async function runHarness(args) {
   writeFileSafe(outDir, 'agent.metamynd.json', JSON.stringify({ agentDid, agentKey: privateKeyHex, mode: 'harness' }, null, 2) + '\n', !!args.force);
   writeFileSafe(outDir, 'metamynd-rules.json', harnessRulesFile(mandate, sopDocument), !!args.force);
   writeFileSafe(outDir, 'harness-server.mjs', harnessServerFile(), !!args.force);
-  writeFileSafe(outDir, 'index.mjs', harnessIndexFile(scope, perTxnMax, port), !!args.force);
+  writeFileSafe(outDir, 'index.mjs', harnessIndexFile(scope, perTxnMax, port, withGateway, gatewayPort), !!args.force);
   writeFileSafe(outDir, 'package.json', harnessPackageJson(slug), !!args.force);
   writeFileSafe(outDir, '.gitignore', gitignore(), !!args.force);
-  writeFileSafe(outDir, 'README.md', harnessReadme(slug, scope, port), !!args.force);
+  writeFileSafe(outDir, 'README.md', harnessReadme(slug, scope, port, withGateway, gatewayPort), !!args.force);
+
+  if (withGateway) {
+    const gwDir = join(outDir, 'harness-gateway');
+    if (!existsSync(gwDir)) mkdirSync(gwDir, { recursive: true });
+    writeFileSafe(gwDir, 'harness-gateway.mjs', harnessGatewayServerFile(scope, gatewayPort, agentDid), !!args.force);
+    writeFileSafe(gwDir, 'package.json', harnessGatewayPackageJson(slug), !!args.force);
+    writeFileSafe(gwDir, '.gitignore', gatewayGitignore(), !!args.force);
+  }
 
   const rel = outDir.replace(resolve('.'), '.').replace(/\\/g, '/');
   console.log(`\n${c.green(c.b('  ✓ Done.'))} Your local governance harness is ready.\n`);
   console.log(`  ${c.dim('Free, local, no account. Not the hosted platform — see README#what-this-is-not.')}\n`);
   console.log(`  Next:`);
   console.log(c.cyan(`    cd ${rel}`));
-  console.log(c.cyan(`    npm install`));
-  console.log(c.cyan(`    npm start`) + c.dim('   → ALLOW · BLOCK (over cap) · ESCALATE (approve at the dashboard) · BLOCK (ungranted action)\n'));
+  if (withGateway) {
+    console.log(c.cyan(`    npm install && (cd harness-gateway && npm install)`));
+    console.log(c.cyan(`    (cd harness-gateway && npm start &)`) + c.dim('   → the second process, in the background'));
+    console.log(c.cyan(`    npm start`) + c.dim('   → ALLOW · BLOCK (over cap) · ESCALATE (approve at the dashboard) · BLOCK (ungranted action)\n'));
+  } else {
+    console.log(c.cyan(`    npm install`));
+    console.log(c.cyan(`    npm start`) + c.dim('   → ALLOW · BLOCK (over cap) · ESCALATE (approve at the dashboard) · BLOCK (ungranted action)\n'));
+  }
   console.log(c.dim(`  Edit ./metamynd-rules.json any time (by hand, or at http://127.0.0.1:${port}) — no redeploy.\n`));
 }
 
