@@ -12,6 +12,32 @@ import type { EvaluationContext } from './types.js';
 
 const RISK_RANK: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
+/**
+ * Whether a `currency` config on `amount-over`/`cumulative-over` rules THIS request out of
+ * the cap's scope — i.e. the numeric comparison below must not be trusted to decide.
+ *
+ * Unconfigured (`cfgCurrency` undefined/null, or an empty list) is unchanged, currency-blind
+ * behavior — the atom's historical default, kept so every SOP authored before this field
+ * existed keeps working exactly as it did (see atom-catalog.ts). Once an author DOES scope a
+ * cap to specific currencies, this mirrors mandate-eval.ts's constraintSatisfied() unit
+ * check, but for the PROHIBITION side of that logic: `amount-over`/`cumulative-over` FIRE to
+ * BLOCK/ESCALATE, the same role a mandate prohibition plays, so a currency that doesn't
+ * match — or can't be read at all — must resolve toward firing, not toward silently letting
+ * the numeric comparison decide. Otherwise an SOP cap authored as "block over 200" is cleared
+ * by naming a cheaper-looking currency (e.g. 200 JPY vs 200 USD) — the exact bypass class
+ * mandate-eval.ts's currency check was written to close on the ODRL mandate layer. Compared
+ * case-insensitively, same as mandate-eval.ts.
+ */
+function currencyOutOfScope(ctx: EvaluationContext, cfgCurrency: unknown): boolean {
+  if (cfgCurrency === undefined || cfgCurrency === null) return false;
+  const allowed = (Array.isArray(cfgCurrency) ? cfgCurrency : [cfgCurrency]) as unknown[];
+  if (allowed.length === 0) return false;
+  const currency = ctx.currency;
+  const matches =
+    typeof currency === 'string' && allowed.some((u) => typeof u === 'string' && u.toUpperCase() === currency.toUpperCase());
+  return !matches;
+}
+
 export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any) => boolean> = {
   'data-source-not-approved': (c, cfg) =>
     !!c.dataSourceId && !(((cfg?.approved as string[]) ?? []).includes(String(c.dataSourceId))),
@@ -21,7 +47,11 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
     const need = RISK_RANK[String(cfg?.level ?? 'high')];
     return have !== undefined && need !== undefined && have >= need;
   },
-  'amount-over': (c, cfg) => typeof c.amount === 'number' && c.amount > Number(cfg?.limit ?? 0),
+  'amount-over': (c, cfg) => {
+    if (typeof c.amount !== 'number') return false;
+    if (currencyOutOfScope(c, cfg?.currency)) return true; // unverifiable/mismatched -> fail closed, fire
+    return c.amount > Number(cfg?.limit ?? 0);
+  },
   // Deny-by-default primitive for value-moving actions. Fires on ABSENCE (like the
   // evidence atoms below, and unlike `amount-over`) OR on a NEGATIVE amount: true when
   // the context carries no usable amount, or one that cannot be trusted for capping —
@@ -42,7 +72,12 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
   'amount-unknown': (c) => !(typeof c.amount === 'number' && Number.isFinite(c.amount) && c.amount >= 0),
   // Total budget: cumulativeSpend is a SERVER-derived, signed-last context field (never
   // shadowable by the agent's itinerary), so this compares already-spent + this amount.
-  'cumulative-over': (c, cfg) => (Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0)) > Number(cfg?.limit ?? 0),
+  // See `currencyOutOfScope` above: a configured currency scope that this request's
+  // currency doesn't match fires the cap outright, same fail-closed reasoning as `amount-over`.
+  'cumulative-over': (c, cfg) => {
+    if (currencyOutOfScope(c, cfg?.currency)) return true;
+    return (Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0)) > Number(cfg?.limit ?? 0);
+  },
   // Fires if any configured term appears in the prompt and/or output text.
   // Used to govern agent responses on content (prohibited claims, sensitive advice).
   'text-matches': (c, cfg) => {

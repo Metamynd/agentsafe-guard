@@ -40,7 +40,13 @@ export interface Constraint {
   leftOperand: string; // e.g. 'mm:payAmount' — resolved via the resolver registry
   operator: Operator;
   rightOperand: unknown;
-  unit?: string;
+  /**
+   * One accepted unit, several, or omitted. For payAmount/cumulativeSpend this is the
+   * currency (or currencies) the threshold is denominated in — see mandate-eval.ts's
+   * constraintSatisfied for how a request's mm:currency is checked against it, and why
+   * omitting `unit` (no currency restriction at all) is the least-safe option.
+   */
+  unit?: string | string[];
   /** Decision to emit when this constraint is the reason a permission is denied. Default 'block'. */
   onFail?: Exclude<MandateDecision, 'allow'>;
 }

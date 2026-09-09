@@ -99,6 +99,59 @@ describe('evaluateMandate — spend limits', () => {
   });
 });
 
+describe('evaluateMandate — unit as a multi-currency allow-list', () => {
+  // A mandate authored with `currencyPolicy: ['USD', 'GBP']` (see IssueMandateInput) persists
+  // its payAmount/cumulativeSpend `unit` as an array — membership, not equality.
+  const multiCurrencyMandate: Mandate = {
+    uid: 'urn:metamynd:mandate:multi-currency-test',
+    validFrom: '2026-07-01T00:00:00Z',
+    validUntil: '2026-08-31T23:59:59Z',
+    permission: [
+      {
+        target: 'mm:flight-purchase',
+        action: 'execute',
+        constraint: [
+          { leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 1000, unit: ['USD', 'GBP'] },
+          { leftOperand: 'mm:cumulativeSpend', operator: 'lteq', rightOperand: 1000, unit: ['USD', 'GBP'] },
+        ],
+      },
+    ],
+  };
+
+  it('allows a request in the FIRST listed currency', () => {
+    const r = evaluateMandate(
+      multiCurrencyMandate,
+      req({ 'mm:payAmount': 500, 'mm:cumulativeSpend': 0, 'mm:currency': 'USD' }),
+    );
+    expect(r.decision).toBe('allow');
+  });
+
+  it('allows a request in the SECOND listed currency, same cap number', () => {
+    const r = evaluateMandate(
+      multiCurrencyMandate,
+      req({ 'mm:payAmount': 500, 'mm:cumulativeSpend': 0, 'mm:currency': 'GBP' }),
+    );
+    expect(r.decision).toBe('allow');
+  });
+
+  it('blocks a request in a currency NOT on the list', () => {
+    const r = evaluateMandate(
+      multiCurrencyMandate,
+      req({ 'mm:payAmount': 500, 'mm:cumulativeSpend': 0, 'mm:currency': 'JPY' }),
+    );
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+  });
+
+  it('is case-insensitive across the list, matching the single-unit behavior', () => {
+    const r = evaluateMandate(
+      multiCurrencyMandate,
+      req({ 'mm:payAmount': 500, 'mm:cumulativeSpend': 0, 'mm:currency': 'gbp' }),
+    );
+    expect(r.decision).toBe('allow');
+  });
+});
+
 describe('evaluateMandate — scope', () => {
   it('blocks a merchant outside the allow-list', () => {
     const r = evaluateMandate(

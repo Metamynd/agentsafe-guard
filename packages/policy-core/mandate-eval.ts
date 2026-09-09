@@ -80,6 +80,11 @@ function reasonFor(constraint: Constraint | undefined): string {
  *     including a case difference before the fix above. An unverifiable currency must
  *     instead count as NOT ruling the dangerous condition out — fail closed the OTHER way,
  *     by treating it as satisfied (`strict: false`), so the prohibition still fires.
+ *
+ * `unit` MAY be a currency list rather than a single string (a mandate authored with an
+ * explicit multi-currency allow-list — see IssueMandateInput.currencyPolicy). The check is
+ * membership, not equality; everything above about strict/unstrict is unchanged, since a
+ * request whose currency is in the list is exactly as "proven" as one matching a lone unit.
  */
 function constraintSatisfied(c: Constraint, req: MandateRequest, strict: boolean): boolean {
   const op = OPERATORS[c.operator];
@@ -89,7 +94,9 @@ function constraintSatisfied(c: Constraint, req: MandateRequest, strict: boolean
     : undefined;
   if (!c.unit) return op(left, c.rightOperand);
   const currency = req.values['mm:currency'];
-  const unitMatches = typeof currency === 'string' && currency.toUpperCase() === c.unit.toUpperCase();
+  const allowedUnits = Array.isArray(c.unit) ? c.unit : [c.unit];
+  const unitMatches =
+    typeof currency === 'string' && allowedUnits.some((u) => u.toUpperCase() === currency.toUpperCase());
   return unitMatches ? op(left, c.rightOperand) : !strict;
 }
 
