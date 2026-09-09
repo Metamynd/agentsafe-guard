@@ -29,13 +29,18 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.7.0 adds the opt-in `signContext` envelope signature (Tier 1 context-claim binding) —
 // no scaffolded behavior changes (off by default), but the floor must still cover the real
 // current version regardless, per this repo's standing internal-pin invariant.
-const GUARD_VERSION = '^0.7.0';
+// 0.8.0 adds an optional `currency` scope to the amount-over/cumulative-over atoms
+// (harnessDefaultSop, below, now sets it) — a guard below this version can't evaluate that
+// field, so a scaffolded currency-scoped cap would silently never fire on a currency mismatch.
+const GUARD_VERSION = '^0.8.0';
 // The default hosted scaffold's SECOND process — the tool gateway (see scaffoldProject).
 const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.2.0 adds requireAuthorization (closes replay + cumulative spend) — this scaffold sets that
 // option, so a range that could resolve below 0.2.0 would silently scaffold a no-op.
 // 0.3.0 adds the same amount-unknown atom as the guard, above — same reasoning, same miss.
-const MCP_GUARD_VERSION = '^0.3.0';
+// 0.4.0 adds the same amount-over/cumulative-over `currency` scope as the guard, above —
+// same reasoning, same miss.
+const MCP_GUARD_VERSION = '^0.4.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -1128,12 +1133,21 @@ async function runSandbox(args) {
  *  entirely client-side with no schema boundary in front of it, so nothing stops a caller from
  *  passing amount: "5000" (a string) or omitting amount entirely — `amount-over` silently does
  *  not fire on either (`typeof c.amount === 'number'` is false), so the cap passes untested,
- *  not safe. Ordering amount-unknown first blocks that instead of letting it through. */
-function harnessDefaultSop(perTxnMax) {
+ *  not safe. Ordering amount-unknown first blocks that instead of letting it through.
+ *
+ *  The per-transaction cap is scoped to `currency` (atom-catalog.ts's `amount-over` currency
+ *  config), mirroring the hosted default exactly — see mandate-eval.ts for why an
+ *  unscoped numeric cap can be cleared just by naming a different currency. The atom's
+ *  `currency` config is declared `type: 'string[]'` (always an array, e.g. `['USD']`, never
+ *  a bare string — see atom-catalog.ts's own field doc); `harnessMandate` below correctly
+ *  passes the bare string straight through to the ODRL `unit` field, which is a DIFFERENT,
+ *  genuinely string-or-array field — the two must not be confused (see the backend's own
+ *  currencyScopeFor/currencyUnitFor split in currency-unit.ts for the same distinction). */
+function harnessDefaultSop(perTxnMax, currency) {
   return {
     molecules: [
       { id: 'amount-known', name: 'Amount must be determinable', combinator: 'any', atoms: [{ id: 'a0', predicate: 'amount-unknown' }], decision: 'block', reasonCode: 'AMOUNT_NOT_DETERMINABLE' },
-      { id: 'cap', name: 'Per-transaction cap', combinator: 'any', atoms: [{ id: 'a1', predicate: 'amount-over', config: { limit: perTxnMax } }], decision: 'block', reasonCode: 'SOP_SPEND_CAP' },
+      { id: 'cap', name: 'Per-transaction cap', combinator: 'any', atoms: [{ id: 'a1', predicate: 'amount-over', config: { limit: perTxnMax, currency: [currency] } }], decision: 'block', reasonCode: 'SOP_SPEND_CAP' },
       { id: 'review', name: 'High-risk review', combinator: 'any', atoms: [{ id: 'a2', predicate: 'risk-at-or-above', config: { level: 'high' } }], decision: 'escalate', reasonCode: 'RISK_REVIEW' },
     ],
   };
@@ -1988,7 +2002,7 @@ async function runHarness(args) {
   console.log(`  ${c.green('✓')} local agent ${c.b(agentDid)}`);
 
   const sopFields = configFileSopFields(fileConfig);
-  const sopDocument = sopFields.sop ? sopFields.sop.documentJson : harnessDefaultSop(perTxnMax);
+  const sopDocument = sopFields.sop ? sopFields.sop.documentJson : harnessDefaultSop(perTxnMax, currency);
   if (sopFields.sop) console.log(`  ${c.green('✓')} compiled ${sopDocument.molecules.length} rule(s) from the config file`);
   const mandate = harnessMandate({ scope, currency, maxAmount, perTxnMax, merchants });
 

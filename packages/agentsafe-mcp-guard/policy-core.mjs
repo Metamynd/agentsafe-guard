@@ -2,6 +2,14 @@
 
 // src/policy-core/atom-registry.ts
 var RISK_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
+function currencyOutOfScope(ctx, cfgCurrency) {
+  if (cfgCurrency === void 0 || cfgCurrency === null) return false;
+  const allowed = Array.isArray(cfgCurrency) ? cfgCurrency : [cfgCurrency];
+  if (allowed.length === 0) return false;
+  const currency = ctx.currency;
+  const matches = typeof currency === "string" && allowed.some((u) => typeof u === "string" && u.toUpperCase() === currency.toUpperCase());
+  return !matches;
+}
 var ATOM_REGISTRY = {
   "data-source-not-approved": (c, cfg) => !!c.dataSourceId && !(cfg?.approved ?? []).includes(String(c.dataSourceId)),
   "consent-missing": (c) => c.consent === false,
@@ -10,7 +18,11 @@ var ATOM_REGISTRY = {
     const need = RISK_RANK[String(cfg?.level ?? "high")];
     return have !== void 0 && need !== void 0 && have >= need;
   },
-  "amount-over": (c, cfg) => typeof c.amount === "number" && c.amount > Number(cfg?.limit ?? 0),
+  "amount-over": (c, cfg) => {
+    if (typeof c.amount !== "number") return false;
+    if (currencyOutOfScope(c, cfg?.currency)) return true;
+    return c.amount > Number(cfg?.limit ?? 0);
+  },
   // Deny-by-default primitive for value-moving actions. Fires on ABSENCE (like the
   // evidence atoms below, and unlike `amount-over`) OR on a NEGATIVE amount: true when
   // the context carries no usable amount, or one that cannot be trusted for capping —
@@ -31,7 +43,12 @@ var ATOM_REGISTRY = {
   "amount-unknown": (c) => !(typeof c.amount === "number" && Number.isFinite(c.amount) && c.amount >= 0),
   // Total budget: cumulativeSpend is a SERVER-derived, signed-last context field (never
   // shadowable by the agent's itinerary), so this compares already-spent + this amount.
-  "cumulative-over": (c, cfg) => Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0) > Number(cfg?.limit ?? 0),
+  // See `currencyOutOfScope` above: a configured currency scope that this request's
+  // currency doesn't match fires the cap outright, same fail-closed reasoning as `amount-over`.
+  "cumulative-over": (c, cfg) => {
+    if (currencyOutOfScope(c, cfg?.currency)) return true;
+    return Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0) > Number(cfg?.limit ?? 0);
+  },
   // Fires if any configured term appears in the prompt and/or output text.
   // Used to govern agent responses on content (prohibited claims, sensitive advice).
   "text-matches": (c, cfg) => {
@@ -87,7 +104,25 @@ var ATOM_SPECS = [
     predicate: "amount-over",
     label: "Per-transaction amount over limit",
     description: "Fires when a single action amount exceeds a configured limit (per-transaction cap).",
-    config: [{ key: "limit", type: "number", required: true, description: "Maximum allowed amount for one transaction" }],
+    config: [
+      { key: "limit", type: "number", required: true, description: "Maximum allowed amount for one transaction" },
+      {
+        key: "currency",
+        type: "string[]",
+        required: false,
+        description: `Optional currency scope for the limit (e.g. ['USD'], or ['USD','GBP'] for several). Leave empty to keep the limit currency-blind \u2014 the historical default: the raw number is compared regardless of currency. Once set, a request in a currency outside this list \u2014 or with none supplied at all \u2014 fires this atom regardless of amount (unverifiable is treated as unsafe, not as "smaller"), so the cap can't be cleared by naming a cheaper-looking currency (e.g. 200 JPY vs 200 USD).`
+      }
+    ],
+    // `currency` is NOT listed here even though the executable atom conditionally reads it:
+    // unlike `limit`, the `currency` config is OPTIONAL per atom instance, so whether an agent
+    // needs to supply it depends on how a given molecule configures this atom — something
+    // `requiredContextFor`'s per-predicate (not per-instance) model can't express. Every
+    // authorize request already carries `currency` unconditionally regardless (see
+    // AuthorizeInput), so nothing is actually left unfed by omitting it here — this only
+    // controls the Scenario Bank simulate form / docs "context contract" surfacing, and
+    // forcing it onto every amount-over molecule would spuriously mark scenarios that never
+    // configure a currency scope as unexercised (see cumulative-over-atom.test.ts's sibling
+    // comment below for the same reasoning applied there).
     requiredContext: ["amount"]
   },
   {
@@ -101,8 +136,32 @@ var ATOM_SPECS = [
     predicate: "cumulative-over",
     label: "Total budget over limit",
     description: "Fires when cumulative spend (already-spent + this transaction) exceeds a configured total budget.",
-    config: [{ key: "limit", type: "number", required: true, description: "Maximum total budget across all transactions" }],
-    requiredContext: ["amount"]
+    config: [
+      { key: "limit", type: "number", required: true, description: "Maximum total budget across all transactions" },
+      {
+        key: "currency",
+        type: "string[]",
+        required: false,
+        description: "Optional currency scope for the budget (e.g. ['USD'], or ['USD','GBP'] for several). Leave empty to keep it currency-blind \u2014 the historical default. Once set, a request in a currency outside this list \u2014 or with none supplied at all \u2014 fires this atom regardless of amount, same fail-closed design as amount-over's currency scope."
+      }
+    ],
+    // The executable atom (atom-registry.ts) reads BOTH fields: `cumulativeSpend + amount >
+    // limit`. Omitting `cumulativeSpend` here silently broke two downstream consumers this
+    // catalog is the single source of truth for (see file header): the Scenario Bank's
+    // simulate form never rendered an "already spent" field for any set using this atom —
+    // including its own seeded preset, which supplied `cumulativeSpend` for a form field
+    // that didn't exist — so the control could never actually be exercised from the UI; and
+    // the integration docs' generated "context contract" told real SDK integrators this
+    // atom only needs `amount`, so an agent that never sends `cumulativeSpend` gets it
+    // silently treated as 0 and the total-budget cap never fires in production either.
+    //
+    // `currency`, by contrast, is deliberately NOT added here even though the executable atom
+    // conditionally reads it — see the sibling comment on `amount-over`'s currency config
+    // above: it is optional PER ATOM INSTANCE (only read when a molecule configures a
+    // currency scope), so unlike `cumulativeSpend` (always read), a static per-predicate
+    // requiredContext can't represent it without forcing every set using this atom to demand
+    // a currency it may never need.
+    requiredContext: ["amount", "cumulativeSpend"]
   },
   {
     predicate: "risk-at-or-above",
@@ -357,7 +416,8 @@ function constraintSatisfied(c, req, strict) {
   const left = Object.prototype.hasOwnProperty.call(req.values, c.leftOperand) ? req.values[c.leftOperand] : void 0;
   if (!c.unit) return op(left, c.rightOperand);
   const currency = req.values["mm:currency"];
-  const unitMatches = typeof currency === "string" && currency.toUpperCase() === c.unit.toUpperCase();
+  const allowedUnits = Array.isArray(c.unit) ? c.unit : [c.unit];
+  const unitMatches = typeof currency === "string" && allowedUnits.some((u) => u.toUpperCase() === currency.toUpperCase());
   return unitMatches ? op(left, c.rightOperand) : !strict;
 }
 function targetOf(rule, mandate) {

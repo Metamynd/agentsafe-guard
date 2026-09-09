@@ -44,6 +44,10 @@ export interface EvaluationContext {
   consent?: boolean;
   amount?: number;
   cumulativeSpend?: number; // SERVER-derived: already-committed spend for the mandate (never agent-supplied)
+  // The request's currency (e.g. 'USD') — signed-last alongside `amount`, same as the ODRL
+  // mandate layer's `mm:currency` (mandate-eval.ts). Read by `amount-over`/`cumulative-over`
+  // when an atom is configured with a currency scope (atom-catalog.ts).
+  currency?: string | null;
   // Compliance-atom context (supplied by the agent at authorize time; see each
   // atom's requiredContext in the atom catalog).
   jurisdiction?: string | null; // e.g. 'US', 'MY'
