@@ -514,7 +514,15 @@ function escapeField(v) {
   return v.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
 }
 function buildAuthMessage(f) {
-  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.resource ?? "", f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+}
+function buildLocalDecisionMessage(f) {
+  return [f.agentDid, f.action, f.decision, f.reasonCode, f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+}
+
+// src/policy-core/checkpoint-anchor.ts
+function buildCheckpointAnchorMessage(f) {
+  return [f.agentDid, f.checkpointHash, f.previousCheckpointHash, f.entryCount, f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
 }
 
 // src/policy-core/context.ts
@@ -573,6 +581,8 @@ export {
   asOperatingMode,
   authorityFailure,
   buildAuthMessage,
+  buildCheckpointAnchorMessage,
+  buildLocalDecisionMessage,
   canAuthorize,
   evaluate,
   evaluateBoundStandards,

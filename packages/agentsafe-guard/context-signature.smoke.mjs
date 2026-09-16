@@ -28,7 +28,7 @@ function check(ok, name) {
 // --- default (signContext off): no envelopeSignature at all, wire body unchanged ---
 {
   const guard = createGuard({ api: 'http://unused.local/api/v1', agentDid, agentKey });
-  const req = guard.buildSignedRequest({ action: 'flight-purchase', amount: 100, merchant: 'amadeus', context: { riskLevel: 'low' } });
+  const req = await guard.buildSignedRequest({ action: 'flight-purchase', amount: 100, merchant: 'amadeus', context: { riskLevel: 'low' } });
   check(req.envelopeSignature === undefined, 'signContext off (default) → no envelopeSignature field');
   check(!('envelopeSignature' in JSON.parse(JSON.stringify(req))), 'signContext off → JSON.stringify drops the field entirely (legacy wire body)');
 }
@@ -37,7 +37,7 @@ function check(ok, name) {
 {
   const guard = createGuard({ api: 'http://unused.local/api/v1', agentDid, agentKey, signContext: true });
   const request = { action: 'flight-purchase', amount: 100, merchant: 'amadeus', context: { riskLevel: 'low' } };
-  const req = guard.buildSignedRequest(request);
+  const req = await guard.buildSignedRequest(request);
   check(typeof req.envelopeSignature === 'string' && req.envelopeSignature.length > 0, 'signContext:true → envelopeSignature present');
 
   const expectedHash = envelopeHashFor({

@@ -16,6 +16,7 @@ import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate } from '
 import { verifyDidSignature } from './magp-did.mjs';
 import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 import { verifyBundle } from './magp-policy.mjs';
+import { resolveKeyProvider } from './key-providers.mjs';
 
 /** Freshness window for signed requests and handshake nonces (spec §7.7). How far `issuedAt`
  *  may be BEHIND server time — network/processing delay. */
@@ -57,18 +58,14 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   integrator's un-capability-aware callers must keep working); set true on any Service where
  *   capability binding is meant to be mandatory, not opt-in.
  */
-export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
-  const privateKey = serviceKey
-    ? crypto.createPrivateKey({ key: Buffer.from(serviceKey, 'hex'), format: 'der', type: 'pkcs8' })
-    : null;
+  // keyProvider seam (docs/design/agent-key-custody-local-signer-daemon-plan.md): null when
+  // neither `serviceKey` nor `keyProvider` is configured — handshakeChallenge throws its own
+  // clear error only if actually called, matching the original lazy-throw behavior exactly.
+  const keyProvider = resolveKeyProvider({ keyProvider: keyProviderOpt, serviceKey, daemonSocketPath });
   const pending = new Map(); // handshakeId -> { fromDid, nonceB, expiresAt }
-
-  function sign(message) {
-    if (!privateKey) throw new Error('serviceKey is required to sign handshake messages');
-    return crypto.sign(null, Buffer.from(message, 'utf8'), privateKey).toString('hex');
-  }
 
   // --- Mutual handshake, RESPONDER side (spec §8.2) ---
   //   A → B  HELLO      { fromDid, nonceA }
@@ -77,12 +74,13 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
   //   B → A  READY      { channelId }
 
   /** Step 1 (B): on HELLO, sign nonceA to prove control of serviceDid, issue nonceB. */
-  function handshakeChallenge({ fromDid, nonceA, protoVersion } = {}) {
+  async function handshakeChallenge({ fromDid, nonceA, protoVersion } = {}) {
     if (!fromDid || !nonceA) throw new Error('HELLO requires { fromDid, nonceA }');
+    if (!keyProvider) throw new Error('serviceKey (or keyProvider) is required to sign handshake messages');
     const handshakeId = crypto.randomUUID();
     const nonceB = crypto.randomUUID();
     pending.set(handshakeId, { fromDid, nonceB, expiresAt: Date.now() + FRESHNESS_MS });
-    return { handshakeId, toDid: serviceDid, nonceB, sigB: sign(nonceA), protoVersion: protoVersion ?? '1.0' };
+    return { handshakeId, toDid: serviceDid, nonceB, sigB: await keyProvider.signHandshakeNonce(nonceA), protoVersion: protoVersion ?? '1.0' };
   }
 
   /** Step 2 (B): on PROVE, verify sigA over nonceB against fromDid's key-in-DID. */
@@ -110,12 +108,12 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
    * against the stateful issuer gate already checked both (agentsafe-guard.mjs's authorizeLocal()
    * seals any value-bearing action through the real remote authorize() by default).
    *
-   * On success, also returns the hold's OWN bound `agentDid`/`amount`/`currency`/`merchant` — the
-   * caller MUST compare these to the request actually being executed. A claim alone only proves
-   * "some real, unclaimed authorization exists"; without this check, a legitimately-obtained
-   * authorization for a small, honest transaction could be presented to unlock a completely
-   * different one — the same confused-deputy shape payload binding closes at the request layer,
-   * recurring one layer deeper.
+   * On success, also returns the hold's OWN bound `agentDid`/`action`/`amount`/`currency`/
+   * `merchant` — the caller MUST compare these to the request actually being executed. A claim
+   * alone only proves "some real, unclaimed authorization exists"; without this check, a
+   * legitimately-obtained authorization for a small, honest transaction (or a DIFFERENT action
+   * entirely) could be presented to unlock a completely different one — the same confused-deputy
+   * shape payload binding closes at the request layer, recurring one layer deeper.
    */
   async function claimAuthorization({ authorizationId } = {}) {
     if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
@@ -124,7 +122,14 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, { method: 'POST' });
       const body = await res.json().catch(() => null);
       if (!res.ok) return { claimed: false, reasonCode: body?.message ?? body?.data?.reasonCode ?? `AUTHORIZATION_CLAIM_HTTP_${res.status}` };
-      return { claimed: true, agentDid: body?.data?.agentDid, amount: body?.data?.amount, currency: body?.data?.currency, merchant: body?.data?.merchant };
+      return {
+        claimed: true,
+        agentDid: body?.data?.agentDid,
+        action: body?.data?.action,
+        amount: body?.data?.amount,
+        currency: body?.data?.currency,
+        merchant: body?.data?.merchant,
+      };
     } catch (err) {
       return { claimed: false, reasonCode: 'AUTHORIZATION_CLAIM_UNREACHABLE', error: String(err?.message ?? err) };
     }
@@ -253,10 +258,12 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         // re-open the confused-deputy gap this claim exists to close, and nothing else here
         // would notice.
         if (claim.agentDid === undefined) console.warn('[mcp-guard] claim response omitted agentDid — binding degraded to "some valid unclaimed authorization exists"');
+        if (claim.action === undefined) console.warn('[mcp-guard] claim response omitted action — action binding degraded');
         if (Number(amount) > 0 && claim.amount === undefined) console.warn('[mcp-guard] claim response omitted amount for a value-bearing request — amount binding degraded');
         if (Number(amount) > 0 && claim.currency === undefined) console.warn('[mcp-guard] claim response omitted currency for a value-bearing request — currency binding degraded');
         if (merchant && claim.merchant === undefined) console.warn('[mcp-guard] claim response omitted merchant for a request that signed one — merchant binding degraded');
         if (claim.agentDid !== undefined && claim.agentDid !== agentDid) return { decision: 'block', reasonCode: 'AUTHORIZATION_AGENT_MISMATCH' };
+        if (claim.action !== undefined && claim.action !== action) return { decision: 'block', reasonCode: 'AUTHORIZATION_ACTION_MISMATCH' };
         if (claim.amount !== undefined && Number(claim.amount) !== Number(amount)) return { decision: 'block', reasonCode: 'AUTHORIZATION_AMOUNT_MISMATCH' };
         if (claim.currency !== undefined && claim.currency !== currency) return { decision: 'block', reasonCode: 'AUTHORIZATION_CURRENCY_MISMATCH' };
         if (claim.merchant !== undefined && claim.merchant !== merchant) return { decision: 'block', reasonCode: 'AUTHORIZATION_MERCHANT_MISMATCH' };
@@ -274,7 +281,17 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
    */
   function guardIncomingTool(action, handler) {
     return async (signed, ...rest) => {
-      const decision = await verifyRequest({ ...signed, action: signed?.action ?? action });
+      // The WRAPPED TOOL's own `action` is authoritative — never `signed?.action` (the caller's
+      // own claim). A Service that wraps more than one tool with ONE guard instance (the normal
+      // MCP-server shape: many tools, one guard) previously let a genuinely-valid signature for
+      // action A verify successfully — correctly, it really was valid for A — and then run
+      // action B's handler, because verifyRequest was asked to check whatever the SIGNED payload
+      // claimed instead of which wrapped function was actually being invoked. A caller with a
+      // real, cheap, in-policy authorization (e.g. a $0 read) could invoke ANY other tool sharing
+      // this guard (e.g. a wire transfer) and have it execute under that unrelated verification.
+      // Mirrors gateway.mjs's `route.action ?? signed.action` — "the route pins the action ...
+      // the client can't pick it" — for exactly the same reason, one layer down at the tool call.
+      const decision = await verifyRequest({ ...signed, action });
       // allow/observe both PERMIT the tool call; observe is permit-but-flag (SAFR §11).
       if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`MCP guard ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
@@ -389,7 +406,9 @@ export function createMcpGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
  * then, given the responder's CHALLENGE, verifies the responder proved control of
  * its DID before producing PROVE.
  *
- * @param {{fromDid:string, sign:(msg:string)=>string}} p  sign() uses the initiator's own key
+ * @param {{fromDid:string, sign:(msg:string)=>(string|Promise<string>)}} p  sign() uses the
+ *   initiator's own key — may be sync (a raw local key) or async (e.g. a keyProvider backed by
+ *   agentsafe-signer); `prove()` awaits it either way, see key-providers.mjs.
  */
 export function createHandshakeInitiator({ fromDid, sign } = {}) {
   if (!fromDid || typeof sign !== 'function') throw new Error('createHandshakeInitiator requires { fromDid, sign }');
@@ -400,7 +419,7 @@ export function createHandshakeInitiator({ fromDid, sign } = {}) {
       return { nonceA, message: { fromDid, nonceA, protoVersion: '1.0' } };
     },
     /** Step 3 (A): verify CHALLENGE proves the responder controls toDid, then PROVE. */
-    prove({ nonceA, challenge } = {}) {
+    async prove({ nonceA, challenge } = {}) {
       const { toDid, nonceB, sigB, handshakeId } = challenge ?? {};
       if (!toDid || !nonceB || !sigB) throw new Error('malformed CHALLENGE');
       if (!verifyDidSignature(toDid, nonceA, sigB)) {
@@ -408,7 +427,7 @@ export function createHandshakeInitiator({ fromDid, sign } = {}) {
         e.name = 'HandshakeFailed';
         throw e;
       }
-      return { handshakeId, sigA: sign(nonceB), remoteDid: toDid };
+      return { handshakeId, sigA: await sign(nonceB), remoteDid: toDid };
     },
   };
 }

@@ -35,8 +35,8 @@ const guard = createMcpGuard({
 });
 
 // Responder side, over your HTTP transport:
-const challenge = guard.handshakeChallenge(hello);   // POST /magp/handshake  (HELLO → CHALLENGE)
-const ready     = guard.handshakeVerify(prove);      // POST /magp/handshake  (PROVE → READY, or throws)
+const challenge = await guard.handshakeChallenge(hello);  // POST /magp/handshake  (HELLO → CHALLENGE)
+const ready     = guard.handshakeVerify(prove);           // POST /magp/handshake  (PROVE → READY, or throws)
 ```
 
 The agent drives the initiator side with `createGuard(...).handshake()` from `agentsafe-guard`.
@@ -109,6 +109,55 @@ include `signed.capability` — an agent could simply omit it and the "authorize
 $5,000" protection never engaged, verifier configured or not. New `requireCapability: true` makes
 an omitted capability a hard block (`CAPABILITY_REQUIRED`) instead of a silent pass-through. Both
 off by default — existing embeds are unchanged.
+
+**0.5.0 — the `keyProvider` seam
+([docs/design/agent-key-custody-local-signer-daemon-plan.md](../../docs/design/agent-key-custody-local-signer-daemon-plan.md)).**
+`serviceKey` no longer has to be a raw hex key living in this process. Pass
+`keyProvider: 'daemon'` + `daemonSocketPath` instead, and `handshakeChallenge` gets its signature
+from a separate `@metamynd/agentsafe-signer` daemon (`role: 'service'`) over a local socket — the
+key never enters this process at all. `serviceKey` (unchanged) still works exactly as before and
+remains the default. **Breaking, disclosed plainly**: `handshakeChallenge` and
+`createHandshakeInitiator(...).prove()` are now `async` (a daemon-backed provider needs a socket
+round trip); every caller needs an `await` added. New internal module `key-providers.mjs` — still
+zero external dependencies.
+
+**0.5.3 — `requireAuthorization`'s claim now actually enforces revoked authority and mandate
+expiry, and the claim-binding check closes the action axis too.** A four-client readiness review's
+P0 finding required a tested counterparty-verification pattern covering, by name, replay, wrong
+identity, wrong action, expired mandate, and revoked authority. Building the end-to-end trial
+against a real backend (not the mocked cases below) surfaced that two of those five were silently
+unenforced at the claim step itself, not just untested:
+
+- **Revoked authority.** Revoking a mandate (`POST /mandate/:ref/revoke`) only ever flipped the
+  hold's `mandate_event.status` to `voided` — it never touched the `effect_transition` chain, and
+  `markEffect`'s transition check only validated the state-machine shape (`authorized →
+  dispatching` is always syntactically legal), never the hold's own status. A resource relying on
+  `requireAuthorization` could successfully claim and execute a hold whose mandate had already been
+  revoked. Now refused with `AUTHORIZATION_VOIDED`.
+- **Expired mandate.** A hold's expiry (`isWithinHoldWindow`/the TTL) is a *derived* property —
+  nothing writes it back to the row when time passes, so the same claim step had no way to see a
+  hold was stale. Now refused with `AUTHORIZATION_EXPIRED`.
+- **Wrong action.** `claimAuthorization()`'s mismatch checks compared the claimed hold's
+  `agentDid`/`amount`/`currency`/`merchant` against the request being executed, but never `action`
+  — because the backend's claim response never carried it. A real, unclaimed authorization minted
+  for one action (e.g. `office-supplies-purchase`) could be claimed while executing a *different*
+  action at the identical agent/amount/currency/merchant — the same confused-deputy shape the 0.3.6
+  merchant check closed, one axis short. The backend now resolves and returns the hold's authorized
+  `action` on claim (backward-compatible — an older backend simply omits it, same
+  skip-when-absent tolerance as every other field here). Now refused with
+  `AUTHORIZATION_ACTION_MISMATCH`.
+
+All three are backend-side (`MandateService.markEffect`) except the action check, which also
+needed this guard to compare the new field. See
+[`docs/design/mcp-reverification-quickstart.md`](../../docs/design/mcp-reverification-quickstart.md) (§7)
+for the end-to-end trial these gaps were found and closed against.
+
+**0.5.1 — `keyProvider: 'daemon'` retries a transient connect failure.** Same fix as
+`@metamynd/agentsafe-guard` 0.9.1: on Windows the signer daemon's socket is a pool of independent
+named-pipe instances, each consumed by one connection and replaced asynchronously, so two
+signing requests close together could race that replacement window and fail with
+`DAEMON_UNREACHABLE` even though the daemon was healthy. `key-providers.mjs` now retries a
+connection that fails with `ENOENT` for up to 3 seconds before giving up. No API change.
 
 ### Replay, cumulative spend, rate limits, breakers, spend anomalies (`requireAuthorization`)
 

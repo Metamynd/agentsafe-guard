@@ -151,8 +151,8 @@ console.log('\n— mutual handshake (§8.2) —');
 {
   const initiator = createHandshakeInitiator({ fromDid: agent.did, sign: agent.sign });
   const { nonceA, message } = initiator.hello();
-  const challenge = guard.handshakeChallenge(message); // B signs nonceA
-  const prove = initiator.prove({ nonceA, challenge }); // A verifies B, signs nonceB
+  const challenge = await guard.handshakeChallenge(message); // B signs nonceA
+  const prove = await initiator.prove({ nonceA, challenge }); // A verifies B, signs nonceB
   const ready = guard.handshakeVerify(prove); // B verifies A
   const ok = !!ready.channelId && ready.remoteDid === agent.did;
   if (!ok) failed++;
@@ -160,7 +160,7 @@ console.log('\n— mutual handshake (§8.2) —');
 
   // A forged PROVE (wrong key) must be rejected.
   let rejected = false;
-  const c2 = guard.handshakeChallenge(initiator.hello().message);
+  const c2 = await guard.handshakeChallenge(initiator.hello().message);
   try {
     guard.handshakeVerify({ handshakeId: c2.handshakeId, sigA: service.sign(c2.nonceB) }); // wrong signer
   } catch (e) {
