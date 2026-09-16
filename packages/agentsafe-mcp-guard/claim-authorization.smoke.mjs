@@ -26,14 +26,22 @@ const bundle = {
   subject: agent.did,
   standards: [],
   sops: [],
-  mandates: [{
-    action: 'flight-purchase',
-    document: { permission: [{ target: 'flight-purchase', constraint: [{ leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 1000 }] }] },
-  }],
+  mandates: [
+    {
+      action: 'flight-purchase',
+      document: { permission: [{ target: 'flight-purchase', constraint: [{ leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 1000 }] }] },
+    },
+    // A second, genuinely-permitted action — so the action-swap test below exercises a real
+    // confused-deputy attempt (two DIFFERENT actions BOTH legitimately in-policy) rather than
+    // conflating with "no mandate for this action" (a different, already-handled block case).
+    {
+      action: 'expense-report',
+      document: { permission: [{ target: 'expense-report', constraint: [{ leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 1000 }] }] },
+    },
+  ],
 };
 
-function signedRequest({ amount, currency = 'USD', merchant = 'skyward-air', authorizationId }) {
-  const action = 'flight-purchase';
+function signedRequest({ action = 'flight-purchase', amount, currency = 'USD', merchant = 'skyward-air', authorizationId }) {
   const nonce = crypto.randomUUID();
   const issuedAt = new Date().toISOString();
   const message = buildAuthMessage({ agentDid: agent.did, action, amount, currency, merchant, nonce, issuedAt });
@@ -108,6 +116,24 @@ test('an unknown authorizationId is refused', async () => {
   } finally { restore(); }
 });
 
+test('a claim against a REVOKED mandate\'s hold is refused — closes the revoked-authority gap', async () => {
+  // The hold was voided when its mandate was revoked (backend markEffect now refuses the
+  // claim itself, not just a downstream field mismatch — see 0.5.3's changelog entry).
+  const restore = withMockClaim(() => ({ status: 409, body: { success: false, message: 'AUTHORIZATION_VOIDED' } }));
+  try {
+    const r = await mk().verifyRequest(signedRequest({ amount: 250, authorizationId: 'auth-revoked' }));
+    assert.equal(r.decision, 'block'); assert.equal(r.reasonCode, 'AUTHORIZATION_VOIDED');
+  } finally { restore(); }
+});
+
+test('a claim against an EXPIRED hold is refused — closes the expired-mandate gap', async () => {
+  const restore = withMockClaim(() => ({ status: 409, body: { success: false, message: 'AUTHORIZATION_EXPIRED' } }));
+  try {
+    const r = await mk().verifyRequest(signedRequest({ amount: 250, authorizationId: 'auth-expired' }));
+    assert.equal(r.decision, 'block'); assert.equal(r.reasonCode, 'AUTHORIZATION_EXPIRED');
+  } finally { restore(); }
+});
+
 test('a claimed hold for a DIFFERENT amount is refused, not silently trusted', async () => {
   // 500 is well within the bundle's own $1000 mandate cap — this must reach the claim step
   // (an amount over the mandate cap would be blocked by policy alone, proving nothing about
@@ -138,6 +164,21 @@ test('a claimed hold for a DIFFERENT merchant is refused — closes the merchant
   } finally { restore(); }
 });
 
+test('a claimed hold issued for a DIFFERENT (but also genuinely permitted) action is refused — closes the action-swap gap', async () => {
+  // The hold was minted for "flight-purchase"; the agent instead presents a signed,
+  // independently-valid request for "expense-report" at the identical amount/currency/merchant,
+  // carrying the SAME authorizationId. Both actions are legitimately in-policy on their own —
+  // only the claim-binding check catches that this specific hold was for the OTHER one.
+  const restore = withMockClaim(() => ({
+    status: 200,
+    body: { success: true, data: { ok: true, agentDid: agent.did, action: 'flight-purchase', amount: 250, currency: 'USD', merchant: 'skyward-air' } },
+  }));
+  try {
+    const r = await mk().verifyRequest(signedRequest({ action: 'expense-report', amount: 250, merchant: 'skyward-air', authorizationId: 'auth-action-swap' }));
+    assert.equal(r.decision, 'block'); assert.equal(r.reasonCode, 'AUTHORIZATION_ACTION_MISMATCH');
+  } finally { restore(); }
+});
+
 test('a hold from a not-yet-migrated backend (no merchant field) is not falsely blocked', async () => {
   // claim.merchant === undefined must SKIP the check, the same way amount/currency do —
   // backward compatible with a backend response that predates this field existing at all.
@@ -149,7 +190,7 @@ test('a hold from a not-yet-migrated backend (no merchant field) is not falsely 
 });
 
 test('a degraded claim (real fields omitted from the response) still allows, but warns — the tripwire for a future backend regression', async () => {
-  const restore = withMockClaim(() => ({ status: 200, body: { success: true, data: { ok: true } } })); // agentDid/amount/currency/merchant ALL omitted
+  const restore = withMockClaim(() => ({ status: 200, body: { success: true, data: { ok: true } } })); // agentDid/action/amount/currency/merchant ALL omitted
   const warnings = [];
   const realWarn = console.warn;
   console.warn = (msg) => warnings.push(msg);
@@ -157,6 +198,7 @@ test('a degraded claim (real fields omitted from the response) still allows, but
     const r = await mk().verifyRequest(signedRequest({ amount: 250, merchant: 'skyward-air', authorizationId: 'auth-degraded' }));
     assert.equal(r.decision, 'allow', 'a genuinely absent field must still be tolerated, not blocked');
     assert.ok(warnings.some((w) => w.includes('omitted agentDid')), 'must warn about the omitted agentDid');
+    assert.ok(warnings.some((w) => w.includes('omitted action')), 'must warn about the omitted action');
     assert.ok(warnings.some((w) => w.includes('omitted amount')), 'must warn about the omitted amount on a value-bearing request');
     assert.ok(warnings.some((w) => w.includes('omitted currency')), 'must warn about the omitted currency on a value-bearing request');
     assert.ok(warnings.some((w) => w.includes('omitted merchant')), 'must warn about the omitted merchant when one was signed');

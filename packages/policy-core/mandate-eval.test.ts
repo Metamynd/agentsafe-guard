@@ -347,3 +347,59 @@ describe('sumEventField — the cumulative-spend kernel', () => {
     expect(sumEventField([], 'capture', 'amount')).toBe(0);
   });
 });
+
+/**
+ * A resource-scoped mandate — the generic engine needs zero changes for this: `resource`
+ * is just another leftOperand, exactly like `mm:merchant`, confirmed by direct code read
+ * of constraintSatisfied() (unprefixed key lookup) before this was wired up
+ * (ResourceService.scopeConstraint(), mandate.service.ts's signed operand set).
+ */
+const resourceScopedMandate: Mandate = {
+  uid: 'urn:metamynd:mandate:resource-test',
+  validFrom: '2026-07-01T00:00:00Z',
+  permission: [
+    {
+      target: 'vehicle-inspection',
+      action: 'execute',
+      constraint: [{ leftOperand: 'resource', operator: 'isAnyOf', rightOperand: ['inspection-db', 'photo-store'] }],
+    },
+  ],
+};
+
+describe('evaluateMandate — resource scope', () => {
+  it('allows an action declaring a granted resource', () => {
+    const r = evaluateMandate(resourceScopedMandate, {
+      target: 'vehicle-inspection',
+      now: '2026-08-01T09:00:00Z',
+      values: { resource: 'inspection-db' },
+    });
+    expect(r.decision).toBe('allow');
+  });
+
+  it('blocks an action declaring an ungranted resource, with the documented fallback reason code', () => {
+    const r = evaluateMandate(resourceScopedMandate, {
+      target: 'vehicle-inspection',
+      now: '2026-08-01T09:00:00Z',
+      values: { resource: 'billing-db' },
+    });
+    expect(r.decision).toBe('block');
+    // No REASON_BY_OPERAND entry for 'resource' — falls back to CONSTRAINT_FAILED:resource,
+    // exactly as resource.service.ts's own docstring documents.
+    expect(r.reasonCode).toBe('CONSTRAINT_FAILED:resource');
+  });
+
+  it('blocks an action that declares no resource at all against a resource-scoped mandate (fail-closed)', () => {
+    const r = evaluateMandate(resourceScopedMandate, {
+      target: 'vehicle-inspection',
+      now: '2026-08-01T09:00:00Z',
+      values: {},
+    });
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('CONSTRAINT_FAILED:resource');
+  });
+
+  it('a mandate with NO resource constraint allows any (or no) resource declaration — unaffected by this feature', () => {
+    const r = evaluateMandate(flightMandate, req({ 'mm:payAmount': 100, 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus', resource: 'whatever' }));
+    expect(r.decision).toBe('allow');
+  });
+});

@@ -12,20 +12,44 @@ const base = {
 };
 
 describe('buildAuthMessage', () => {
-  it('joins the seven fields with | in the documented order', () => {
-    expect(buildAuthMessage(base)).toBe('did:key:zAgent|flight-purchase|100|USD|skyward-air|n-1|2026-01-01T00:00:00.000Z');
+  it('joins the eight fields with | in the documented order', () => {
+    expect(buildAuthMessage(base)).toBe('did:key:zAgent|flight-purchase|100|USD|skyward-air||n-1|2026-01-01T00:00:00.000Z');
   });
 
   it('substitutes an empty string for an absent merchant', () => {
     expect(buildAuthMessage({ ...base, merchant: undefined })).toBe(
-      'did:key:zAgent|flight-purchase|100|USD||n-1|2026-01-01T00:00:00.000Z',
+      'did:key:zAgent|flight-purchase|100|USD|||n-1|2026-01-01T00:00:00.000Z',
     );
+  });
+
+  it('substitutes an empty string for an absent resource', () => {
+    // resource omitted entirely — the overwhelmingly common (non-resource-scoped) case.
+    // Confirms this produces the SAME bytes as an explicit resource: undefined, so an old
+    // caller that never even knows about `resource` signs identically to one that does but
+    // has nothing to declare.
+    expect(buildAuthMessage(base)).toBe(buildAuthMessage({ ...base, resource: undefined }));
+  });
+
+  it('a genuine resource is a signed field — a different resource produces a different signed message', () => {
+    // The whole point of moving `resource` into buildAuthMessage rather than leaving it
+    // signed-last-ordered: two requests differing ONLY in resource must sign differently,
+    // or a compromised counterparty relaying a buildSignedRequest()-built request could
+    // swap which resource is declared without invalidating the signature.
+    const a = buildAuthMessage({ ...base, resource: 'inspection-db' });
+    const b = buildAuthMessage({ ...base, resource: 'billing-db' });
+    const none = buildAuthMessage({ ...base, resource: undefined });
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(none);
+    expect(a).toBe('did:key:zAgent|flight-purchase|100|USD|skyward-air|inspection-db|n-1|2026-01-01T00:00:00.000Z');
   });
 
   it('is unaffected by escaping for every value used in this codebase today (no | or \\\\)', () => {
     // Locks in that the escaping hardening below is a no-op for real traffic — any
-    // agentDid/action/currency/merchant/nonce/timestamp actually produced by this system.
-    expect(buildAuthMessage(base)).toBe(`${base.agentDid}|${base.action}|${base.amount}|${base.currency}|${base.merchant}|${base.nonce}|${base.issuedAt}`);
+    // agentDid/action/currency/merchant/resource/nonce/timestamp actually produced by this system.
+    const withResource = { ...base, resource: 'inspection-db' };
+    expect(buildAuthMessage(withResource)).toBe(
+      `${withResource.agentDid}|${withResource.action}|${withResource.amount}|${withResource.currency}|${withResource.merchant}|${withResource.resource}|${withResource.nonce}|${withResource.issuedAt}`,
+    );
   });
 
   it('escapes a literal | inside a field so it cannot be mistaken for the delimiter', () => {
@@ -34,14 +58,14 @@ describe('buildAuthMessage', () => {
     // shorter field-tuple could also produce (see the collision test below). Escaped,
     // the merchant's own pipes are visibly distinct (\|) from real field-boundary pipes.
     const withPipe = buildAuthMessage({ ...base, merchant: 'A|1000|USD|EVIL' });
-    expect(withPipe).toBe('did:key:zAgent|flight-purchase|100|USD|A\\|1000\\|USD\\|EVIL|n-1|2026-01-01T00:00:00.000Z');
+    expect(withPipe).toBe('did:key:zAgent|flight-purchase|100|USD|A\\|1000\\|USD\\|EVIL||n-1|2026-01-01T00:00:00.000Z');
   });
 
   it('escapes a literal backslash so it cannot be used to smuggle a fake escape sequence', () => {
     const withBackslash = buildAuthMessage({ ...base, merchant: 'A\\|B' });
     // "A\|B" must decode as literal backslash + literal pipe, not as an escaped pipe —
     // achieved by escaping the backslash FIRST, then the pipe.
-    expect(withBackslash).toBe('did:key:zAgent|flight-purchase|100|USD|A\\\\\\|B|n-1|2026-01-01T00:00:00.000Z');
+    expect(withBackslash).toBe('did:key:zAgent|flight-purchase|100|USD|A\\\\\\|B||n-1|2026-01-01T00:00:00.000Z');
   });
 
   it('two different field-tuples that would collide unescaped now produce different bytes', () => {

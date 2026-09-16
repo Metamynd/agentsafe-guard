@@ -2,15 +2,22 @@
  * Canonical signed-message builder (spec §7.3).
  *
  * The authorize `signature` is an Ed25519 signature over the UTF-8 string formed
- * by joining these seven fields, in this exact order, with the `|` (U+007C)
- * delimiter, substituting the empty string for an absent merchant:
+ * by joining these eight fields, in this exact order, with the `|` (U+007C)
+ * delimiter, substituting the empty string for an absent merchant or resource:
  *
- *   agentDid | action | amount | currency | merchant | nonce | issuedAt
+ *   agentDid | action | amount | currency | merchant | resource | nonce | issuedAt
  *
  * This lives in policy-core (not the gate) so BOTH signer and verifier build the
  * identical bytes — the agent guard signs it, the backend gate reconstructs and
  * verifies it, and any third-party guard does the same. Signature verification
  * itself stays OUT of policy-core (it needs the key, not the evaluator).
+ *
+ * `resource` was added after `merchant` (a breaking wire-format change, 7→8 fields —
+ * every signer must move together) so a mandate's `{leftOperand:'resource'}` constraint
+ * (ResourceService.scopeConstraint()) is genuinely non-spoofable: cryptographically
+ * committed the same way `merchant` already is, not just signed-last-ordered into the
+ * evaluation context, which would leave it alterable by a compromised counterparty
+ * relaying a `buildSignedRequest()`-built request onward.
  */
 
 export interface AuthMessageFields {
@@ -19,6 +26,7 @@ export interface AuthMessageFields {
   amount: number | string;
   currency: string;
   merchant?: string | null;
+  resource?: string | null;
   nonce: string;
   issuedAt: string;
 }
@@ -34,13 +42,42 @@ export interface AuthMessageFields {
  * every real agentDid/action/currency/nonce/timestamp today — so this changes nothing for
  * existing traffic and only activates for the case it exists to close.
  */
-function escapeField(v: string): string {
+export function escapeField(v: string): string {
   return v.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 }
 
 /** Build the canonical UTF-8 message a verifier reconstructs from received fields. */
 export function buildAuthMessage(f: AuthMessageFields): string {
-  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? '', f.nonce, f.issuedAt]
+  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? '', f.resource ?? '', f.nonce, f.issuedAt]
+    .map((v) => escapeField(String(v)))
+    .join('|');
+}
+
+/**
+ * Canonical signed-message builder for a local-mode guard's "local decision receipt"
+ * (docs: local-first SDK mode audit visibility). Signed by the agent's own key over
+ * agentDid|action|decision|reasonCode|nonce|issuedAt — a DIFFERENT field shape than
+ * AuthMessageFields (6 fields here vs. 8 there), so once `escapeField` is applied a
+ * receipt signed for this message can never reconstruct to the same bytes as a real
+ * authorize() message (and vice versa) — the same domain-separation-by-field-shape
+ * `buildCheckpointAnchorMessage` (checkpoint-anchor.ts) already relies on, no new
+ * machinery. `decision`/`reasonCode` MUST be signed fields, not just carried unsigned
+ * on the wire — otherwise a captured, validly-signed receipt could be resubmitted with
+ * a different decision/reasonCode and still verify, corrupting the very audit trail
+ * this exists to provide.
+ */
+export interface LocalDecisionMessageFields {
+  agentDid: string;
+  action: string;
+  decision: string;
+  reasonCode: string;
+  nonce: string;
+  issuedAt: string;
+}
+
+/** Build the canonical UTF-8 message a verifier reconstructs from received fields. */
+export function buildLocalDecisionMessage(f: LocalDecisionMessageFields): string {
+  return [f.agentDid, f.action, f.decision, f.reasonCode, f.nonce, f.issuedAt]
     .map((v) => escapeField(String(v)))
     .join('|');
 }

@@ -64,6 +64,8 @@ export type {
 // Composed evaluation + canonical message + context construction
 export { evaluate, type EvaluateInput, type RulePack } from './evaluate.js';
 export { buildAuthMessage, type AuthMessageFields } from './canonical.js';
+export { buildLocalDecisionMessage, type LocalDecisionMessageFields } from './canonical.js';
+export { buildCheckpointAnchorMessage, type CheckpointAnchorMessageFields } from './checkpoint-anchor.js';
 export { applySignedLast } from './context.js';
 
 // Operating-mode autonomy ladder — request-time gate (edge-shared; Phase 2.5b)

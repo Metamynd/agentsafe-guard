@@ -112,6 +112,47 @@ OWN recorded spend history — a baseline the platform's trust-graph engine lear
 threshold a human pre-sets. Opt-in (`SPEND_ANOMALY_MODE=on`), off by default. Nothing in this
 package's own evaluation changes; documented here because the count moved again.
 
+**0.9.0 — the `keyProvider` seam
+([docs/design/agent-key-custody-local-signer-daemon-plan.md](../../docs/design/agent-key-custody-local-signer-daemon-plan.md)).
+`agentKey` no longer has to be a raw hex key living in this process. Pass
+`keyProvider: 'daemon'` + `daemonSocketPath` instead, and every signature is produced by a
+separate `@metamynd/agentsafe-signer` daemon over a local socket — the key never enters this
+process at all. `agentKey` (unchanged) still works exactly as before and remains the default;
+this is additive, not a replacement.**
+
+**Breaking, disclosed plainly rather than silently shipped**: `buildSignedRequest`,
+`signChallenge`, and `guard.handshake().prove()` are now `async` — they return a `Promise` of
+what they used to return directly, because a `daemon`-backed provider genuinely needs a socket
+round trip to produce a signature, and there is no honest way to make that synchronous. Every
+caller of these three needs an `await` added. `authorize()` and `verifyKey()` were already
+`async` and need no changes. New internal module: `key-providers.mjs` (exports
+`createStaticKeyProvider`, `createDaemonKeyProvider`, and the resolution logic `createGuard`
+itself uses) — still zero external dependencies, `node:crypto` + `node:net` only.
+
+**0.9.1 — `keyProvider: 'daemon'` retries a transient connect failure.** On Windows the signer
+daemon's socket is a pool of independent named-pipe instances (see
+`@metamynd/agentsafe-signer`'s `windows-secure-pipe.mjs`); each instance is consumed by one
+connection and replaced asynchronously, so two signing requests close together could race that
+replacement window and fail with `DAEMON_UNREACHABLE` even though the daemon was healthy.
+`key-providers.mjs` now retries a connection that fails with `ENOENT` for up to 3 seconds before
+giving up — a genuinely unreachable daemon still fails fast on any other error. No API change.
+
+**0.11.0 — `keyProvider: 'daemon'` now supports `signLocalDecision`.** A daemon-custody agent
+gets the same local-first block/escalate/non-value-allow audit reporting the static-key provider
+has had since 0.9.4 — `createDaemonKeyProvider` gained the fifth, optional `signLocalDecision`
+method, and `@metamynd/agentsafe-signer`'s daemon gained the matching `sign-local-decision`
+signing-socket operation. No change for a `createGuard({ agentKey })` caller.
+
+**0.12.0 — passphrase-encrypted managed key delivery**
+([docs/design/passphrase-encrypted-key-delivery-plan.md](../../docs/design/passphrase-encrypted-key-delivery-plan.md)).
+A managed key can now be delivered as ciphertext instead of plaintext: set a passphrase at
+issuance, and `agent.metamynd.json` carries `agentKeyEncrypted` (`agentKey: null`) instead of a
+raw key. `createGuardFromConfig(source, { passphrase })` decrypts it in memory before building
+the guard — see "Passphrase-encrypted managed key" above. New export from `key-providers.mjs`:
+`decryptAgentKeyWithPassword` (a byte-for-byte, `node:crypto`-only reimplementation of the
+backend's `encryptWithPassword`/`decryptWithPassword`, cross-verified against it). Fully
+additive: a config without `agentKeyEncrypted` is loaded exactly as before, no passphrase needed.
+
 ```yaml
 # .github/workflows/governance.yml
 name: Governance
@@ -201,6 +242,11 @@ nonce/replay + atomic cap, and anchored evidence **must** be server-side. If the
 can't be fetched, the guard defers to the authoritative remote gate rather than
 blind-allowing; a value action it can neither evaluate nor seal **fails closed**.
 
+A block/escalate/non-value-allow decided locally is still reported to the gate as a
+best-effort, signed **local decision receipt** — visible in the Activity Log and fleet
+decision-mix, but not anchored/evidence-grade (see "Trust model" below). This never
+blocks or delays the call above it.
+
 ```js
 // default — local-first
 const guard = await createGuardFromConfig('./agent.metamynd.json');
@@ -257,8 +303,29 @@ const guard = await createGuardFromConfig('./agent.metamynd.json', { agentKey: m
 await guard.verifyKey({ ref: config.identityId, challenge: config.challenge, token: ownerToken }); // one-time
 ```
 
-`guard.signChallenge(challenge)` returns just the hex signature if you'd rather submit verify-key
-yourself. (Fastest path: `npm create metamynd-agent@latest -- --byok` does all of this for you.)
+`await guard.signChallenge(challenge)` returns just the hex signature if you'd rather submit
+verify-key yourself. (Fastest path: `npm create metamynd-agent@latest -- --byok` does all of this
+for you.)
+
+### Passphrase-encrypted managed key
+
+If you didn't set a passphrase at issuance, a managed key is delivered **plaintext** — the
+`agentKey` field in `agent.metamynd.json` is usable as-is. Setting a passphrase (Launchpad's
+Identity stage, or `passphrase` on `POST /onboarding/agent`) instead delivers an
+`agentKeyEncrypted` object and leaves `agentKey: null`; decrypt it in memory when you load the
+config:
+
+```js
+const guard = await createGuardFromConfig('./agent.metamynd.json', { passphrase: myPassphrase });
+```
+
+This is strictly better than a plaintext file sitting on disk, in an email attachment, or in a
+`git add .` — but strictly weaker than `keyProvider: 'daemon'` (no key material in this process
+at all): the decrypted key still lives in this process's memory for as long as it runs.
+**Passphrase loss is unrecoverable**, the same as a lost BYOK private key — MetaMynd never sees
+or stores the passphrase itself, so there is nothing to reset. Omitting `{ passphrase }` when the
+config actually needs one throws a clear, specific error rather than the generic "requires
+agentKey or keyProvider" message.
 
 ## 1. Seed a bound agent (once)
 
@@ -331,7 +398,11 @@ const gatedBookFlight = guard.guardTool(
 ```
 
 - If your OpenClaw build has a **pre-tool hook / middleware** instead of raw handlers, call
-  `await guard.authorize({ action, amount, merchant, context })` there and refuse on any non-`allow`.
+  `await guard.authorize({ action, amount, merchant, resource, context })` there and refuse on any
+  non-`allow`. `resource` is a genuine, non-spoofable "what this action touches" declaration —
+  checked against a mandate's `{leftOperand:'resource'}` constraint the same way `merchant` is
+  checked against its own allow-list, and just as much a SIGNED field (tampering with it after
+  signing fails the request with `SIGNATURE_INVALID`, not a silent bypass).
 - **`context`** is what the Standard/SOP atoms read (jurisdiction, model, tool, PII, risk, …). Each
   atom declares what it needs — fetch the catalog at `GET /api/v1/standards/atoms` to see the exact
   fields (`requiredContext`) for the rules your agent is bound to.
@@ -388,8 +459,8 @@ const sandboxed = (ctx) => ctx.action === 'flight-purchase' ? sandboxBook(ctx.ar
 Contract: `async ({ action, args, decision, proceed }) => result`. Call `proceed()` to execute for
 real; return without it to substitute the side-effect. Self-check: `node execution-adapter.smoke.mjs`.
 
-Signed request fields (`amount`, `merchant`) are always applied over the unsigned `context`, so a
-forged context key can never shadow them (MAGP §6.4.2). Run the self-check:
+Signed request fields (`amount`, `merchant`, `resource`) are always applied over the unsigned
+`context`, so a forged context key can never shadow them (MAGP §6.4.2). Run the self-check:
 
 ```powershell
 cd integrations\agentsafe-guard
@@ -410,7 +481,7 @@ drives the initiator side:
 const hs = guard.handshake();
 const { nonceA, message } = hs.hello();              // → send HELLO to the Service
 // Service replies with CHALLENGE { toDid, nonceB, sigB(nonceA) }
-const { sigA, handshakeId } = hs.prove({ nonceA, challenge });  // verifies the Service, → send PROVE
+const { sigA, handshakeId } = await hs.prove({ nonceA, challenge });  // verifies the Service, → send PROVE
 // Service replies READY { channelId }
 ```
 
@@ -446,5 +517,10 @@ The gate is a **checkpoint** — enforcement is real when it's actually called.
   only proceeds on `allow`. A rogue agent that skips the call can't get the counterparty to act.
 - **Cooperative:** the agent's own tool layer (this guard) calls the gate and refuses on block/escalate.
 
-Either way, every decision is Ed25519-authenticated, deterministic, and anchored as evidence
-(visible in the dashboard's Regulator log and on HashScan).
+Either way, every decision is Ed25519-authenticated and deterministic. A decision that round-trips
+the gate — a sealed value action, or `mode:'remote'` — is also **anchored as evidence** (visible in
+the dashboard's Regulator log and on HashScan). A purely local-first decision (the default mode's
+block/escalate/non-value-allow — see "Enforcement mode" above) is NOT anchored, but is still
+recorded for Activity Log / decision-mix visibility via a best-effort signed receipt (no hold, no
+spend check, not evidence-grade) — `guardToolLocal()`'s pure-offline path has no server-side trail
+at all, by design.

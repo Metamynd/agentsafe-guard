@@ -18,6 +18,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 
 import { join, resolve } from 'node:path';
 import readline from 'node:readline';
 import crypto from 'node:crypto';
+import net from 'node:net';
 
 const GUARD_PKG = '@metamynd/agentsafe-guard';
 // Must track the guard's MINOR line, not just its major. On a 0.x package `^0.4.0` means
@@ -32,7 +33,21 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.8.0 adds an optional `currency` scope to the amount-over/cumulative-over atoms
 // (harnessDefaultSop, below, now sets it) — a guard below this version can't evaluate that
 // field, so a scaffolded currency-scoped cap would silently never fire on a currency mismatch.
-const GUARD_VERSION = '^0.8.0';
+// 0.9.0 makes buildSignedRequest() async (the keyProvider seam, docs/design/
+// agent-key-custody-local-signer-daemon-plan.md) — this scaffold's own bookFlightViaGateway/
+// callGateway templates now `await` it, so a guard below this version would hand back a
+// Promise object where a signed request is expected instead of failing loudly.
+// 0.10.0 adds `resource` as a genuinely signed field (mirrors the mandate's own
+// ResourceService.scopeConstraint()) — no scaffolded template passes it yet, but the floor
+// must still cover the real current version regardless, per this repo's standing
+// internal-pin invariant.
+// 0.11.0 adds `signLocalDecision` support to `createDaemonKeyProvider` — this scaffold's
+// `--byok --daemon-socket` path can now get local-decision audit reporting too, but no
+// template code changes yet; the floor must still cover the real current version.
+// 0.12.0 adds passphrase-encrypted managed key delivery (createGuardFromConfig's
+// `{ passphrase }`) — no scaffolded template passes one yet, but the floor must still cover
+// the real current version regardless, per this repo's standing internal-pin invariant.
+const GUARD_VERSION = '^0.12.0';
 // The default hosted scaffold's SECOND process — the tool gateway (see scaffoldProject).
 const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.2.0 adds requireAuthorization (closes replay + cumulative spend) — this scaffold sets that
@@ -40,7 +55,14 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.3.0 adds the same amount-unknown atom as the guard, above — same reasoning, same miss.
 // 0.4.0 adds the same amount-over/cumulative-over `currency` scope as the guard, above —
 // same reasoning, same miss.
-const MCP_GUARD_VERSION = '^0.4.0';
+// 0.5.0 adds the keyProvider seam alongside the guard's own 0.9.0 (same design doc) — this
+// scaffold's createMcpGuard() calls never use a handshake here, so no template code changes,
+// but the floor must still cover the real current version regardless, per this repo's
+// standing internal-pin invariant.
+// 0.6.0 brings buildAuthMessage's `resource` field and buildLocalDecisionMessage into this
+// package's own bundled policy-core.mjs (alongside the guard's own 0.10.0) — no scaffolded
+// template code changes, but the floor must still cover the real current version.
+const MCP_GUARD_VERSION = '^0.6.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -118,6 +140,13 @@ ${c.b('Options')}
   --byok               Bring-your-own-key: generate the keypair locally, provision + prove control
                        (MetaMynd never sees the private key). Overridden by --public-key.
   --public-key <hex>   BYOK with a key you already hold (SPKI/raw hex); you prove control yourself
+  --daemon-socket <p>  --byok only: use an already-running agentsafe-signer daemon (started
+                       separately, e.g. \`agentsafe-signer start --admin\`) to generate the key and
+                       prove control instead — the private key never enters this CLI's process at
+                       all, and agent.metamynd.json gets keyProvider:'daemon' instead of a
+                       plaintext key. Requires --daemon-admin-socket too. See README#byok.
+  --daemon-admin-socket <p>  The same daemon's admin socket (for generate-key) — required with
+                       --daemon-socket.
   --out <dir>          Output project directory (default ./<agent-slug>)
   --no-gateway         Hosted flow only: skip the separate tool-gateway process (see
                        README#separate-tool-gateway-default) and scaffold the old
@@ -308,6 +337,72 @@ function buildDidKey(publicKeyBytes) {
 function signChallengeHex(privateKeyHex, challenge) {
   const key = crypto.createPrivateKey({ key: Buffer.from(privateKeyHex, 'hex'), format: 'der', type: 'pkcs8' });
   return crypto.sign(null, Buffer.from(challenge, 'utf8'), key).toString('hex');
+}
+
+// ---------- BYOK via an already-running agentsafe-signer daemon (--daemon-socket) ----------
+// Opt-in alternative to generateAgentKeypair() above: instead of generating the keypair in THIS
+// process and writing it in plaintext into agent.metamynd.json, ask an already-running
+// agentsafe-signer daemon (docs/design/agent-key-custody-local-signer-daemon-plan.md — started
+// separately, e.g. `agentsafe-signer start --admin`) to generate the key and sign the
+// proof-of-possession challenge. The private key never enters this process at all, and the
+// scaffolded config gets `keyProvider: 'daemon'` instead of a plaintext `agentKey` — see
+// agentsafe-guard/key-providers.mjs's resolveKeyProvider(), which reads that field exactly.
+//
+// Vendored rather than depending on @metamynd/agentsafe-signer or @metamynd/agentsafe-guard for
+// it — this CLI is intentionally zero-dependency, and this is the SAME small, self-contained
+// reimplementation of the daemon's local JSON-over-socket protocol that agentsafe-guard/
+// key-providers.mjs and agentsafe-mcp-guard/key-providers.mjs already each carry their own copy
+// of, rather than a fourth package depending on a signer package built for a persistent service,
+// not a one-shot scaffolding command.
+function toPlatformSocketPath(logicalPath) {
+  if (process.platform !== 'win32') return logicalPath;
+  const name = crypto.createHash('sha256').update(resolve(logicalPath)).digest('hex').slice(0, 32);
+  return `\\\\.\\pipe\\agentsafe-signer-${name}`;
+}
+
+function daemonRequest(socketPath, op, params, { connectTimeoutMs = 5000 } = {}) {
+  return new Promise((resolve_, reject) => {
+    const deadline = Date.now() + connectTimeoutMs;
+    let settled = false;
+    const overallTimer = setTimeout(() => {
+      settled = true;
+      reject(Object.assign(new Error(`agentsafe-signer daemon unreachable at ${socketPath}: timed out after ${connectTimeoutMs}ms`), { code: 'DAEMON_UNREACHABLE' }));
+    }, connectTimeoutMs);
+    function attempt() {
+      if (settled) return;
+      const sock = net.connect(toPlatformSocketPath(socketPath));
+      const requestId = crypto.randomUUID();
+      let buf = '';
+      const cleanup = () => sock.destroy();
+      sock.once('error', (err) => {
+        cleanup();
+        if (settled) return;
+        if (err.code === 'ENOENT' && Date.now() < deadline) { setTimeout(attempt, 20); return; }
+        settled = true;
+        clearTimeout(overallTimer);
+        reject(Object.assign(new Error(`agentsafe-signer daemon unreachable at ${socketPath}: ${err.message}`), { code: 'DAEMON_UNREACHABLE' }));
+      });
+      sock.once('connect', () => {
+        if (settled) return;
+        sock.write(JSON.stringify({ protocolVersion: 1, requestId, op, params }) + '\n');
+      });
+      sock.on('data', (chunk) => {
+        if (settled) return;
+        buf += chunk.toString('utf8');
+        const idx = buf.indexOf('\n');
+        if (idx === -1) return;
+        let res;
+        try { res = JSON.parse(buf.slice(0, idx)); }
+        catch (err) { cleanup(); settled = true; clearTimeout(overallTimer); reject(err); return; }
+        cleanup();
+        settled = true;
+        clearTimeout(overallTimer);
+        if (res.ok) resolve_(res.result);
+        else reject(Object.assign(new Error(res.error?.message || res.error?.code || 'daemon rejected request'), { code: res.error?.code }));
+      });
+    }
+    attempt();
+  });
 }
 
 // ---------- API ----------
@@ -522,7 +617,7 @@ const GATEWAY = process.env.GATEWAY_URL || 'http://localhost:${gatewayPort}';
 // --- the gateway atomically claim single-use execution, closing replay + cumulative spend, not
 // --- just re-checking policy. See ./gateway/README.md.
 async function bookFlightViaGateway(args, decision) {
-  const signed = guard.buildSignedRequest({
+  const signed = await guard.buildSignedRequest({
     action: '${scope}',
     amount: args.amount,
     currency: 'USD',
@@ -698,7 +793,13 @@ function examplePackageJson(slug) {
   ) + '\n';
 }
 
-function exampleReadme(slug, scope, withGateway, gatewayPort) {
+function exampleReadme(slug, scope, withGateway, gatewayPort, daemonKey = false) {
+  const configFileLine = daemonKey
+    ? `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
+  **Holds no secret key.** Signing goes through your already-running agentsafe-signer daemon
+  (\`daemonSocketPath\`) instead — see \`docs/integration/INSTALL-AGENTSAFE-SIGNER.md\`.`
+    : `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
+  **Contains the agent's secret key — never commit it.** It is already in \`.gitignore\`.`;
   const gatewaySection = withGateway
     ? `## Run
 
@@ -721,8 +822,7 @@ an ESCALATE (high risk). The BLOCK and ESCALATE never reach the gateway at all �
 
 ## Files
 
-- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
-  **Contains the agent's secret key — never commit it.** It is already in \`.gitignore\`.
+${configFileLine}
 - \`index.mjs\` — signs each request and calls \`./gateway\` for it; \`guard.guardTool()\` here is a
   fast local pre-check, not the enforcement boundary.
 - \`gateway/\` — a **separate process**. It holds the real tool and independently re-verifies every
@@ -743,8 +843,7 @@ You should see an ALLOW, a BLOCK (over the per-transaction cap), and an ESCALATE
 
 ## Files
 
-- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
-  **Contains the agent's secret key — never commit it.** It is already in \`.gitignore\`.
+${configFileLine}
 - \`index.mjs\` — wraps a tool with \`guard.guardTool(...)\`; the tool only runs when the gate allows.
 
 ## What this is not
@@ -1055,7 +1154,7 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, sandbox, with
   writeFileSafe(outDir, 'index.mjs', withGateway ? exampleIndex(scope, perTxnMax, gatewayPort) : exampleIndexNoGateway(scope, perTxnMax), force);
   writeFileSafe(outDir, 'package.json', examplePackageJson(slug), force);
   writeFileSafe(outDir, '.gitignore', gitignore(), force);
-  writeFileSafe(outDir, 'README.md', exampleReadme(slug, scope, withGateway, gatewayPort), force);
+  writeFileSafe(outDir, 'README.md', exampleReadme(slug, scope, withGateway, gatewayPort, config.keyProvider === 'daemon'), force);
 
   if (withGateway) {
     const apiBase = config.apiBase ?? config.api ?? DEFAULT_API;
@@ -1072,6 +1171,8 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, sandbox, with
   console.log(`\n${c.green(c.b('  ✓ Done.'))} Your governed agent is ready.\n`);
   if (sandbox) {
     console.log(`  ${c.dim('Shared sandbox agent — for trying MetaMynd only. Provision your own (drop --sandbox) for anything real.')}\n`);
+  } else if (config.keyProvider === 'daemon') {
+    console.log(`  ${c.dim('agent.metamynd.json holds no secret key — signing goes through your agentsafe-signer daemon at')} ${c.b(config.daemonSocketPath)}${c.dim('.')}\n`);
   } else if (config.agentKey) {
     console.log(`  ${c.yellow('⚠ agent.metamynd.json holds the agent secret key')} — it is gitignored; never commit it.\n`);
   }
@@ -1730,7 +1831,7 @@ const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://localhost:${gatewayPo
 // issuer): it builds and signs the same canonical message a real gate would verify, entirely
 // offline, using this agent's own did:key — the gateway verifies that signature for itself.
 async function callGateway(path, action, args) {
-  const signed = guard.buildSignedRequest({ action, amount: args.amount, currency: 'USD', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel ?? 'low' } });
+  const signed = await guard.buildSignedRequest({ action, amount: args.amount, currency: 'USD', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel ?? 'low' } });
   const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ signed, args }) });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -2224,11 +2325,35 @@ async function main() {
   );
   const merchants = String(merchantsRaw).split(',').map((s) => s.trim()).filter(Boolean);
 
-  // BYOK: --byok generates a keypair on THIS machine (MetaMynd never sees the private key). An
-  // explicit --public-key means the caller holds the key elsewhere and will prove it themselves.
+  // BYOK: --byok generates a keypair on THIS machine (MetaMynd never sees the private key) —
+  // either locally in this process (default) or, opt-in, via an already-running agentsafe-signer
+  // daemon (--daemon-socket + --daemon-admin-socket, see their own help text) so the private key
+  // never enters this process at all. An explicit --public-key means the caller holds the key
+  // elsewhere and will prove it themselves — daemon flags are meaningless with it.
   let publicKey = typeof args['public-key'] === 'string' ? args['public-key'] : undefined;
+  const daemonSocket = typeof args['daemon-socket'] === 'string' ? args['daemon-socket'] : undefined;
+  const daemonAdminSocket = typeof args['daemon-admin-socket'] === 'string' ? args['daemon-admin-socket'] : undefined;
+  if (Boolean(daemonSocket) !== Boolean(daemonAdminSocket)) {
+    rl?.close();
+    fail('--daemon-socket and --daemon-admin-socket must be used together.');
+  }
+  if (daemonSocket && !args.byok) {
+    rl?.close();
+    fail('--daemon-socket requires --byok.');
+  }
+  if (daemonSocket && publicKey) {
+    rl?.close();
+    fail('--daemon-socket generates its own key — pass --byok alone, not --public-key.');
+  }
   let generatedKey = null;
-  if (args.byok && !publicKey) {
+  let daemonPublicKeyHex = null;
+  if (args.byok && !publicKey && daemonSocket) {
+    console.log(c.dim('  → asking the agentsafe-signer daemon to generate a key …'));
+    const { publicKeyHex } = await daemonRequest(daemonAdminSocket, 'generate-key', { allowRekey: false });
+    daemonPublicKeyHex = publicKeyHex;
+    publicKey = publicKeyHex;
+    console.log(`  ${c.green('✓')} generated an Ed25519 keypair via the signer daemon ${c.dim('(the private key never left it)')}`);
+  } else if (args.byok && !publicKey) {
     generatedKey = generateAgentKeypair();
     publicKey = generatedKey.publicKeyHex;
     console.log(`  ${c.green('✓')} generated an Ed25519 keypair locally ${c.dim('(private key stays on this machine)')}`);
@@ -2253,7 +2378,21 @@ async function main() {
   if (config.standards?.length) console.log(`  ${c.green('✓')} enforced Standards: ${config.standards.join(', ')}`);
 
   // 3b. BYOK: prove control of the key (verify-key), else the gate blocks with AGENT_KEY_UNVERIFIED.
-  if (generatedKey) {
+  if (daemonPublicKeyHex) {
+    // The daemon holds the private key — it never entered this process. Point the scaffolded
+    // guard at the daemon instead of embedding a plaintext key (agentsafe-guard/key-providers.mjs's
+    // resolveKeyProvider() reads these two fields and never looks for `agentKey` when present).
+    config.keyProvider = 'daemon';
+    config.daemonSocketPath = daemonSocket;
+    if (config.challenge) {
+      console.log(c.dim('  → proving key control via the daemon (verify-key) …'));
+      const { signature } = await daemonRequest(daemonSocket, 'sign-key-control-challenge', { challenge: config.challenge });
+      await apiPost(base, `/agent-identity/${encodeURIComponent(config.identityId)}/verify-key`, { signature }, token);
+      config.keyVerified = true;
+      delete config.challenge; // one-time; consumed
+      console.log(`  ${c.green('✓')} key verified — MetaMynd never saw your private key, and neither did this CLI`);
+    }
+  } else if (generatedKey) {
     // We hold the private key — inject it into the config so the scaffolded guard can sign, and
     // prove possession by signing the issued challenge.
     config.agentKey = generatedKey.privateKeyHex;

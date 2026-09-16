@@ -14,6 +14,7 @@ import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate } from '
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
+import { resolveKeyProvider, decryptAgentKeyWithPassword } from './key-providers.mjs';
 
 /**
  * Replay a Merkle sibling chain and report whether it reconstructs `root`.
@@ -87,6 +88,14 @@ export function executionAdapterFromEnv(env = (typeof process !== 'undefined' ? 
  * Async loader — build a guard from the portable config the one-call `POST /onboarding/agent`
  * endpoint returns: a URL, a file path, or the config object itself. Overrides win over the config.
  *   const guard = await createGuardFromConfig('./agent.metamynd.json');
+ *
+ * Passphrase-encrypted key delivery (docs/design/passphrase-encrypted-key-delivery-plan.md): when
+ * the loaded config carries `agentKeyEncrypted` (no plaintext `agentKey` — the operator set a
+ * passphrase at issuance) and no explicit `agentKey`/`keyProvider` override was given, pass
+ * `{ passphrase }` here to decrypt it IN-MEMORY before the guard is built:
+ *   const guard = await createGuardFromConfig('./agent.metamynd.json', { passphrase: '...' });
+ * The passphrase itself is never sent anywhere by this function — only used locally to derive
+ * the decryption key, matching the one hard invariant the design doc names.
  */
 export async function createGuardFromConfig(source, overrides = {}) {
   let cfg = source;
@@ -94,7 +103,15 @@ export async function createGuardFromConfig(source, overrides = {}) {
     cfg = /^https?:\/\//.test(source) ? await (await fetch(source)).json() : JSON.parse(readFileSync(source, 'utf8'));
   }
   if (cfg && cfg.data && !cfg.agentDid) cfg = cfg.data; // unwrap a { success, data } API response
-  return createGuard({ config: cfg, ...overrides });
+  const { passphrase, ...rest } = overrides;
+  if (cfg?.agentKeyEncrypted && !cfg.agentKey && !rest.agentKey && !rest.keyProvider) {
+    if (!passphrase) {
+      throw new Error("createGuardFromConfig: this config's key is passphrase-encrypted — pass { passphrase }");
+    }
+    const agentKey = decryptAgentKeyWithPassword(cfg.agentKeyEncrypted.ciphertext, passphrase, cfg.agentKeyEncrypted.salt);
+    return createGuard({ config: cfg, agentKey, ...rest });
+  }
+  return createGuard({ config: cfg, ...rest });
 }
 
 export function createGuard(opts = {}) {
@@ -108,18 +125,17 @@ export function createGuard(opts = {}) {
   if (cfg && cfg.data && !cfg.agentDid) cfg = cfg.data; // unwrap a { success, data } API response
   const api = opts.api ?? cfg?.apiBase ?? cfg?.api;
   const agentDid = opts.agentDid ?? cfg?.agentDid;
-  const agentKey = opts.agentKey ?? cfg?.agentKey;
-  if (!api || !agentDid || !agentKey) throw new Error('createGuard requires { api, agentDid, agentKey } — directly, or via { config } / { configPath } / createGuardFromConfig()');
+  if (!api || !agentDid) throw new Error('createGuard requires { api, agentDid } — directly, or via { config } / { configPath } / createGuardFromConfig() — plus either { agentKey } or { keyProvider }');
   const base = api.replace(/\/$/, '');
   // ExecutionAdapter seam (SAFR §19): an explicit opt wins, else the AGENTSAFE_EXECUTION_MODE env,
   // else live. Applies to every guarded tool unless a tool passes its own adapter.
   const defaultExecutionAdapter = opts.executionAdapter ?? executionAdapterFromEnv() ?? liveExecutionAdapter;
-  const privateKey = crypto.createPrivateKey({ key: Buffer.from(agentKey, 'hex'), format: 'der', type: 'pkcs8' });
-
-  // Ed25519 over the exact canonical message the backend verifies.
-  function sign(message) {
-    return crypto.sign(null, Buffer.from(message, 'utf8'), privateKey).toString('hex');
-  }
+  // keyProvider seam (docs/design/agent-key-custody-local-signer-daemon-plan.md): defaults to
+  // 'staticKey' (the raw key in THIS process, today's only behavior before this seam existed) —
+  // pass keyProvider:'daemon' + daemonSocketPath to keep the key out of this process entirely.
+  // Every place this file used to call a local sign(message) now calls one of the provider's
+  // four methods instead — see key-providers.mjs for why there are four, not one.
+  const keyProvider = resolveKeyProvider(opts, cfg);
 
   // Tier 1 context-claim binding (opt-in, docs/design/context-claim-binding.md): when
   // on, sign the GovernanceEnvelope hash too, so a counterparty/gate can prove the
@@ -127,12 +143,11 @@ export function createGuard(opts = {}) {
   // subset. Off by default: a bare request stays a valid degenerate envelope, exactly
   // like today, and the wire body carries no envelopeSignature field at all.
   const signContext = opts.signContext ?? cfg?.signContext ?? false;
-  function envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }) {
+  async function envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }) {
     if (!signContext) return undefined;
     // The hash is independent of `signature` (excluded from what it commits to — see
     // governance-envelope.ts), so an empty placeholder here is exact, not approximate.
-    const hash = envelopeHashFor({ agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt, signature: '' });
-    return sign(hash);
+    return keyProvider.signEnvelope({ agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt });
   }
 
   // --- Enforcement mode (spec §9.2 + local-first plan) --------------------------------------
@@ -167,17 +182,40 @@ export function createGuard(opts = {}) {
    * agent's authorization trustlessly against the agent's policy bundle (§9.3). Same shape
    * `authorize()` posts to the gate; a fresh nonce each call.
    */
-  function buildSignedRequest({ action, amount = 0, currency = 'USD', merchant = '', context = {}, trace, materiality }) {
+  async function buildSignedRequest({ action, amount, currency, merchant, resource, context = {}, trace, materiality }) {
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
-    const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, nonce, issuedAt });
+    // This object is presented to a COUNTERPARTY (spec §9.3) — but its own docstring also
+    // promises "same shape authorize() posts to the gate", so it must ALSO independently
+    // re-verify if posted straight to /policy/mandate/authorize, not just via a naive
+    // counterparty reconstruction. Found live: signing with amount/currency genuinely
+    // undefined (bothOmitted) produced a message the backend's authMessage() — which
+    // ALWAYS defaults a missing amount/currency to 0/'USD' before reconstructing,
+    // regardless of the wire body — could never verify. Fix: SIGN with the same 0/'USD'
+    // default authorize() and the gate both use, unconditionally; the WIRE body still
+    // keeps a real omission as a real omission. A naive third-party reconstruction (e.g.
+    // today's agentsafe-mcp-guard, which doesn't yet apply this same default) would need
+    // the same fix to correctly re-verify a bothOmitted request — flagged as a follow-up,
+    // not something to leave this function broken against the gate over.
+    const bothOmitted = amount === undefined && currency === undefined;
+    const wireAmount = bothOmitted ? undefined : (amount ?? 0);
+    const wireCurrency = bothOmitted ? undefined : (currency ?? 'USD');
+    const signedAmount = amount ?? 0;
+    const signedCurrency = currency ?? 'USD';
+    // `resource` is independent of amount/currency's bothOmitted pairing — it always signs and
+    // travels exactly as given (undefined stays undefined on the wire, buildAuthMessage's own
+    // internal `?? ''` fallback handles the signed-message side, same as `merchant`).
     // trace/materiality are GovernanceEnvelope fields (SAFR §5) — unsigned metadata; the
-    // signed message stays the action subset, so verification is unchanged.
-    return {
-      agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt,
-      signature: sign(message),
-      envelopeSignature: envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }),
-    };
+    // signed message stays the action subset, so verification is unchanged. `resource` is
+    // deliberately NOT passed to envelopeSignatureFor: the backend's governance-envelope.ts
+    // action fields don't include it yet either (only amount/currency/merchant) — adding it
+    // to just one side would break Tier-1 envelope-hash verification for any resource-
+    // declaring request. A coordinated backend+guard follow-up, not something to do half here.
+    const [signature, envelopeSignature] = await Promise.all([
+      keyProvider.signAuthorize({ agentDid, action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt }),
+      envelopeSignatureFor({ action, amount: wireAmount, currency: wireCurrency, merchant, context, trace, materiality, nonce, issuedAt }),
+    ]);
+    return { agentDid, action, amount: wireAmount, currency: wireCurrency, merchant, resource, itinerary: context, trace, materiality, nonce, issuedAt, signature, envelopeSignature };
   }
 
   /**
@@ -185,13 +223,31 @@ export function createGuard(opts = {}) {
    * returns { decision:'allow'|'block'|'escalate', reasonCode, authorizationId, remaining }.
    * A network/gate failure returns a fail-CLOSED block so the agent can't proceed blind.
    */
-  async function authorize({ action, amount = 0, currency = 'USD', merchant = '', context = {}, trace, materiality }) {
+  async function authorize({ action, amount, currency, merchant, resource, context = {}, trace, materiality }) {
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
-    // Build the canonical signed message with policy-core so the guard and the
-    // backend gate produce byte-identical input to Ed25519 (spec §7.3).
-    const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, nonce, issuedAt });
     try {
+      // This is verified SERVER-SIDE by the gate, which independently reconstructs the signed
+      // message via its own authMessage() (mandate.service.ts) — that function ALSO defaults a
+      // missing amount/currency to 0/'USD' before rebuilding the message, regardless of what the
+      // wire body actually contains. So the client signs with that same 0/'USD' default whenever
+      // a field is genuinely omitted — matching the gate's reconstruction — while the WIRE body
+      // below keeps a real omission as a real omission (not the gate's problem: it defaults on
+      // its own) rather than fabricating amount:0/currency:'USD' for a non-financial action.
+      // `resource` needs no such dance: the gate's authMessage() spreads `...input` directly
+      // (no explicit default), and buildAuthMessage's own internal `f.resource ?? ''` fallback
+      // already matches whatever this client signs when it too is genuinely omitted.
+      const signedAmount = amount ?? 0;
+      const signedCurrency = currency ?? 'USD';
+      // The canonical message itself is built by the key provider (policy-core's
+      // buildAuthMessage, same as the backend gate verifies against — spec §7.3), not here —
+      // see key-providers.mjs for why callers pass structured fields, not a pre-built string.
+      // `resource` deliberately NOT passed to envelopeSignatureFor — see buildSignedRequest's
+      // own comment on why (backend governance-envelope.ts doesn't include it yet either).
+      const [signature, envelopeSignature] = await Promise.all([
+        keyProvider.signAuthorize({ agentDid, action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt }),
+        envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }),
+      ]);
       const res = await fetch(`${base}/policy/mandate/authorize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -199,15 +255,19 @@ export function createGuard(opts = {}) {
         // as unsigned-message metadata; JSON.stringify drops them when undefined, so an
         // agent that omits them (or leaves signContext off) sends the legacy body.
         body: JSON.stringify({
-          agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt,
-          signature: sign(message),
-          envelopeSignature: envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }),
+          agentDid, action, amount, currency, merchant, resource, itinerary: context, trace, materiality, nonce, issuedAt,
+          signature,
+          envelopeSignature,
         }),
       });
       const body = await res.json().catch(() => null);
       return body?.data ?? { decision: 'block', reasonCode: `GATE_HTTP_${res.status}` };
     } catch (err) {
-      return { decision: 'block', reasonCode: 'GATE_UNREACHABLE', error: String(err?.message ?? err) };
+      // A daemon-backed keyProvider can fail before the gate is ever reached (the signer, not
+      // the gate, was unreachable) — a distinct reasonCode so this doesn't read as a gate outage
+      // it wasn't. Still fail-CLOSED either way, which is the property that actually matters.
+      const reasonCode = err?.code?.startsWith?.('DAEMON_') ? 'SIGNER_UNREACHABLE' : 'GATE_UNREACHABLE';
+      return { decision: 'block', reasonCode, error: String(err?.message ?? err) };
     }
   }
 
@@ -355,6 +415,37 @@ export function createGuard(opts = {}) {
     return _anchor;
   }
 
+  // Verdicts the backend's /policy/decisions/local will actually accept (local-decision.service.ts's
+  // LOCAL_DECISIONS) — 'quarantine'/'suspend' are containment, a SERVER-state decision whose audit
+  // trail already lives on the server (the `contained` flag this very evaluation read came FROM
+  // the server's own bundle response), so there is nothing new to report for those.
+  const REPORTABLE_LOCAL_DECISIONS = new Set(['allow', 'observe', 'block', 'escalate']);
+
+  /**
+   * Best-effort, NEVER awaited by the caller: reports a purely-local verdict to the gate
+   * for audit VISIBILITY only (Activity Log / fleet decision-mix / regulator log otherwise
+   * show nothing for the large majority of decisions under the default local-first mode —
+   * see docs/design/... and this package's own README "Enforcement mode" section for why
+   * that's a deliberate security tradeoff, not a bug, but one that used to leave zero trail
+   * anywhere). Silently does nothing if the keyProvider doesn't support it (e.g. the daemon
+   * keyProvider, which doesn't implement signLocalDecision in this version) or the verdict
+   * isn't one the endpoint accepts. Never throws, never delays the caller.
+   */
+  function reportLocalDecision(action, decision, reasonCode) {
+    if (typeof keyProvider.signLocalDecision !== 'function') return;
+    if (!REPORTABLE_LOCAL_DECISIONS.has(decision)) return;
+    const nonce = crypto.randomUUID();
+    const issuedAt = new Date().toISOString();
+    void (async () => {
+      const signature = await keyProvider.signLocalDecision({ agentDid, action, decision, reasonCode, nonce, issuedAt });
+      await fetch(`${base}/policy/decisions/local`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentDid, action, decision, reasonCode, nonce, issuedAt, signature }),
+      });
+    })().catch(() => {});
+  }
+
   /**
    * LOCAL-FIRST decision (the default). Evaluates the rule layer against the cached
    * bundle with the same policy-core the gate runs — so a block/escalate is decided
@@ -382,8 +473,12 @@ export function createGuard(opts = {}) {
     const local = evaluateLocally({ ..._bundleFor(b, action), request: input });
     // allow/observe both PERMIT; block/escalate/contain are decided locally with no network.
     const permits = local.decision === 'allow' || local.decision === 'observe';
-    if (!permits) return local; // denied/escalated locally, no network
+    if (!permits) {
+      reportLocalDecision(action, local.decision, local.reasonCode); // fire-and-forget — see above
+      return local; // denied/escalated locally, no network
+    }
     if (amount > 0 && sealValueActions) return authorize(input); // seal value action remotely (allow or observe)
+    reportLocalDecision(action, local.decision, local.reasonCode); // non-value permit — fire-and-forget
     return local; // non-value permit — local is sufficient
   }
 
@@ -444,6 +539,12 @@ export function createGuard(opts = {}) {
    * Like guardTool, but evaluates LOCALLY against a policy bundle instead of calling
    * the gate — cooperative-mode, low-latency governance (spec §9.2). Fails CLOSED:
    * any error during local evaluation throws GovernanceBlocked, never allows.
+   *
+   * Unlike `guardTool()`'s default local-first path (`authorizeLocal()`), this one makes
+   * NO network call of any kind, ever — that is its entire purpose (pure-offline,
+   * cooperative-mode use). It does NOT report to /policy/decisions/local, so a verdict
+   * decided this way has NO central audit trail at all, by design — a deliberate,
+   * pre-existing tradeoff this package leaves unchanged.
    *
    * @param {string} action
    * @param {(args:any, decision:any)=>any} handler
@@ -514,7 +615,7 @@ export function createGuard(opts = {}) {
    * the DIDs, §4.1.2). Returns { hello, prove } to drive the exchange:
    *   const hs = guard.handshake();
    *   const { nonceA, message } = hs.hello();           // → send HELLO to the Service
-   *   const { sigA, handshakeId } = hs.prove({ nonceA, challenge });  // verifies the Service, → send PROVE
+   *   const { sigA, handshakeId } = await hs.prove({ nonceA, challenge });  // verifies the Service, → send PROVE
    * `prove` throws HandshakeFailed if the Service's CHALLENGE does not verify.
    */
   function handshake() {
@@ -523,7 +624,7 @@ export function createGuard(opts = {}) {
         const nonceA = crypto.randomUUID();
         return { nonceA, message: { fromDid: agentDid, nonceA, protoVersion: '1.0' } };
       },
-      prove({ nonceA, challenge } = {}) {
+      async prove({ nonceA, challenge } = {}) {
         const { toDid, nonceB, sigB, handshakeId } = challenge ?? {};
         if (!toDid || !nonceB || !sigB) throw new Error('malformed CHALLENGE');
         if (!verifyDidSignature(toDid, nonceA, sigB)) {
@@ -531,7 +632,7 @@ export function createGuard(opts = {}) {
           e.name = 'HandshakeFailed';
           throw e;
         }
-        return { handshakeId, sigA: sign(nonceB), remoteDid: toDid };
+        return { handshakeId, sigA: await keyProvider.signHandshakeNonce(nonceB), remoteDid: toDid };
       },
     };
   }
@@ -700,7 +801,7 @@ export function createGuard(opts = {}) {
     const res = await fetch(`${base}/agent-identity/${encodeURIComponent(ref)}/verify-key`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ signature: sign(challenge) }),
+      body: JSON.stringify({ signature: await keyProvider.signKeyControlChallenge(challenge) }),
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) {
@@ -711,10 +812,10 @@ export function createGuard(opts = {}) {
     return body?.data ?? { verified: true };
   }
 
-  /** Sign a BYOK challenge with the agent's key (hex) — for integrators who submit verify-key themselves. */
-  function signChallenge(challenge) {
+  /** Sign a BYOK challenge with the agent's key — for integrators who submit verify-key themselves. */
+  async function signChallenge(challenge) {
     if (!challenge) throw new Error('signChallenge requires the challenge nonce');
-    return sign(challenge);
+    return keyProvider.signKeyControlChallenge(challenge);
   }
 
   return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, proof, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid, executionAdapter: defaultExecutionAdapter };

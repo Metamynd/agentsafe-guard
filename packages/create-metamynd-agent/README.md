@@ -236,6 +236,8 @@ METAMYND_PASSWORD='…' npx create-metamynd-agent --yes …
 | `--merchants <a,b>` | — | any |
 | `--byok` | — | generate the keypair locally, provision + prove control |
 | `--public-key <hex>` | — | BYOK with a key you already hold (you prove control yourself) |
+| `--daemon-socket <p>` | — | `--byok` via an already-running agentsafe-signer daemon instead of locally (needs `--daemon-admin-socket` too) |
+| `--daemon-admin-socket <p>` | — | that daemon's admin socket, for `generate-key` |
 | `--out <dir>` | — | `./<agent-slug>` |
 | `--yes`, `-y` | — | non-interactive |
 
@@ -284,10 +286,28 @@ npx create-metamynd-agent --byok --email you@example.com --name "Support Bot"
 ```
 
 Generates an Ed25519 keypair **on your machine**, provisions the agent with only the public key, then
-proves control (signs the one-time challenge → `verify-key`). MetaMynd never sees the private key. The
-generated private key is written into `agent.metamynd.json` (gitignored). Pass `--public-key <hex>`
-instead to register a key you already hold elsewhere — then you complete `verify-key` yourself (the CLI
-prints the challenge + endpoint).
+proves control (signs the one-time challenge → `verify-key`). MetaMynd never sees the private key. By
+default the generated private key is written into `agent.metamynd.json` (gitignored) — the same
+process this CLI runs in holds it, at least briefly. Pass `--public-key <hex>` instead to register a
+key you already hold elsewhere — then you complete `verify-key` yourself (the CLI prints the challenge
++ endpoint).
+
+### Keeping the key out of this process entirely (`--daemon-socket`)
+
+If you already have an [agentsafe-signer](../agentsafe-signer/README.md) daemon running for this
+agent (`agentsafe-signer start --admin`, per its own install guide), point `--byok` at it instead:
+
+```bash
+npx create-metamynd-agent --byok --daemon-socket ./.agentsafe-signer/signer.sock \
+  --daemon-admin-socket ./.agentsafe-signer/signer-admin.sock \
+  --email you@example.com --name "Support Bot"
+```
+
+The daemon generates the key and signs the `verify-key` challenge itself — the private key never
+enters this CLI's process at all, not even briefly. `agent.metamynd.json` gets `keyProvider: 'daemon'`
++ `daemonSocketPath` instead of a plaintext key (see `@metamynd/agentsafe-guard`'s `key-providers.mjs`
+for how the scaffolded guard resolves that). Requires both flags together, and only applies when no
+`--public-key` is given (an external key has nothing for the daemon to generate).
 
 ## Delegated issuance (`--request` / `--claim`)
 
