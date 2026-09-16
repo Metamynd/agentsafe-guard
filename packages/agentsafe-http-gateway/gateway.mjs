@@ -33,8 +33,11 @@ export function defaultExtractGovernance(req) {
 
 /**
  * The value fields the canonical signed message actually covers (policy-core buildAuthMessage:
- * `agentDid|action|amount|currency|merchant|nonce|issuedAt`). These — and only these — are the
- * fields a signature can be said to authorize, so these are what we bind the payload to.
+ * `agentDid|action|amount|currency|merchant|resource|nonce|issuedAt`). These — and only these —
+ * are the fields a signature can be said to authorize, so these are what we bind the payload to.
+ * `resource` is deliberately excluded from BOUND_FIELDS below — payload binding is about the
+ * HTTP body's value fields (amount/merchant), not resource scoping, which the mandate/resource-
+ * grant layer already governs independently.
  */
 export const BOUND_FIELDS = ['amount', 'currency', 'merchant'];
 
