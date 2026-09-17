@@ -54,6 +54,22 @@ export function buildAuthMessage(f: AuthMessageFields): string {
 }
 
 /**
+ * The PRE-`resource` (seven-field) canonical message this repo signed before the 7→8 field
+ * change documented above. Exists ONLY so the gate can tell a genuinely-invalid signature
+ * apart from a still-valid keypair on an SDK old enough to predate `resource` (see
+ * mandate.service.ts's SIGNATURE_INVALID handling: a request that verifies against THIS but
+ * not `buildAuthMessage` gets a `CLIENT_PROTOCOL_VERSION_UNSUPPORTED` diagnosis instead of
+ * the generic, misleading `SIGNATURE_INVALID` a rotated/broken key also produces). A match
+ * here is NEVER treated as authorization — the caller still blocks either way; the old
+ * message has no slot for a signed resource-scope commitment, so it cannot prove one.
+ */
+export function buildLegacyAuthMessageV1(f: Omit<AuthMessageFields, 'resource'>): string {
+  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? '', f.nonce, f.issuedAt]
+    .map((v) => escapeField(String(v)))
+    .join('|');
+}
+
+/**
  * Canonical signed-message builder for a local-mode guard's "local decision receipt"
  * (docs: local-first SDK mode audit visibility). Signed by the agent's own key over
  * agentDid|action|decision|reasonCode|nonce|issuedAt — a DIFFERENT field shape than

@@ -211,10 +211,25 @@ function isNonScalar(v) {
  * safe), but a future version will refuse to start instead of silently guessing. Set
  * `valueFields` explicitly (even to the current default) to silence it.
  *
+ * resolveCredential — OPTIONAL: `({ request, route, decision }) => Promise<{header, value} | null>`,
+ * called ONLY on a PERMIT (after the guard already returned allow/observe), right before
+ * `forward(req)`. When it resolves a `{header, value}` pair, that header is spliced into a
+ * SHALLOW-CLONED copy of `req.headers` before forwarding — the original `req` object passed to
+ * `handle()` is never mutated. This is the Trusted Execution Gateway hook (MetaMynd Governed
+ * Execution scope, Module G — Credential Vault): it lets an operator inject an upstream
+ * credential the AGENT never sees, resolved server-side from `request.authorizationId` (the
+ * signed request's own claimed authorization — see agentsafe-mcp-guard's `requireAuthorization`
+ * doc for where that field comes from). Omitted (the default) → today's exact behavior, zero
+ * change for every existing consumer of this package. A `resolveCredential` failure is logged
+ * and swallowed, NOT a reason to block the call: forwarding without the header just means the
+ * upstream legitimately rejects the request for lack of auth, which is a safe, honest failure
+ * mode, not a bypass — the credential release itself was already gated (by the vault, not by
+ * this package) on a valid gateway token + a currently-active Action Passport.
+ *
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
  */
-export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload } = {}) {
+export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential } = {}) {
   if (typeof forward !== 'function') throw new Error('createHttpGateway requires a forward(req) function');
 
   // Deprecation window: a protected route with an `action` but no EXPLICIT binding decision
@@ -303,7 +318,22 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     if (decision?.decision !== 'allow' && decision?.decision !== 'observe') {
       return { status: 403, body: { decision: decision?.decision ?? 'block', reasonCode: decision?.reasonCode ?? 'BLOCKED' }, governance: decision };
     }
-    const upstream = await forward(req);
+
+    // Trusted Execution Gateway hook (Module G): resolve an upstream credential the agent
+    // never sees, and inject it into a CLONE of the outbound headers — never the original req.
+    let forwardReq = req;
+    if (typeof resolveCredential === 'function') {
+      try {
+        const cred = await resolveCredential({ request, route, decision });
+        if (cred && cred.header && cred.value) {
+          forwardReq = { ...req, headers: { ...(req.headers ?? {}), [cred.header]: cred.value } };
+        }
+      } catch (err) {
+        console.warn('[gateway] resolveCredential failed (forwarding without an injected credential):', err?.message ?? err);
+      }
+    }
+
+    const upstream = await forward(forwardReq);
     return { ...upstream, governance: decision };
   };
 }

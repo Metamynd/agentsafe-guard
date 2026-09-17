@@ -50,6 +50,20 @@ const REQUIRE_AUTHORIZATION = process.env.AGENTSAFE_REQUIRE_AUTHORIZATION !== 'f
 // POST /transfer-funds passed through, HTTP 200) — set this when the routes file is meant to be
 // a complete allow-list, not a partial one.
 const DENY_BY_DEFAULT = process.env.AGENTSAFE_DENY_BY_DEFAULT === 'true';
+// Credential Vault (Module G) — OPTIONAL. Unset CREDENTIAL_VAULT_URL → no resolveCredential
+// hook is built at all, identical to every version of this file before this feature existed.
+//
+// No CREDENTIAL_VAULT_OWNER_ID here — deliberately. This gateway process does not know, and
+// does not need to know, which tenant a given call is for: the vault derives that itself from
+// the Action Passport bound to the request's own claimed authorizationId, so ONE shared gateway
+// deployment correctly serves MANY tenants (each running many agents) against the same
+// connector, and a misconfigured or compromised gateway process can never misroute — or spoof —
+// which tenant's credential a call receives. See credential-vault.service.ts's
+// resolveForGateway for the full design.
+const CREDENTIAL_VAULT_URL = (process.env.CREDENTIAL_VAULT_URL || '').replace(/\/$/, '');
+const CREDENTIAL_VAULT_GATEWAY_TOKEN = process.env.CREDENTIAL_VAULT_GATEWAY_TOKEN || '';
+const CREDENTIAL_VAULT_CONNECTOR_ID = process.env.CREDENTIAL_VAULT_CONNECTOR_ID || '';
+const CREDENTIAL_VAULT_HEADER_NAME = process.env.CREDENTIAL_VAULT_HEADER_NAME || 'Authorization';
 
 function loadRoutes() {
   try {
@@ -73,6 +87,46 @@ function readBody(req) {
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
+}
+
+/**
+ * Build the Credential Vault resolveCredential hook (Module G), or null when
+ * CREDENTIAL_VAULT_URL is unset (the default — feature off, zero behavior change).
+ * Calls the backend's gateway-only `/credential-vault/resolve` endpoint, authenticated
+ * by CREDENTIAL_VAULT_GATEWAY_TOKEN (a secret this process holds and the agent never
+ * does — see credential-vault.service.ts's resolveForGateway for why that extra factor
+ * exists). Keyed off `request.authorizationId`, the signed request's own claimed
+ * authorization — present only when the caller went through `requireAuthorization`'s
+ * claim flow first, which is exactly the "currently-authorized action" the vault requires.
+ *
+ * No `ownerId` is ever sent — the vault derives the tenant server-side from the Action
+ * Passport, so this same code path is correct whether this gateway serves one tenant or
+ * many, without this process ever holding or guessing a tenant identity.
+ */
+function buildResolveCredential() {
+  if (!CREDENTIAL_VAULT_URL) return undefined;
+  if (!CREDENTIAL_VAULT_GATEWAY_TOKEN || !CREDENTIAL_VAULT_CONNECTOR_ID) {
+    console.warn(
+      '[gateway] CREDENTIAL_VAULT_URL is set but CREDENTIAL_VAULT_GATEWAY_TOKEN / ' +
+      'CREDENTIAL_VAULT_CONNECTOR_ID are not both set — the credential vault hook is ' +
+      'DISABLED, calls will forward with no injected credential.',
+    );
+    return undefined;
+  }
+  return async function resolveCredential({ request }) {
+    const authorizationId = request?.authorizationId;
+    if (!authorizationId) return null; // no claimed authorization to resolve against
+    const res = await fetch(`${CREDENTIAL_VAULT_URL}/resolve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-credential-vault-token': CREDENTIAL_VAULT_GATEWAY_TOKEN },
+      body: JSON.stringify({ connectorId: CREDENTIAL_VAULT_CONNECTOR_ID, authorizationId }),
+    });
+    if (!res.ok) return null; // vault refused (or is unreachable) — forward without the header
+    const body = await res.json().catch(() => null);
+    const value = body?.data?.value;
+    if (!value) return null;
+    return { header: CREDENTIAL_VAULT_HEADER_NAME, value };
+  };
 }
 
 /** fetch-based forwarder to the configured upstream (preserves method, path, headers, body). */
@@ -116,7 +170,11 @@ async function main() {
       `to be a complete allow-list.`
     );
   }
-  const gateway = createHttpGateway({ guard, routes, forward: forwardToUpstream, denyByDefault: DENY_BY_DEFAULT });
+  const resolveCredential = buildResolveCredential();
+  if (resolveCredential) {
+    console.log(`[gateway] Credential Vault hook ENABLED → ${CREDENTIAL_VAULT_URL} (connector "${CREDENTIAL_VAULT_CONNECTOR_ID}", header "${CREDENTIAL_VAULT_HEADER_NAME}")`);
+  }
+  const gateway = createHttpGateway({ guard, routes, forward: forwardToUpstream, denyByDefault: DENY_BY_DEFAULT, resolveCredential });
 
   const server = http.createServer(async (req, res) => {
     try {

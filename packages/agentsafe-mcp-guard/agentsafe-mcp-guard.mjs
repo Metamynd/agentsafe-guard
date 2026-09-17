@@ -152,13 +152,28 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
 
   /** Evaluate the agent's bundle against the request via policy-core (signed fields last). */
   function verdictFromBundle(bundle, req) {
-    const { agentDid, action, amount = 0, currency = 'USD', merchant = '', itinerary = {}, cumulativeSpend = amount, now } = req;
-    const mandate = (bundle.mandates ?? []).find((m) => m.action === action)?.document;
+    const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, itinerary = {}, cumulativeSpend = amount, now } = req;
+    const mandates = bundle.mandates ?? [];
+    const mandate = mandates.find((m) => m.action === action)?.document;
+    // No mandate covers this action at all — refuse outright, matching mandate.service.ts's
+    // own first check (before signature/standards/anything else). Without this, `evaluate()`
+    // treats an omitted `mandate` as "skip the mandate layer" (its own documented, intentional
+    // behavior for a caller that never resolves one at all) — found live: an ungranted action
+    // with no Standard/SOP molecule happening to also catch it was silently ALLOWED here,
+    // while the hosted gate and the agent SDK both correctly refused the identical request.
+    if (!mandate) {
+      return { decision: 'block', reasonCode: mandates.length > 0 ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE', authorizationId: null, remaining: null, proofRef: null };
+    }
     return evaluate({
       standards: (bundle.standards ?? []).map((s) => ({ standardKey: s.key, document: s.document })),
       sops: (bundle.sops ?? []).map((s) => ({ standardKey: `sop:${s.id}`, document: s.document })),
       mandate,
-      context: applySignedLast(itinerary, { action, agentDid, amount }),
+      // currency/merchant/resource are signed fields, same as action/agentDid/amount above —
+      // omitting them here (found live: they were) means a currency-scoped amount-over/
+      // cumulative-over Standards/SOP atom always sees currency as absent and fires closed
+      // (SOP_SPEND_CAP on a genuinely in-cap request), and a resource-scope atom never runs
+      // at all. Mirrors mandate.service.ts's ruleCtx (PR #588), the parity target for this.
+      context: applySignedLast(itinerary, { action, agentDid, amount, currency, merchant, resource }),
       mandateRequest: mandate
         ? {
             target: action,
@@ -172,6 +187,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
               // — omitting this would make EVERY unit-bearing cap fail regardless of amount.
               // Defaults to 'USD', matching verifyRequest()'s own default for this field.
               'mm:currency': currency,
+              // Unprefixed `resource` (not `mm:resource`) to match the constraint's own
+              // leftOperand (ResourceService.scopeConstraint()) — mirrors mandate.service.ts.
+              resource,
             }),
           }
         : undefined,
@@ -182,17 +200,19 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * Verify an agent's presented signed authorize request, then re-evaluate policy
    * locally against the agent's issuer-hosted bundle. Fails CLOSED: any bad
    * signature, staleness, fetch error, or evaluation error returns a block.
-   * @param {{agentDid,action,amount?,currency?,merchant?,itinerary?,nonce,issuedAt,signature}} signed
+   * @param {{agentDid,action,amount?,currency?,merchant?,resource?,itinerary?,nonce,issuedAt,signature}} signed
    * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
   async function verifyRequest(signed = {}) {
     try {
-      const { agentDid, action, amount = 0, currency = 'USD', merchant = '', nonce, issuedAt, signature } = signed;
+      const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature } = signed;
       if (!agentDid || !action || !nonce || !issuedAt || !signature) {
         return { decision: 'block', reasonCode: 'MALFORMED_REQUEST' };
       }
       // 1. Signature over the canonical message (§7.3), verified via key-in-DID (§4.1.2).
-      const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, nonce, issuedAt });
+      // `resource` MUST be included — it's the 8th signed field (canonical.ts); omitting it
+      // here (found live: it was) rejects every genuinely-valid resource-bearing signature.
+      const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, resource, nonce, issuedAt });
       if (!verifyDidSignature(agentDid, message, signature)) {
         return { decision: 'block', reasonCode: 'SIGNATURE_INVALID' };
       }
