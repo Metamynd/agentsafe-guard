@@ -104,7 +104,11 @@ Answer a few prompts (API, owner email/password, agent name, scope, per-transact
 
 ```
 my-agent/
-├─ agent.metamynd.json   # portable guard config — HOLDS THE AGENT SECRET KEY (gitignored)
+├─ agent.metamynd.json   # portable guard config — HOLDS THE AGENT SECRET KEY (gitignored). This
+│                         # is the freshly-minted key from THIS scaffold, not a re-download — the
+│                         # dashboard's own "Redownload config" for an EXISTING agent never re-issues
+│                         # the key into a downloaded file (it's excluded there by design). --byok /
+│                         # --daemon-socket instead keep the key off this CLI's process entirely.
 ├─ index.mjs             # runnable example: signs + calls ./gateway; guardTool() here is a
 │                         # fast local pre-check, NOT the enforcement boundary
 ├─ package.json          # depends on @metamynd/agentsafe-guard
@@ -220,10 +224,12 @@ METAMYND_PASSWORD='…' npx create-metamynd-agent --yes …
 | Flag | Env | Default |
 |---|---|---|
 | `--harness` | — | off (no login/KYB/network at all; free local governance — see above) |
+| `--gateway` | — | off — `--harness` only; ALSO scaffold a second local process (still zero network, zero account) that independently re-verifies every request via the real `@metamynd/agentsafe-mcp-guard`. Does not close nonce replay/cumulative spend — see the generated `harness-gateway/README.md#--gateway`. |
 | `--sandbox` | — | off (skips login/KYB; shared sandbox agent, still hosted) |
 | `--config <file>` | — | a JSON policy file — see [Policy config file](#policy-config-file---config) |
 | `--no-gateway` | — | off — hosted flow only; skips the default separate tool gateway (see above) |
-| `--gateway-port <n>` | — | `4401` — hosted flow only, the gateway process's port |
+| `--gateway-port <n>` | — | `4401` — hosted flow or `--harness --gateway`, the gateway process's port |
+| `--force`, `-f` | — | off — scaffold into a non-empty directory, overwriting existing files |
 | `--port <n>` | — | `4400` — `--harness` only, the local dashboard's port |
 | `--api <url>` | `METAMYND_API` | `https://metamynd.ai/api/v1` |
 | `--email <email>` | `METAMYND_EMAIL` | — (required) |

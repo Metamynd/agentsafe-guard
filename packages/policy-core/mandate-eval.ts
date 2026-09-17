@@ -50,9 +50,19 @@ const REASON_BY_OPERAND: Record<string, string> = {
   'mm:counterparty': 'COUNTERPARTY_NOT_ALLOWED',
 };
 
-function reasonFor(constraint: Constraint | undefined): string {
+/** Operands where a MISSING value (never supplied) means something different from a
+ *  PRESENT-but-over-cap one: the gate couldn't establish an amount to check at all, not that
+ *  it checked one and it was too big. Conflating the two under SPEND_LIMIT_EXCEEDED told an
+ *  operator a cap fired when really no amount was ever available to compare against it. */
+const AMOUNT_OPERANDS = new Set(['mm:payAmount', 'mm:cumulativeSpend']);
+
+function reasonFor(constraint: Constraint | undefined, req: MandateRequest): string {
   if (!constraint) return 'CONSTRAINT_FAILED';
-  return REASON_BY_OPERAND[constraint.leftOperand] ?? `CONSTRAINT_FAILED:${constraint.leftOperand}`;
+  const { leftOperand } = constraint;
+  if (AMOUNT_OPERANDS.has(leftOperand) && !Object.prototype.hasOwnProperty.call(req.values, leftOperand)) {
+    return 'AMOUNT_NOT_DETERMINABLE';
+  }
+  return REASON_BY_OPERAND[leftOperand] ?? `CONSTRAINT_FAILED:${leftOperand}`;
 }
 
 /**
@@ -208,7 +218,7 @@ export function evaluateMandate(mandate: Mandate, req: MandateRequest): MandateR
   const firstFail = (perms[0].constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
   return {
     decision: firstFail?.onFail ?? 'block',
-    reasonCode: reasonFor(firstFail),
+    reasonCode: reasonFor(firstFail, req),
     matched: { kind: 'permission', target: perms[0].target, constraint: firstFail },
   };
 }

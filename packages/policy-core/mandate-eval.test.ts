@@ -197,6 +197,10 @@ describe('evaluateMandate — fail-closed on unresolved operands', () => {
   it('blocks when a required operand is missing (never accidentally allows)', () => {
     const r = evaluateMandate(flightMandate, req({ 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus' }));
     expect(r.decision).toBe('block'); // mm:payAmount absent -> lteq NaN is false
+    // Distinct from a present-but-over-cap amount: no value was ever available to compare
+    // against the cap, so SPEND_LIMIT_EXCEEDED (which implies the cap actually fired) would
+    // misdiagnose it.
+    expect(r.reasonCode).toBe('AMOUNT_NOT_DETERMINABLE');
   });
 });
 

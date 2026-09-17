@@ -14,7 +14,7 @@
 //   npx create-metamynd-agent
 //   npx create-metamynd-agent --api http://localhost:9926/api/v1 --email you@x.com \
 //       --name "Support Bot" --scope flight-purchase --per-txn-max 500 --out ./support-bot --yes
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, chmodSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import readline from 'node:readline';
 import crypto from 'node:crypto';
@@ -71,7 +71,10 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // is the actual fix: requires amount/merchant specifically, whenever the signature names a real
 // value for them. Re-tested live and closed same day; ^0.3.0 here would still resolve to the
 // broken version.
-const GATEWAY_VERSION = '^0.4.0';
+// 0.5.0 adds the OPTIONAL Credential Vault `resolveCredential` hook on createHttpGateway (Module
+// G) — additive and backward-compatible (every existing consumer sees zero behavior change), but
+// the floor must still cover the real current version per this repo's own package-version check.
+const GATEWAY_VERSION = '^0.5.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -438,7 +441,7 @@ async function apiPost(base, path, body, token) {
  * it — the same shape of gap --harness's README documents. See exampleIndex() below, which is
  * what the real (non-sandbox) flow scaffolds by default instead.
  */
-function exampleIndexNoGateway(scope, perTxnMax) {
+function exampleIndexNoGateway(scope, perTxnMax, currency, merchant) {
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
   return `// index.mjs — your agent, governed by MetaMynd/AgentSafe.
@@ -464,7 +467,7 @@ const gatedBookFlight = guard.guardTool(
   bookFlight,
   (a) => ({                                     // map tool args → gate inputs
     amount: a.amount,
-    currency: 'USD',
+    currency: '${currency}',
     merchant: a.merchant,
     context: { tool: 'book-flight', riskLevel: a.riskLevel ?? 'low' },
   }),
@@ -481,7 +484,7 @@ const gatedRaiseOwnLimit = guard.guardTool(
   raiseOwnLimit,
   (a) => ({
     amount: a.amount,
-    currency: 'USD',
+    currency: '${currency}',
     merchant: a.merchant,
     context: { tool: 'permissions-update' },
   }),
@@ -494,7 +497,7 @@ const rule = (n) => '  ' + '-'.repeat(n);
 // Plain-English meaning for the reason codes this demo can produce.
 const WHY = {
   AUTHORIZED: 'inside the mandate and under the SOP spend cap',
-  SOP_SPEND_CAP: 'your SOP caps a single transaction at $${perTxnMax}',
+  SOP_SPEND_CAP: 'your SOP caps a single transaction at ${currency} ${perTxnMax}',
   RISK_REVIEW: 'your SOP sends high-risk actions to a human first',
   MERCHANT_NOT_ALLOWED: 'the mandate lists which merchants this agent may pay',
   // Both say the same thing from where you are standing: the mandate does not cover that
@@ -525,7 +528,7 @@ console.log(dim('   4. each attempt is signed here, then decided by MetaMynd rem
 console.log(dim('   5. your tool runs ONLY if that decision is ALLOW'));
 console.log('');
 console.log(dim('  scope  ${scope}'));
-console.log(dim('  cap    $${perTxnMax} per transaction, set by your SOP'));
+console.log(dim('  cap    ${currency} ${perTxnMax} per transaction, set by your SOP'));
 
 // ---------------------------------------------------------------- 3. THE STEPS
 async function attempt(n, intent, args, tool = gatedBookFlight) {
@@ -553,13 +556,13 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
 
 console.log('');
 console.log(rule(66));
-await attempt(1, 'a $${under} booking, low risk. Expected to pass.', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'low' });
-await attempt(2, 'a $${over} booking, deliberately over the cap.', { amount: ${over}, merchant: 'skyward-air', riskLevel: 'low' });
-await attempt(3, 'a $${under} booking, but flagged high risk.', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'high' });
+await attempt(1, 'a ${currency} ${under} booking, low risk. Expected to pass.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
+await attempt(2, 'a ${currency} ${over} booking, deliberately over the cap.', { amount: ${over}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
+await attempt(3, 'a ${currency} ${under} booking, but flagged high risk.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'high' });
 await attempt(
   4,
   'the agent stops booking flights and asks to raise its OWN limit.',
-  { amount: 100000, merchant: 'skyward-air' },
+  { amount: 100000, currency: '${currency}', merchant: '${merchant}' },
   gatedRaiseOwnLimit,
 );
 console.log('');
@@ -595,7 +598,7 @@ console.log('');
  * directly: it only exists in ./gateway, which independently re-verifies every request against
  * this agent's own policy bundle before it runs, and holds any real credentials the tool needs.
  */
-function exampleIndex(scope, perTxnMax, gatewayPort) {
+function exampleIndex(scope, perTxnMax, gatewayPort, currency, merchant) {
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
   return `// index.mjs — your agent, governed by MetaMynd/AgentSafe.
@@ -620,7 +623,7 @@ async function bookFlightViaGateway(args, decision) {
   const signed = await guard.buildSignedRequest({
     action: '${scope}',
     amount: args.amount,
-    currency: 'USD',
+    currency: args.currency ?? '${currency}',
     merchant: args.merchant,
     context: { tool: 'book-flight', riskLevel: args.riskLevel ?? 'low' },
   });
@@ -647,7 +650,7 @@ const gatedBookFlight = guard.guardTool(
   bookFlightViaGateway,
   (a) => ({                                     // map tool args → gate inputs
     amount: a.amount,
-    currency: 'USD',
+    currency: a.currency ?? '${currency}',
     merchant: a.merchant,
     context: { tool: 'book-flight', riskLevel: a.riskLevel ?? 'low' },
   }),
@@ -664,7 +667,7 @@ const gatedRaiseOwnLimit = guard.guardTool(
   raiseOwnLimit,
   (a) => ({
     amount: a.amount,
-    currency: 'USD',
+    currency: a.currency ?? '${currency}',
     merchant: a.merchant,
     context: { tool: 'permissions-update' },
   }),
@@ -711,7 +714,7 @@ console.log(dim('   5. the gateway independently re-verifies before your tool ru
 console.log(dim('   6. there is no local bookFlight() to call directly - only the gateway has it'));
 console.log('');
 console.log(dim('  scope    ${scope}'));
-console.log(dim('  cap      $${perTxnMax} per transaction, set by your SOP'));
+console.log(dim('  cap      ${currency} ${perTxnMax} per transaction, set by your SOP'));
 console.log(dim('  gateway  ' + GATEWAY + '  (run it in a separate terminal - see ./gateway)'));
 
 // ---------------------------------------------------------------- 3. THE STEPS
@@ -740,13 +743,13 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
 
 console.log('');
 console.log(rule(66));
-await attempt(1, 'a $${under} booking, low risk. Expected to pass.', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'low' });
-await attempt(2, 'a $${over} booking, deliberately over the cap.', { amount: ${over}, merchant: 'skyward-air', riskLevel: 'low' });
-await attempt(3, 'a $${under} booking, but flagged high risk.', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'high' });
+await attempt(1, 'a ${currency} ${under} booking, low risk. Expected to pass.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
+await attempt(2, 'a ${currency} ${over} booking, deliberately over the cap.', { amount: ${over}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
+await attempt(3, 'a ${currency} ${under} booking, but flagged high risk.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'high' });
 await attempt(
   4,
   'the agent stops booking flights and asks to raise its OWN limit.',
-  { amount: 100000, merchant: 'skyward-air' },
+  { amount: 100000, currency: '${currency}', merchant: '${merchant}' },
   gatedRaiseOwnLimit,
 );
 console.log('');
@@ -1108,11 +1111,16 @@ and \`demo/duffel-mcp-gateway\` in the AgentSafe repo for the fuller pattern thi
 `;
 }
 
-function writeFileSafe(dir, name, content, force = false) {
+function writeFileSafe(dir, name, content, force = false, mode) {
   const p = join(dir, name);
   const exists = existsSync(p);
   if (exists && !force) { console.log(`  ${c.yellow('skip')}  ${name} ${c.dim('(exists)')}`); return; }
-  writeFileSync(p, content);
+  // `mode` (e.g. 0o600 for a private-key-bearing file) only narrows perms at CREATE time —
+  // writeFileSync ignores its own `mode` option on an existing file, so an --force overwrite
+  // needs an explicit chmod or a stale world-readable mode from the file's first creation
+  // would otherwise survive untouched.
+  writeFileSync(p, content, mode !== undefined ? { mode } : undefined);
+  if (mode !== undefined) chmodSync(p, mode);
   console.log(`  ${exists ? c.yellow('overwrite') : c.green('create')} ${name}`);
 }
 
@@ -1146,12 +1154,12 @@ function assertScaffoldTarget(outDir, force) {
  * enforcement boundary. Off for --sandbox (shared demo identity, never real credentials
  * anyway) and --no-gateway (opt out, e.g. you're already running your own separate gateway).
  */
-function scaffoldProject({ outDir, config, slug, scope, perTxnMax, sandbox, withGateway, gatewayPort = DEFAULT_GATEWAY_PORT, force = false }) {
+function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'USD', merchant = 'skyward-air', sandbox, withGateway, gatewayPort = DEFAULT_GATEWAY_PORT, force = false }) {
   assertScaffoldTarget(outDir, force);
   console.log(`\n  ${c.b('Scaffolding')} ${c.dim(outDir)}`);
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-  writeFileSafe(outDir, 'agent.metamynd.json', JSON.stringify(config, null, 2) + '\n', force);
-  writeFileSafe(outDir, 'index.mjs', withGateway ? exampleIndex(scope, perTxnMax, gatewayPort) : exampleIndexNoGateway(scope, perTxnMax), force);
+  writeFileSafe(outDir, 'agent.metamynd.json', JSON.stringify(config, null, 2) + '\n', force, 0o600);
+  writeFileSafe(outDir, 'index.mjs', withGateway ? exampleIndex(scope, perTxnMax, gatewayPort, currency, merchant) : exampleIndexNoGateway(scope, perTxnMax, currency, merchant), force);
   writeFileSafe(outDir, 'package.json', examplePackageJson(slug), force);
   writeFileSafe(outDir, '.gitignore', gitignore(), force);
   writeFileSafe(outDir, 'README.md', exampleReadme(slug, scope, withGateway, gatewayPort, config.keyProvider === 'daemon'), force);
@@ -1792,7 +1800,7 @@ setInterval(refresh, 3000);
 `;
 }
 
-function harnessIndexFile(scope, perTxnMax, port, withGateway, gatewayPort) {
+function harnessIndexFile(scope, perTxnMax, port, withGateway, gatewayPort, currency, merchant) {
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
   return `// index.mjs — your agent, governed entirely on this machine. No account, no network call
@@ -1831,7 +1839,7 @@ const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://localhost:${gatewayPo
 // issuer): it builds and signs the same canonical message a real gate would verify, entirely
 // offline, using this agent's own did:key — the gateway verifies that signature for itself.
 async function callGateway(path, action, args) {
-  const signed = await guard.buildSignedRequest({ action, amount: args.amount, currency: 'USD', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel ?? 'low' } });
+  const signed = await guard.buildSignedRequest({ action, amount: args.amount, currency: args.currency ?? '${currency}', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel ?? 'low' } });
   const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ signed, args }) });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -1854,6 +1862,7 @@ const gatedBookFlight = guard.guardToolLocal(
   ${withGateway ? `(args) => callGateway('/book-flight', '${scope}', args)` : 'bookFlight'},
   (a) => ({                                     // map tool args → gate inputs
     amount: a.amount,
+    currency: a.currency ?? '${currency}',
     merchant: a.merchant,
     context: { tool: 'book-flight', riskLevel: a.riskLevel ?? 'low' },
   }),
@@ -1869,7 +1878,7 @@ async function raiseOwnLimit(args) {
 const gatedRaiseOwnLimit = guard.guardToolLocal(
   'permissions.update',                       // an action NOT in the mandate
   ${withGateway ? `(args) => callGateway('/raise-limit', 'permissions.update', args)` : 'raiseOwnLimit'},
-  (a) => ({ amount: a.amount, merchant: a.merchant, context: { tool: 'permissions-update' } }),
+  (a) => ({ amount: a.amount, currency: a.currency ?? '${currency}', merchant: a.merchant, context: { tool: 'permissions-update' } }),
   getBundle,
 );
 
@@ -1879,7 +1888,7 @@ const rule = (n) => '  ' + '-'.repeat(n);
 
 const WHY = {
   AUTHORIZED: 'inside the mandate and under the SOP spend cap',
-  SOP_SPEND_CAP: 'your SOP caps a single transaction at $${perTxnMax}',
+  SOP_SPEND_CAP: 'your SOP caps a single transaction at ${currency} ${perTxnMax}',
   RISK_REVIEW: 'your SOP sends high-risk actions to a human first',
   MERCHANT_NOT_ALLOWED: 'the mandate lists which merchants this agent may pay',
   NO_PERMISSION_FOR_ACTION: 'the mandate never granted this action - at any amount',
@@ -1925,14 +1934,14 @@ console.log('  for something never granted at all - the one a prompt could not h
 console.log('  because the decision is not made inside your program, and not on a server either.');
 console.log('');
 console.log(dim('  scope  ${scope}'));
-console.log(dim('  cap    $${perTxnMax} per transaction, from ./metamynd-rules.json'));
+console.log(dim('  cap    ${currency} ${perTxnMax} per transaction, from ./metamynd-rules.json'));
 
 console.log('');
 console.log(rule(66));
-await attempt(1, 'a $${under} booking, low risk. Expected to pass.', '${scope}', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'low' });
-await attempt(2, 'a $${over} booking, deliberately over the cap.', '${scope}', { amount: ${over}, merchant: 'skyward-air', riskLevel: 'low' });
-await attempt(3, 'a $${under} booking, but flagged high risk.', '${scope}', { amount: ${under}, merchant: 'skyward-air', riskLevel: 'high' });
-await attempt(4, 'the agent stops booking flights and asks to raise its OWN limit.', 'permissions.update', { amount: 100000, merchant: 'skyward-air' }, gatedRaiseOwnLimit);
+await attempt(1, 'a ${currency} ${under} booking, low risk. Expected to pass.', '${scope}', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
+await attempt(2, 'a ${currency} ${over} booking, deliberately over the cap.', '${scope}', { amount: ${over}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
+await attempt(3, 'a ${currency} ${under} booking, but flagged high risk.', '${scope}', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'high' });
+await attempt(4, 'the agent stops booking flights and asks to raise its OWN limit.', 'permissions.update', { amount: 100000, currency: '${currency}', merchant: '${merchant}' }, gatedRaiseOwnLimit);
 console.log('');
 console.log(rule(66));
 
@@ -2109,10 +2118,10 @@ async function runHarness(args) {
 
   console.log(`\n  ${c.b('Scaffolding')} ${c.dim(outDir)}`);
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-  writeFileSafe(outDir, 'agent.metamynd.json', JSON.stringify({ agentDid, agentKey: privateKeyHex, mode: 'harness' }, null, 2) + '\n', !!args.force);
+  writeFileSafe(outDir, 'agent.metamynd.json', JSON.stringify({ agentDid, agentKey: privateKeyHex, mode: 'harness' }, null, 2) + '\n', !!args.force, 0o600);
   writeFileSafe(outDir, 'metamynd-rules.json', harnessRulesFile(mandate, sopDocument), !!args.force);
   writeFileSafe(outDir, 'harness-server.mjs', harnessServerFile(), !!args.force);
-  writeFileSafe(outDir, 'index.mjs', harnessIndexFile(scope, perTxnMax, port, withGateway, gatewayPort), !!args.force);
+  writeFileSafe(outDir, 'index.mjs', harnessIndexFile(scope, perTxnMax, port, withGateway, gatewayPort, currency, merchants[0] || 'demo-merchant'), !!args.force);
   writeFileSafe(outDir, 'package.json', harnessPackageJson(slug), !!args.force);
   writeFileSafe(outDir, '.gitignore', gitignore(), !!args.force);
   writeFileSafe(outDir, 'README.md', harnessReadme(slug, scope, port, withGateway, gatewayPort), !!args.force);
@@ -2204,7 +2213,9 @@ async function runRequest(args) {
   const d = res.data;
   const state = { api: base, requestId: d.requestId, claimToken: d.claimToken, byok: !!generated, privateKey: generated?.privateKeyHex ?? null, name, scope, perTxnMax };
   const file = resolve(String(args.out || '.'), REQUEST_STATE_FILE);
-  writeFileSync(file, JSON.stringify(state, null, 2) + '\n');
+  // May carry a BYOK private key (state.privateKey) — same 0600 treatment as agent.metamynd.json.
+  writeFileSync(file, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+  if (existsSync(file)) chmodSync(file, 0o600);
 
   console.log(`  ${c.green('✓')} request ${c.b(d.requestId)} submitted — awaiting ${owner}'s approval`);
   console.log(`  ${c.yellow('⚠ saved the one-time claim token to')} ${file.replace(resolve('.'), '.').replace(/\\/g, '/')} ${c.dim('(secret — do not commit)')}\n`);
@@ -2413,7 +2424,7 @@ async function main() {
   }
 
   // 4. Scaffold + next steps
-  scaffoldProject({ outDir, config, slug, scope, perTxnMax, sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
+  scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency, merchant: merchants[0] || 'demo-merchant', sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
 }
 
 main().catch((e) => fail(e?.stack || e?.message || String(e)));

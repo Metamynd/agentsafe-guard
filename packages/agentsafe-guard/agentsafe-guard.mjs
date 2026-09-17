@@ -297,7 +297,7 @@ export function createGuard(opts = {}) {
    * @param {Array<{standardKey:string,document:object}>} [p.standards] enforced Standards bound to the agent
    * @param {Array<{standardKey:string,document:object}>} [p.sops]      active SOPs assigned to the agent
    * @param {object} [p.mandate]  the ODRL mandate document (omit to skip the mandate layer)
-   * @param {{action:string,amount?:number,merchant?:string,context?:object,cumulativeSpend?:number,now?:string}} p.request
+   * @param {{action:string,amount?:number,currency?:string,merchant?:string,resource?:string,context?:object,cumulativeSpend?:number,now?:string}} p.request
    * @returns {{decision:'allow'|'block'|'escalate',reasonCode:string|null,authorizationId:null,remaining:null,proofRef:null}}
    */
   function evaluateLocally({ contained = null, operatingMode = null, standards = [], sops = [], mandate, request }) {
@@ -310,7 +310,7 @@ export function createGuard(opts = {}) {
       const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
       return { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
     }
-    const { action, amount = 0, currency = 'USD', merchant = '', context = {}, cumulativeSpend = amount, now } = request;
+    const { action, amount = 0, currency = 'USD', merchant = '', resource = null, context = {}, cumulativeSpend = amount, now } = request;
     // Operating-mode autonomy ladder (Phase 2.5b): the trust-driven posture rides as a
     // SIBLING (like `contained`) and biases the edge verdict identically to the gate.
     // READ_ONLY denies a value-bearing action up-front; SUPERVISED/RESTRICTED only
@@ -326,7 +326,11 @@ export function createGuard(opts = {}) {
       standards,
       sops,
       mandate,
-      context: applySignedLast(context, { action, agentDid, amount }),
+      // currency/merchant/resource are signed fields too, same as action/agentDid/amount —
+      // omitting them here means a currency-scoped amount-over/cumulative-over Standards/SOP
+      // atom always sees currency as absent and fires closed. Mirrors mandate.service.ts's
+      // ruleCtx (PR #588) and the same fix in agentsafe-mcp-guard.mjs's verdictFromBundle.
+      context: applySignedLast(context, { action, agentDid, amount, currency, merchant, resource }),
       mandateRequest: mandate
         ? {
             target: action,
@@ -341,6 +345,9 @@ export function createGuard(opts = {}) {
               // amount, since undefined never equals a real unit. Defaults to 'USD' to match
               // the same default this file already uses for authorize()/buildSignedRequest().
               'mm:currency': currency,
+              // Unprefixed `resource` (not `mm:resource`) to match the constraint's own
+              // leftOperand (ResourceService.scopeConstraint()) — mirrors mandate.service.ts.
+              resource,
             }),
           }
         : undefined,
@@ -372,14 +379,29 @@ export function createGuard(opts = {}) {
     return b;
   }
 
-  /** Map a fetched bundle into the shape evaluateLocally expects, for one action. */
+  /**
+   * Map a fetched bundle into the shape evaluateLocally expects, for one action.
+   *
+   * `mandateFound` distinguishes "no mandate matches THIS action" from "omit mandate to
+   * skip the layer" (evaluateLocally's own documented, intentional behavior for a caller
+   * that never resolves one at all, e.g. guardToolLocal's caller-supplied bundle) — found
+   * live: this used to fall back to `mandates[0]` (an ARBITRARY, possibly unrelated
+   * mandate for a completely different action) rather than correctly reporting no
+   * authority for this one, and `authorizeLocal` never distinguished either case from a
+   * genuinely-mandate-less bundle, so an ungranted action with no Standard/SOP rule
+   * happening to also catch it was silently ALLOWED instead of NO_PERMISSION_FOR_ACTION.
+   */
   function _bundleFor(b, action) {
+    const mandates = b.mandates ?? [];
+    const match = mandates.find((m) => m.action === action);
     return {
       contained: b.contained ?? null,
       operatingMode: b.operatingMode ?? null,
       standards: (b.standards ?? []).map((s) => ({ standardKey: s.id ?? s.standardKey ?? 'standard', document: s.document })).filter((s) => s.document),
       sops: (b.sops ?? []).map((s) => ({ standardKey: s.id ?? s.sopId ?? 'sop', document: s.document })).filter((s) => s.document),
-      mandate: ((b.mandates ?? []).find((m) => m.action === action) ?? (b.mandates ?? [])[0])?.document,
+      mandate: match?.document,
+      mandateFound: !!match,
+      anyMandates: mandates.length > 0,
     };
   }
 
@@ -470,7 +492,26 @@ export function createGuard(opts = {}) {
       const sig = b?.proof?.signature;
       if (!anchor?.sigDigest || !sig || _sha256(sig) !== anchor.sigDigest) return authorize(input);
     }
-    const local = evaluateLocally({ ..._bundleFor(b, action), request: input });
+    const { mandateFound, anyMandates, ...bundleForAction } = _bundleFor(b, action);
+    // No mandate covers this action at all — refuse outright rather than let evaluateLocally
+    // silently allow (its documented "omit mandate to skip the layer" behavior is for a
+    // caller that never intended a mandate check, not for one that looked and found none).
+    // Standards/SOP containment still applies first — a suspended/quarantined agent is
+    // refused for THAT reason, not misreported as merely lacking this one action.
+    if (!mandateFound) {
+      const contained = bundleForAction.contained;
+      if (contained && contained.status) {
+        const decision = contained.status === 'quarantined' ? 'quarantine' : 'suspend';
+        const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
+        const local = { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
+        reportLocalDecision(action, local.decision, local.reasonCode);
+        return local;
+      }
+      const local = { decision: 'block', reasonCode: anyMandates ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE', authorizationId: null, remaining: null, proofRef: null };
+      reportLocalDecision(action, local.decision, local.reasonCode);
+      return local;
+    }
+    const local = evaluateLocally({ ...bundleForAction, request: input });
     // allow/observe both PERMIT; block/escalate/contain are decided locally with no network.
     const permits = local.decision === 'allow' || local.decision === 'observe';
     if (!permits) {

@@ -125,6 +125,70 @@ console.log('\n— unit-bearing mandate constraint (currency) —');
   await checkUnit('same numeric amount in a DIFFERENT currency → block', signedRequest({ amount: 100, currency: 'JPY' }), ['block', 'SPEND_LIMIT_EXCEEDED']);
 }
 
+console.log('\n— SOP-side currency-scoped amount-over atom (verdictFromBundle context) —');
+{
+  // Regression: verdictFromBundle's `context` (what Standards/SOP atoms read) used to omit
+  // currency/merchant/resource entirely — only `mandateRequest.values` got them. A
+  // currency-scoped `amount-over` atom therefore always saw currency as absent and fired
+  // closed, blocking even a genuinely in-cap request in a non-default currency.
+  const gbpSopBundle = {
+    ...bundle,
+    sops: [
+      {
+        id: 'travel-gbp',
+        document: {
+          molecules: [
+            { id: 'cap', combinator: 'any', atoms: [{ id: 'a', predicate: 'amount-over', config: { limit: 200, currency: ['GBP'] } }], decision: 'block', reasonCode: 'SOP_SPEND_CAP' },
+          ],
+        },
+      },
+    ],
+  };
+  const gbpGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => gbpSopBundle });
+  const checkGbp = async (name, req, expect) => {
+    const v = await gbpGuard.verifyRequest(req);
+    const ok = v.decision === expect[0] && v.reasonCode === expect[1];
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}  →  ${v.decision}/${v.reasonCode}`);
+  };
+  await checkGbp('GBP request within the GBP-scoped cap → allow (was falsely SOP_SPEND_CAP)', signedRequest({ amount: 100, currency: 'GBP' }), ['allow', 'AUTHORIZED']);
+  await checkGbp('GBP request over the GBP-scoped cap → block', signedRequest({ amount: 300, currency: 'GBP' }), ['block', 'SOP_SPEND_CAP']);
+}
+
+console.log('\n— resource included in the signed message (canonical §7.3, 8 fields) —');
+{
+  // Regression: verifyRequest()'s destructure + buildAuthMessage call used to omit `resource`
+  // entirely, so a genuinely-valid signature over a resource-bearing request always failed
+  // SIGNATURE_INVALID at this guard.
+  const resourceBundle = {
+    ...bundle,
+    mandates: [
+      {
+        action: 'vehicle-inspection',
+        document: { permission: [{ target: 'vehicle-inspection', constraint: [{ leftOperand: 'resource', operator: 'isAnyOf', rightOperand: ['inspection-db'] }] }] },
+      },
+    ],
+  };
+  const resourceGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => resourceBundle });
+  function signedResourceRequest({ resource, tamperResource }) {
+    const action = 'vehicle-inspection';
+    const nonce = crypto.randomUUID();
+    const issuedAt = new Date().toISOString();
+    const message = buildAuthMessage({ agentDid: agent.did, action, amount: 0, currency: 'USD', merchant: '', resource, nonce, issuedAt });
+    const signature = agent.sign(message);
+    return { agentDid: agent.did, action, amount: 0, currency: 'USD', resource: tamperResource ?? resource, nonce, issuedAt, signature };
+  }
+  const checkResource = async (name, req, expect) => {
+    const v = await resourceGuard.verifyRequest(req);
+    const ok = v.decision === expect[0] && v.reasonCode === expect[1];
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}  →  ${v.decision}/${v.reasonCode}`);
+  };
+  await checkResource('in-scope resource, genuinely signed → allow (was SIGNATURE_INVALID)', signedResourceRequest({ resource: 'inspection-db' }), ['allow', 'AUTHORIZED']);
+  await checkResource('out-of-scope resource → block', signedResourceRequest({ resource: 'billing-db' }), ['block', 'CONSTRAINT_FAILED:resource']);
+  await checkResource('resource swapped after signing → block (signature no longer covers it)', signedResourceRequest({ resource: 'inspection-db', tamperResource: 'billing-db' }), ['block', 'SIGNATURE_INVALID']);
+}
+
 console.log('\n— operating-mode autonomy ladder at the edge (Phase 2.5b) —');
 {
   // The mode rides as a NON-ENUMERABLE sibling (invisible to canonicalization, like
