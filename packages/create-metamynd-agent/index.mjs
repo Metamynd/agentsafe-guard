@@ -47,7 +47,47 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.12.0 adds passphrase-encrypted managed key delivery (createGuardFromConfig's
 // `{ passphrase }`) — no scaffolded template passes one yet, but the floor must still cover
 // the real current version regardless, per this repo's standing internal-pin invariant.
-const GUARD_VERSION = '^0.12.0';
+// 0.12.2 makes a missing/garbled agent.metamynd.json fail with the next step instead of a bare
+// ENOENT (BR-004) — every scaffolded project relies on that for the fresh-clone journey.
+// 0.12.3 adds `verify --context`, which a non-financial scaffold's `npm test` needs (a policy that
+// requires request inputs blocks a bare baseline request).
+// 0.12.4 makes `verify` probe in the currency the mandate's caps name (it assumed USD), which a scaffolded
+// non-USD agent's `npm test` needs.
+const GUARD_VERSION = '^0.12.4';
+/** The harness entry point's config load, shared by both harness templates: a fresh clone has no
+ *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
+function harnessConfigLoad() {
+  return `// agent.metamynd.json holds this agent's LOCAL key and is gitignored, so a fresh clone lacks it.
+// Say so, with the way forward, instead of letting readFileSync throw a bare ENOENT.
+let config;
+try {
+  config = JSON.parse(readFileSync('./agent.metamynd.json', 'utf8'));
+} catch (e) {
+  console.error(e && e.code === 'ENOENT'
+    ? ['No ./agent.metamynd.json. It holds the local key for this agent and is gitignored, so a fresh clone never has it.',
+       'Create one (no account needed): run  npx create-metamynd-agent --harness  in a NEW folder, then copy its agent.metamynd.json here.'].join(String.fromCharCode(10))
+    : 'Could not read ./agent.metamynd.json: ' + (e && e.message));
+  process.exit(1);
+}`;
+}
+// Emitted at the top of every generated entry point. A committed package-lock.json can pin a guard
+// far older than the one this scaffold was written for (a beta tester's clean clone resolved 0.6.6
+// against a current 0.12.x — BR-005), and `npm install` will honour it silently. Warn, don't fail:
+// an older guard may still run, but the user should know why behaviour differs from the README.
+function guardFreshnessCheck() {
+  const floor = GUARD_VERSION.replace(/^\^/, '').split('.').map(Number);
+  return `import { readFileSync as __readPkg } from 'node:fs';
+{
+  // Fresh-clone check — see README.md ("Cloned this project fresh?").
+  const floor = [${floor.join(', ')}];
+  try {
+    const have = JSON.parse(__readPkg(new URL('./node_modules/${GUARD_PKG}/package.json', import.meta.url), 'utf8')).version.split('.').map(Number);
+    const older = have[0] !== floor[0] ? have[0] < floor[0] : have[1] !== floor[1] ? have[1] < floor[1] : have[2] < floor[2];
+    if (older) console.warn('! installed ${GUARD_PKG} ' + have.join('.') + ' is older than this project expects (>= ${floor.join('.')}); a committed package-lock.json is pinning it. Update: npm install ${GUARD_PKG}@latest');
+  } catch { /* not a flat node_modules install — nothing to check */ }
+}
+`;
+}
 // The default hosted scaffold's SECOND process — the tool gateway (see scaffoldProject).
 const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.2.0 adds requireAuthorization (closes replay + cumulative spend) — this scaffold sets that
@@ -117,6 +157,14 @@ ${c.b('Usage')}
   npx create-metamynd-agent [options]
 
 ${c.b('Options')}
+  --non-financial      The agent does not move money: no spend limits, no payment demo, and the
+                       demo is derived from your own rules. Works in every mode: --harness, the hosted
+                       flow, --sandbox (a shared agent with no spend authority), and --request / --claim
+                       (the owner is asked to approve NO spending authority). On --sandbox and --request
+                       the platform's default rules apply (a --config file's rules cannot reach an agent
+                       you do not provision yourself). Implied
+                       when a --config file sets no spend limit and contains no monetary rule;
+                       --financial (or "financial": true in the file) opts back in.
   --harness            No login, no KYB, no network at all: a free local governance harness —
                        your own rules, your own identity, decided entirely on this machine. See
                        README#harness. Not for enterprise use (no anchored identity/evidence,
@@ -285,6 +333,323 @@ function configFileSopFields(config) {
   return {};
 }
 
+// ---------- policy-derived demo (BR-006) ----------
+//
+// The scaffold's demo used to be a flight booking with a spend cap NO MATTER what policy the caller
+// supplied, and it injected a per-transaction cap, total budget and currency the policy never
+// mentioned (beta regression 2026-09-20: a customer-communications policy produced a flight demo
+// with payment limits and no case for its own privacy/content rules). For a NON-financial agent the
+// demo is now derived from the supplied rules themselves: one request that should pass, and one
+// per rule that should trip it. Each rule is driven through the field its atom actually reads
+// (policy-core/atom-registry.ts), and create-metamynd-agent's smoke test proves every generated
+// case against the REAL evaluator instead of trusting this table.
+
+const MONETARY_ATOMS = new Set(['amount-over', 'amount-unknown', 'cumulative-over']);
+
+/** The mandate scope is written verbatim into generated JavaScript and shell text; a quote, backslash,
+ *  backtick, `$` or line break would break (or inject into) every template. Refuse it up front. */
+function assertSafeScope(scope) {
+  if (/['"`\\$\r\n]/.test(String(scope))) {
+    fail('The mandate scope must not contain quotes, backslashes, backticks, "$" or line breaks: it is written into generated code. Use something like "send-customer-notice".');
+  }
+}
+
+/** The molecules a caller supplied (never the defaults) — from `molecules`, or `rules` compiled. */
+function policyMolecules(config) {
+  if (!config) return [];
+  if (Array.isArray(config.molecules)) return config.molecules;
+  if (Array.isArray(config.rules)) return config.rules.map(ruleToMolecule);
+  return [];
+}
+
+const KNOWN_CONFIG_KEYS = new Set(['name', 'scope', 'rules', 'molecules', 'rulePack', 'perTxnMax', 'maxAmount', 'currency', 'merchants', 'financial']);
+const MONEY_LIKE_KEY = /amount|budget|\bcap\b|limit|currency|spend|price|cost|txn|transaction|payment|payee|invoice|fee/i;
+
+/** Top-level config keys that read like a spend limit but are not ones this scaffolder recognises. */
+function unrecognisedMoneyKeys(config) {
+  return Object.keys(config ?? {}).filter((k) => !KNOWN_CONFIG_KEYS.has(k) && MONEY_LIKE_KEY.test(k));
+}
+
+/** Spend inputs the caller supplied that a non-financial agent will silently ignore. */
+function ignoredSpendInputs(args, fileConfig) {
+  return [
+    ...['per-txn-max', 'max-amount', 'currency'].filter((k) => typeof args[k] === 'string').map((k) => '--' + k),
+    ...['perTxnMax', 'maxAmount', 'currency'].filter((k) => fileConfig?.[k] !== undefined).map((k) => '"' + k + '" in the config file'),
+  ];
+}
+
+/** resolveFinancial + saying so: one decision, announced identically by --harness and the hosted flow. */
+function announceFinancial(args, fileConfig) {
+  const result = resolveFinancial(args, fileConfig);
+  if (result.warn) console.log(`  ${c.yellow('!')} ${result.warn}`);
+  if (!result.financial) {
+    console.log(`  ${c.green('✓')} non-financial agent ${c.dim('(' + result.why + ') — no spend limits, no payment demo; pass --financial to add them')}`);
+    const ignored = ignoredSpendInputs(args, fileConfig);
+    if (ignored.length) console.log(`  ${c.yellow('!')} ignoring ${ignored.join(', ')} — a non-financial agent has no spend limits. Pass --financial if this one does.`);
+  }
+  return result;
+}
+
+/**
+ * The demo for a non-financial agent whose rules the caller could NOT set: the shared sandbox agent, and a delegated
+ * request (the request carries no rules; the platform applies its default at approval). Derived from the platform's
+ * own default for a non-financial agent - the same amount-free high-risk review the hosted flow describes - so what
+ * the scaffold stages is what the issued agent actually enforces.
+ */
+function defaultNeutralDemo() {
+  const demo = buildPolicyCases(harnessDefaultSopNeutral().molecules);
+  console.log(`  ${c.green('✓')} derived ${demo.cases.length} demo case(s) from the platform's default rules for a non-financial agent`);
+  for (const n of demo.notDemonstrated) console.log(`  ${c.yellow('!')} not staged in the demo: ${n.rule} ${c.dim('— ' + n.why + '; still enforced')}`);
+  return demo;
+}
+
+/** A --config file's rules cannot reach an agent the caller does not provision themselves: say so instead of implying they apply. */
+function warnRulesNotApplied(fileConfig, where) {
+  if (policyMolecules(fileConfig).length === 0) return;
+  console.log(`  ${c.yellow('!')} the rules in ${c.b('the config file')} are not applied to ${where} — its rules are the platform's defaults. Set your own in the dashboard (Legal Entity → SOPs), or provision your own agent (drop this flag) to author them here.`);
+}
+
+/**
+ * Is this a financial agent? Explicit wins (`--non-financial` / `--financial`, or `"financial"` in
+ * the config file). Otherwise a policy FILE is treated as the whole policy: with no spend limit
+ * and no monetary rule in it, nothing money-shaped is added on the caller's behalf. Flags-only
+ * scaffolds keep their historical (visible) defaults.
+ */
+function resolveFinancial(args, fileConfig) {
+  if (args['non-financial']) return { financial: false, why: '--non-financial' };
+  if (args.financial) return { financial: true, why: '--financial' };
+  if (fileConfig && typeof fileConfig.financial === 'boolean') {
+    return { financial: fileConfig.financial, why: 'the config file\'s "financial" field' };
+  }
+  if (fileConfig) {
+    // A rule pack is a policy component this scaffolder cannot inspect (configFileSopFields only uses
+    // it when the file has no rules/molecules). Packs are built from spend limits, so "I can't see any
+    // money in it" is NOT evidence there is none: keep the historical financial scaffold.
+    const inspectable = Array.isArray(fileConfig.molecules) || (Array.isArray(fileConfig.rules) && fileConfig.rules.length > 0);
+    if (!inspectable && typeof fileConfig.rulePack === 'string') return { financial: true, why: null };
+    // A key that LOOKS like a spend limit but isn't one we read (per_txn_max, budget, spendCap, ...) is
+    // exactly how a policy that involves money ends up with none: refuse to infer "non-financial"
+    // from a file we may have misread, and say why.
+    const moneyLike = unrecognisedMoneyKeys(fileConfig);
+    if (moneyLike.length) {
+      return {
+        financial: true,
+        why: null,
+        warn: `${moneyLike.map((k) => '"' + k + '"').join(', ')} in the config file look like spend limits but are not recognised (use perTxnMax / maxAmount / currency), so this is NOT treated as a non-financial agent. Pass --non-financial if it really does not move money.`,
+      };
+    }
+    // `merchants` names payees — money-shaped even when no limit is set — so it counts too.
+    const moneyField =
+      ['perTxnMax', 'maxAmount', 'currency'].some((k) => fileConfig[k] !== undefined) ||
+      (Array.isArray(fileConfig.merchants) && fileConfig.merchants.length > 0) ||
+      (typeof args.merchants === 'string' && args.merchants.trim() !== '') ||
+      ['per-txn-max', 'max-amount', 'currency'].some((k) => typeof args[k] === 'string');
+    const monetaryRule = policyMolecules(fileConfig).some((m) => (m.atoms ?? []).some((a) => MONETARY_ATOMS.has(a.predicate)));
+    if (!moneyField && !monetaryRule) {
+      return { financial: false, why: `${String(args.config).split(/[\\/]/).pop()} sets no spend limit and contains no monetary rule` };
+    }
+  }
+  return { financial: true, why: null };
+}
+
+const firstOf = (list, fallback) => (Array.isArray(list) && list.length ? String(list[0]) : fallback);
+// The evaluator ignores empty terms, so the first NON-empty one is the only one worth staging.
+const termsOf = (cfg) => (Array.isArray(cfg?.terms) ? cfg.terms.map(String).filter((t) => t.trim()) : []);
+const CLEAN_PROMPTS = ['A routine request that breaks no rule.', 'ok', '.'];
+
+/**
+ * How to make each atom FIRE from the agent's side (`fire`; null = cannot be driven from this
+ * config), what it says in the demo (`says`), and the runtime input it reads (`field`). What makes
+ * a request PASS every rule at once is computed in buildPolicyCases (unions / intersections / maxima
+ * across rules), not per atom. Amount-shaped atoms and the platform-derived trust score are
+ * deliberately absent: see reasonNotDemonstrated().
+ */
+const ATOM_DEMO = {
+  'consent-missing': { field: 'consent', fire: () => ({ consent: false }), says: () => 'consent has not been given' },
+  'pii-present': { field: 'piiPresent', fire: () => ({ piiPresent: true }), says: () => 'personal data is present' },
+  'text-matches': {
+    field: 'prompt / output',
+    fire: (cfg) => (termsOf(cfg).length ? { prompt: 'Please include "' + termsOf(cfg)[0] + '" in it.' } : null),
+    says: (cfg) => 'the text mentions "' + (termsOf(cfg)[0] ?? '…') + '"',
+  },
+  'risk-at-or-above': {
+    field: 'riskLevel',
+    fire: (cfg) => ({ riskLevel: cfg?.level ?? 'high' }),
+    says: (cfg) => 'the risk level is ' + (cfg?.level ?? 'high') + ' or above',
+  },
+  'jurisdiction-not-allowed': { field: 'jurisdiction', fire: () => ({ jurisdiction: 'ZZ-NOT-ALLOWED' }), says: () => 'the jurisdiction is not on the allowed list' },
+  'data-residency-violation': { field: 'dataResidency', fire: () => ({ dataResidency: 'zz-not-allowed' }), says: () => 'the data would be stored outside the allowed regions' },
+  'model-not-allowed': { field: 'model', fire: () => ({ model: 'unlisted-model' }), says: () => 'the model is not on the allowed list' },
+  'tool-not-allowed': { field: 'tool', fire: () => ({ tool: 'unlisted-tool' }), says: () => 'the tool is not on the allowed list' },
+  'data-source-not-approved': { field: 'dataSourceId', fire: () => ({ dataSourceId: 'unapproved-source' }), says: () => 'the data source is not approved' },
+  'rate-limit-exceeded': {
+    field: 'callCount',
+    fire: (cfg) => ({ callCount: Number(cfg?.max ?? 0) + 1 }),
+    says: (cfg) => 'the call count is over ' + Number(cfg?.max ?? 0),
+  },
+  'evidence-requirement': {
+    field: 'evidenceTypes',
+    fire: (cfg) => (Array.isArray(cfg?.required) && cfg.required.length ? { evidenceTypes: [] } : null),
+    says: (cfg) => 'the required evidence (' + firstOf(cfg?.required, '…') + ') is missing',
+  },
+  'evidence-confidence-below': {
+    field: 'evidenceConfidence',
+    fire: (cfg) => (Number(cfg?.min) > 0 ? { evidenceConfidence: 0 } : null),
+    says: (cfg) => 'the evidence confidence is below ' + Number(cfg?.min ?? 0),
+  },
+};
+
+// [predicate, request field, config key holding the allow-list, exact (case-sensitive) match?]
+// data-source-not-approved compares exactly; the other allow-list atoms compare case-insensitively.
+const ALLOW_LISTS = [
+  ['jurisdiction-not-allowed', 'jurisdiction', 'allowed', false],
+  ['data-residency-violation', 'dataResidency', 'allowedRegions', false],
+  ['model-not-allowed', 'model', 'allowed', false],
+  ['tool-not-allowed', 'tool', 'allowed', false],
+  ['data-source-not-approved', 'dataSourceId', 'approved', true],
+];
+
+/** What `npm start` will show, truthfully — including when no rule could be staged (no passing case exists). */
+function demoOutcomes(demo) {
+  return demo.cases.length
+    ? `ALLOW · then one step per rule of yours (${demo.cases.length - 1}) · BLOCK (ungranted action)`
+    : 'BLOCK (ungranted action) only - none of your rules could be staged (see the scaffold output)';
+}
+
+function reasonNotDemonstrated(atoms) {
+  if (atoms.some((a) => MONETARY_ATOMS.has(a.predicate))) return 'it is a monetary rule and this agent is non-financial';
+  if (atoms.some((a) => a.predicate === 'hol-trust-below-review')) return 'the trust score is derived by the platform, not supplied by the agent';
+  if (atoms.some((a) => !ATOM_DEMO[a.predicate])) return 'there is no local demonstration for this rule type';
+  return 'it cannot be triggered from this configuration';
+}
+
+/** The request fields the caller's rules read, and which rules read each. */
+function requiredInputs(molecules) {
+  const inputs = new Map();
+  for (const m of molecules) {
+    for (const a of m.atoms ?? []) {
+      const field = ATOM_DEMO[a.predicate]?.field ?? (MONETARY_ATOMS.has(a.predicate) ? 'amount' : null);
+      if (field) inputs.set(field, [...new Set([...(inputs.get(field) ?? []), m.name || m.id])]);
+    }
+  }
+  return [...inputs].map(([field, rules]) => ({ field, rules }));
+}
+
+/**
+ * Derive a demo from the caller's own molecules: { cases, notDemonstrated, inputs }.
+ *
+ * `cases[0]` is a request that satisfies EVERY rule at once; each later case trips exactly one rule.
+ * Getting that true takes care, because rules interact (the evaluator lets the most restrictive
+ * firing molecule win): so the passing request is merged across all rules (union of required
+ * evidence, the highest confidence bar, a value present on every allow-list), and any rules that
+ * read the SAME input as another rule are reported rather than staged — two tiers of one atom can't
+ * be demonstrated independently, and a demo that mislabels its own policy is worse than none.
+ * policy-demo.smoke.mjs runs every generated case through the real evaluator.
+ */
+function buildPolicyCases(molecules, { maxCases = 8 } = {}) {
+  const label = (m) => m.name || m.id;
+  const inputs = requiredInputs(molecules);
+
+  // A "none" molecule fires when NO atom fires — exactly the state of a request that satisfies
+  // everything — so no truthful passing request exists for the demo to show. Stage nothing.
+  if (molecules.some((m) => m.combinator === 'none')) {
+    return {
+      cases: [],
+      inputs,
+      notDemonstrated: molecules.map((m) => ({
+        rule: label(m),
+        why: m.combinator === 'none'
+          ? 'a "none" combinator fires when no atom fires, so the demo cannot stage a passing request truthfully'
+          : 'not staged because another rule uses a "none" combinator',
+      })),
+    };
+  }
+
+  const notDemonstrated = [];
+  const live = []; // molecules that can fire at all (the evaluator: no atoms or a combinator other than all/any never fires)
+  for (const m of molecules) {
+    if (!Array.isArray(m.atoms) || m.atoms.length === 0) notDemonstrated.push({ rule: label(m), why: 'it has no atoms, so it never fires' });
+    else if (m.combinator !== 'all' && m.combinator !== 'any') notDemonstrated.push({ rule: label(m), why: 'its combinator is not "all" or "any", so it never fires' });
+    else live.push(m);
+  }
+
+  // Rules that read the same input can't be staged independently (a case for one also trips or
+  // un-trips the other). text-matches is the exception: its clash is a substring check, done below.
+  const users = new Map(); // predicate -> live molecules using it
+  for (const m of live) for (const p of new Set(m.atoms.map((a) => a.predicate))) users.set(p, [...(users.get(p) ?? []), m]);
+  const sharesInput = new Set();
+  for (const [p, ms] of users) if (ms.length > 1 && p !== 'text-matches' && ATOM_DEMO[p]) ms.forEach((m) => sharesInput.add(m));
+  for (const m of live) {
+    if (m.combinator === 'all' && new Set(m.atoms.map((a) => a.predicate)).size < m.atoms.length) sharesInput.add(m);
+  }
+
+  // The passing request: satisfies every live rule, staged or not.
+  const configsOf = (pred) => live.flatMap((m) => m.atoms.filter((a) => a.predicate === pred).map((a) => a.config ?? {}));
+  const base = {};
+  if (configsOf('consent-missing').length) base.consent = true;
+  if (configsOf('pii-present').length) base.piiPresent = false;
+  if (configsOf('rate-limit-exceeded').length) base.callCount = 0;
+  const riskLevels = configsOf('risk-at-or-above').map((cfg) => String(cfg.level ?? 'high'));
+  if (riskLevels.length && !riskLevels.includes('low')) base.riskLevel = 'low';
+  for (const [pred, field, key, exact] of ALLOW_LISTS) {
+    // A value on EVERY list; if there is none (or a list is empty) leave the field absent, which
+    // never trips an allow-list atom.
+    const lists = configsOf(pred).map((cfg) => (Array.isArray(cfg[key]) ? cfg[key].map(String) : []));
+    if (!lists.length || lists.some((l) => l.length === 0)) continue;
+    const norm = (v) => (exact ? v : v.toLowerCase().trim());
+    const common = lists[0].find((v) => lists.every((l) => l.some((x) => norm(x) === norm(v))));
+    if (common !== undefined) base[field] = common;
+  }
+  const evidenceCfgs = configsOf('evidence-requirement');
+  if (evidenceCfgs.length) base.evidenceTypes = [...new Set(evidenceCfgs.flatMap((cfg) => (Array.isArray(cfg.required) ? cfg.required.map(String) : [])))];
+  const minConfidence = configsOf('evidence-confidence-below').map((cfg) => Number(cfg.min)).filter((n) => n > 0);
+  if (minConfidence.length) base.evidenceConfidence = Math.max(...minConfidence);
+  const allTerms = configsOf('text-matches').flatMap(termsOf);
+  const containsTerm = (text, terms) => terms.some((t) => text.toLowerCase().includes(t.toLowerCase()));
+  if (configsOf('text-matches').length) base.prompt = CLEAN_PROMPTS.find((p) => !containsTerm(p, allTerms)) ?? '';
+
+  const cases = [{ kind: 'allow', intent: 'a request that satisfies every rule. Expected to pass.', expect: 'allow', context: base }];
+  for (const m of live) {
+    const name = label(m);
+    if (m.decision !== 'block' && m.decision !== 'escalate') {
+      notDemonstrated.push({ rule: name, why: `its decision is "${m.decision}", which this demo does not stage` });
+      continue;
+    }
+    if (sharesInput.has(m)) {
+      notDemonstrated.push({ rule: name, why: 'another rule reads the same input, so the two cannot be staged independently; both are still enforced' });
+      continue;
+    }
+    const driven = m.atoms.map((a) => ({ a, demo: ATOM_DEMO[a.predicate], fire: ATOM_DEMO[a.predicate]?.fire(a.config ?? {}) ?? null }));
+    // 'any' fires on one atom; 'all' needs every atom driven.
+    const chosen = m.combinator === 'any' ? driven.filter((d) => d.fire).slice(0, 1) : driven.every((d) => d.fire) ? driven : [];
+    if (!chosen.length) {
+      notDemonstrated.push({ rule: name, why: reasonNotDemonstrated(m.atoms) });
+      continue;
+    }
+    const context = { ...base };
+    for (const { fire } of chosen) Object.assign(context, fire);
+    // This rule's example text must not also contain a term from a DIFFERENT text rule.
+    const otherTerms = live.filter((o) => o !== m).flatMap((o) => o.atoms.filter((a) => a.predicate === 'text-matches').flatMap((a) => termsOf(a.config)));
+    if (typeof context.prompt === 'string' && chosen.some(({ a }) => a.predicate === 'text-matches') && containsTerm(context.prompt, otherTerms)) {
+      notDemonstrated.push({ rule: name, why: 'its example text also contains a term from another text rule, so it cannot be staged on its own' });
+      continue;
+    }
+    if (cases.length >= maxCases - 1) {
+      notDemonstrated.push({ rule: name, why: `the demo stages the first ${maxCases - 2} rules only; it is still enforced` });
+      continue;
+    }
+    cases.push({
+      kind: m.decision,
+      intent: `${chosen.map(({ a, demo }) => demo.says(a.config ?? {})).join(' and ')}. Expected to be ${m.decision === 'block' ? 'blocked' : 'sent for review'} (${name}).`,
+      expect: m.decision,
+      reasonCode: m.reasonCode,
+      rule: name,
+      context,
+    });
+  }
+  return { cases, notDemonstrated, inputs };
+}
+
 function slugify(name) {
   return String(name).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'metamynd-agent';
 }
@@ -447,6 +812,7 @@ function exampleIndexNoGateway(scope, perTxnMax, currency, merchant) {
   return `// index.mjs — your agent, governed by MetaMynd/AgentSafe.
 // Every governed tool call is checked (allow / block / escalate) before it runs.
 import { createGuardFromConfig } from '${GUARD_PKG}';
+${guardFreshnessCheck()}
 
 // Loads agent.metamynd.json: the agent's DID, its signing key, and the gate to call.
 const guard = await createGuardFromConfig('./agent.metamynd.json'); // no env vars
@@ -606,6 +972,7 @@ function exampleIndex(scope, perTxnMax, gatewayPort, currency, merchant) {
 // and independently again by ./gateway — a SEPARATE process that holds the real tool and its
 // credentials. That second check is the actual enforcement boundary; see ./gateway/README.md.
 import { createGuardFromConfig } from '${GUARD_PKG}';
+${guardFreshnessCheck()}
 
 // Loads agent.metamynd.json: the agent's DID, its signing key, and the gate to call.
 const guard = await createGuardFromConfig('./agent.metamynd.json'); // no env vars
@@ -778,7 +1145,444 @@ console.log('');
 `;
 }
 
-function examplePackageJson(slug) {
+/** The generated README's fresh-clone section (BR-004/BR-005), shared by every hosted README. */
+function clonedFreshSection(daemonKey) {
+  return `## Cloned this project fresh?
+
+\`agent.metamynd.json\` holds the agent's identity${daemonKey ? '' : ' and secret key'}, so it is gitignored — a clone never contains it, and \`npm start\` will stop and tell you so. To continue:
+
+1. Get the config: download it from the MetaMynd dashboard (Agents → your agent), or run \`npx create-metamynd-agent\` for a new agent.
+2. Save it in this directory as \`agent.metamynd.json\`.
+3. \`npm install && npm start\`.
+
+If a committed \`package-lock.json\` pins an older \`${GUARD_PKG}\` than this project was written for, the first run prints a warning; fix it with \`npm install ${GUARD_PKG}@latest\`.`;
+}
+
+// ---------- hosted NON-FINANCIAL scaffold (BR-006) ----------
+//
+// The hosted flow used to provision spend limits and generate a flight-booking demo whatever the
+// policy. For an agent that does not move money (`financial === false`, see resolveFinancial) the
+// provisioning call omits every spend field (the backend treats their absence as a non-financial
+// mandate — onboarding.provision.ts) and the project below is generated instead: the action is the
+// caller's own scope, the demo steps are derived from their rules (buildPolicyCases), and nothing in
+// it is about payments. The financial templates above are unchanged.
+
+/**
+ * The example agent for a non-financial hosted scaffold — one template for both shapes:
+ * with `gatewayPort` the tool lives in a separate process (./gateway, the real enforcement
+ * boundary); without it (--no-gateway) the tool is a local function in this process.
+ */
+function exampleIndexNeutral({ scope, gatewayPort, demo, merchant }) {
+  const withGateway = gatewayPort != null;
+  const steps = [
+    ...demo.cases,
+    { kind: 'block', intent: 'the agent asks to change its OWN permissions - an action nobody delegated. Expected to be blocked.', expect: 'block', reasonCode: 'NO_PERMISSION_FOR_ACTION', action: 'permissions.update', context: {} },
+  ];
+  return `// index.mjs — your agent, governed by MetaMynd/AgentSafe.
+// Every governed tool call is checked before it runs: allow, block, or escalate to a human.${withGateway ? `
+// It is checked TWICE: once here (fast, local, client-side), and independently again by ./gateway —
+// a SEPARATE process that holds the real tool. That second check is the actual enforcement
+// boundary; see ./gateway/README.md.` : ''}
+// The steps below were DERIVED FROM YOUR OWN RULES when this project was scaffolded: one request
+// that should pass, and one per rule that should trip it. Nothing here is about payments.
+import { createGuardFromConfig } from '${GUARD_PKG}';
+${guardFreshnessCheck()}
+
+// Loads agent.metamynd.json: the agent's DID, its signing key, and the gate to call.
+const guard = await createGuardFromConfig('./agent.metamynd.json'); // no env vars
+
+const dim = (t) => '\\x1b[2m' + t + '\\x1b[0m';
+const bold = (t) => '\\x1b[1m' + t + '\\x1b[0m';
+const rule = (n) => '  ' + '-'.repeat(n);
+
+const MERCHANT = ${merchant ? JSON.stringify(merchant) : 'undefined'};
+${withGateway ? `const GATEWAY = process.env.GATEWAY_URL || 'http://localhost:${gatewayPort}';
+
+// --- Calls the gateway process instead of a local function. There is no raw performAction() in
+// --- this file to call directly — the tool, and any real credentials it needs, live only in
+// --- ./gateway, which independently re-verifies this signed request itself.
+async function performViaGateway(args, decision) {
+  const signed = await guard.buildSignedRequest({ action: '${scope}', merchant: MERCHANT, context: args });
+  signed.authorizationId = decision?.authorizationId; // none for a value-less action — see ./gateway/README.md
+  const res = await fetch(GATEWAY + '/perform', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) },
+    body: JSON.stringify(args),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
+    err.name = 'GovernanceBlocked';
+    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR' };
+    throw err;
+  }
+  return body;
+}
+` : `// --- Your real tool. Replace the body with your actual implementation. ---
+// --- If that implementation touches a real credential, this in-process call is NOT an
+// --- enforcement boundary: guard.guardTool() below still calls this function directly in
+// --- THIS process regardless of the decision's source. A scaffold without --no-gateway moves
+// --- the tool behind a separate process instead. See README.
+async function performAction(args) {
+  return { done: true, action: '${scope}' };
+}
+`}
+// --- The GATED version. Register THIS with your agent instead of the raw handler. ---
+// The request's own fields (consent, piiPresent, jurisdiction, ...) travel as the gate's \`context\`.
+const gatedAction = guard.guardTool(
+  '${scope}',                                   // = your mandate scope
+  ${withGateway ? 'performViaGateway' : 'performAction'},
+  (a) => ({ merchant: MERCHANT, context: a }),   // map tool args → gate inputs
+);
+
+// --- An action the agent was NEVER granted. Wrapping it is the demonstration: no rule anywhere
+// --- forbids it. The mandate simply never mentioned the action.
+async function changeOwnPermissions(args) {
+  return { updated: true, ...args };          // never runs, and that is the point
+}
+const gatedChangeOwnPermissions = guard.guardTool(
+  'permissions.update',                       // an action NOT in the mandate
+  changeOwnPermissions,
+  (a) => ({ context: a }),
+);
+
+const STEPS = ${JSON.stringify(steps, null, 2)};
+const INPUTS = ${JSON.stringify(demo.inputs)};
+const NOT_STAGED = ${JSON.stringify(demo.notDemonstrated)};
+
+async function attempt(n, total, step) {
+  const tool = step.action === 'permissions.update' ? gatedChangeOwnPermissions : gatedAction;
+  console.log('');
+  console.log(bold('  Step ' + n + ' of ' + total) + ' - ' + step.intent);
+  console.log(dim('     signing the request locally, then asking the gate to decide...'));
+  let got;
+  let g = {};
+  try {
+    await tool(step.context);
+    got = 'allow';
+    console.log('\\x1b[32m     ALLOWED\\x1b[0m  your tool ran${withGateway ? ' (in ./gateway)' : ''}');
+  } catch (e) {
+    g = e.governance ?? {};
+    got = g.decision ?? 'error';
+    if (g.decision === 'escalate') {
+      console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
+      console.log(dim('     not a failure: approve it in the dashboard and the action resumes.'));
+    } else {
+      console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? e.message));
+      console.log(dim('     your tool never ran - refused before execution.'));
+    }
+  }
+  const asExpected = got === step.expect && (!step.reasonCode || g.reasonCode === step.reasonCode);
+  if (asExpected) console.log(dim('     as expected.'));
+  else console.log('\\x1b[33m     NOT AS EXPECTED\\x1b[0m  expected ' + step.expect + (step.reasonCode ? ' (' + step.reasonCode + ')' : '') + ' — your rules (in the dashboard) or this step have changed since scaffolding.');
+}
+
+console.log('');
+console.log(bold('  What this simulation shows'));
+console.log('');
+console.log('  An agent should not be the thing that decides what it is allowed to do${withGateway ? ' — and' : '.'}');${withGateway ? `
+console.log('  it should not be the thing that RUNS what it decided, either. Each step below');
+console.log('  takes the SAME code path and your rules decide.');` : `
+console.log('  Each step below takes the SAME code path and your rules decide.');`}
+console.log(dim('  The steps come from YOUR rules, as they were when this project was scaffolded.'));
+console.log('');
+console.log(dim('  scope   ${scope}  (no spending authority - this agent does not move money)'));
+${withGateway ? "console.log(dim('  gateway  ' + GATEWAY + '  (run it in a separate terminal - see ./gateway)'));\n" : ''}console.log(dim('  inputs  the fields your application must supply for these rules to judge anything:'));
+for (const i of INPUTS) console.log(dim('            ' + i.field + '  <-  ' + i.rules.join(', ')));
+if (INPUTS.length) console.log(dim('          A missing field never trips an allow-list, consent or PII rule - supply it.'));
+for (const n of NOT_STAGED) console.log(dim('  not staged  ' + n.rule + ' - ' + n.why));
+
+console.log('');
+console.log(rule(66));
+for (let i = 0; i < STEPS.length; i++) await attempt(i + 1, STEPS.length, STEPS[i]);
+console.log('');
+console.log(rule(66));
+
+console.log('');
+console.log(bold('  What this proved'));
+console.log('');
+console.log(dim('   - one code path, several outcomes. The rules decided, not this file'));
+console.log(dim('     and not the model driving it.'));
+console.log(dim('   - the last step needed no rule to stop it. The agent could not widen its own'));
+console.log(dim('     authority, because it cannot name an action nobody delegated to it.'));
+console.log(dim('   - a blocked or held call never reached your tool at all.'));
+console.log(dim('   - if the gate were unreachable the guard fails CLOSED: it blocks.'));
+console.log('');${withGateway ? `
+console.log(bold('  Checked twice, by two processes.') + ' ./gateway independently re-verified the allowed step');
+console.log(dim('  before running your tool there - a process this file cannot reach into.'));
+console.log(dim('  It enforces scope and identity firmly. What it does NOT close: the rule inputs'));
+console.log(dim('  above are not signed (an agent that can sign could omit or forge one), and a'));
+console.log(dim('  signed request can be reused for 5 minutes - see ./gateway/README.md.'));` : `
+console.log(bold('  Without MetaMynd, you can be bypassed.') + ' performAction() runs in THIS process -');
+console.log(dim('  call it directly instead of gatedAction and nothing above stops you.'));
+console.log(dim('  Re-scaffold without --no-gateway for the default shape, which closes that.'));`}
+console.log('');
+console.log('  Change your rules in the dashboard (Legal Entity -> SOPs) and run again.');
+console.log(dim('  The outcome changes. This file does not. That is the point.'));
+console.log('');
+`;
+}
+
+/**
+ * The tool gateway for a non-financial hosted scaffold. Same shape as gatewayServerFile, with two
+ * deliberate differences: the route has NO value fields, and requireAuthorization is OFF — the guard
+ * only seals a single-use authorization for a value-bearing action (amount > 0), so with it ON every
+ * allowed value-less request would be refused AUTHORIZATION_REQUIRED. The README states what that
+ * leaves open (replay) rather than implying the financial scaffold's guarantees.
+ */
+function gatewayServerFileNeutral(scope, port, apiBase) {
+  return `#!/usr/bin/env node
+// gateway/server.mjs — the enforcement boundary for this agent's tool(s).
+//
+// This is a SEPARATE process from the agent. It holds the tool's real credentials (the agent
+// process never does), and it independently re-verifies every request against this agent's OWN
+// published policy bundle — it does not trust the agent's own guard.guardTool() check. A
+// compromised or dishonest agent calling its own local function gets nothing here, because
+// there is no local function: the tool only runs in this process.
+import http from 'node:http';
+import { createMcpGuard } from '${MCP_GUARD_PKG}';
+import { createHttpGateway } from '${GATEWAY_PKG}';
+
+const PORT = Number(process.env.PORT || ${port});
+const MAGP_API = process.env.MAGP_API || '${apiBase}';
+
+// --- Your real tool. Real credentials belong ONLY here, read from process.env (see .env.example)
+// --- — never in the agent process.
+async function performAction(args) {
+  return { done: true, action: '${scope}' };
+}
+
+// One protected route: only a request signed by this agent, for exactly this action, and
+// re-verified against this agent's own mandate/SOP, reaches performAction() below.
+//
+// valueFields: [] because this action carries no amount or merchant to bind the body to — say so
+// explicitly rather than lean on the library default, which would demand both.
+const routes = [{ method: 'POST', path: '/perform', action: '${scope}', valueFields: [] }];
+
+// requireAuthorization is OFF on purpose. It makes the gateway claim a single-use, stateful
+// authorization before running the tool — but the agent's guard only seals one for a value-bearing
+// action (amount > 0), and this agent has no spending authority. With it ON, every ALLOWED request
+// would be refused AUTHORIZATION_REQUIRED. What that leaves open (a signed request is reusable for
+// the guard's 5-minute freshness window; the issuer's stateful rate/circuit-breaker floors; and the
+// rule inputs, which are not covered by the signature) is spelled out in README.md.
+const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API, requireAuthorization: false });
+
+const gateway = createHttpGateway({
+  guard,
+  routes,
+  forward: async (req) => {
+    let args = {};
+    try { args = JSON.parse(req.rawBody?.toString('utf8') || '{}'); } catch { /* empty body */ }
+    const result = await performAction(args);
+    return { status: 200, body: result };
+  },
+  // This gateway IS the tool, not a proxy in front of one — an unmatched path has nothing to
+  // pass through TO. Without this, any path a route doesn't match falls through ungoverned
+  // straight to forward() above, which would run performAction() with no check at all.
+  denyByDefault: true,
+});
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const rawBody = await readBody(req);
+    const result = await gateway({ method: req.method, path: req.url, headers: req.headers, rawBody });
+    const headers = { 'content-type': 'application/json' };
+    if (result.governance) headers['x-agentsafe-decision'] = result.governance.decision;
+    res.writeHead(result.status, headers);
+    res.end(JSON.stringify(result.body ?? {}));
+  } catch (err) {
+    // Fail CLOSED on any gateway error.
+    res.writeHead(502, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ decision: 'block', reasonCode: 'GATEWAY_ERROR', error: String(err?.message ?? err) }));
+  }
+});
+
+server.listen(PORT, () => {
+  console.log('[gateway] listening on :' + PORT + ' -> the only place performAction() runs.');
+  console.log('[gateway] every request is independently re-verified against this agent\\'s own policy.');
+});
+`;
+}
+
+function gatewayEnvExampleNeutral() {
+  return `# Real tool credentials belong HERE, read from process.env in server.mjs — never in the
+# agent process one directory up.
+# TOOL_API_KEY=
+`;
+}
+
+function gatewayReadmeNeutral(slug, scope, port) {
+  return `# ${slug}-gateway
+
+This process is the **enforcement boundary** for \`${slug}\`'s tool — not \`../index.mjs\`.
+
+## Why this exists
+
+\`guard.guardTool()\` in the agent's \`index.mjs\` is a client-side convenience: it gives fast, local
+allow/block/escalate feedback, but it still runs its handler in the SAME process regardless of where
+the decision came from. Anything able to call the agent's tool function directly — a bug, a
+compromised dependency, a dishonest fork of the agent's own code — gets the same result the gate
+would have given it. A cooperative in-process check has no counterparty to disagree with a caller
+that skips it.
+
+This process closes that gap by being a **separate** one. \`performAction()\` does not exist in the
+agent's process; it exists only here, and every request that reaches it has been re-verified against
+this agent's OWN published policy bundle, fetched by THIS process, with the agent's Ed25519
+signature checked against its DID.
+
+## What this closes, and what it does not
+
+This is narrower than it sounds, so read it before relying on it.
+
+**Closed:** no tool call without a validly signed request from THIS agent for an action in its
+mandate. The agent's Ed25519 signature is checked against its DID, the action must be granted, and a
+suspended or quarantined agent is refused. Code that skips the agent's own guard and cannot sign as
+the agent gets nothing, and there is no local function to call directly.
+
+**NOT closed — be precise about this:**
+
+- **Rule inputs are not signed.** The request fields your rules read (\`consent\`, \`piiPresent\`,
+  \`jurisdiction\`, …) travel in the request's \`itinerary\`, which the signature does not cover, and
+  the body the tool executes is not bound to it (\`valueFields: []\`). An agent that CAN sign — a
+  dishonest one, or a compromised one — can omit a field or send a different one, and the rule that
+  reads it will not fire: an allow-list, consent or PII rule treats an absent field as "nothing to
+  object to". So this gateway enforces scope and identity firmly, but an **input-dependent rule is
+  only as strong as whatever supplies the input**. Source those fields from a system you control,
+  not from model output.
+- **Replay.** \`server.mjs\` runs with \`requireAuthorization: false\`. That option makes a gateway claim
+  a single-use, stateful authorization before running the tool. The agent's guard only seals such an
+  authorization for a **value-bearing** action (\`amount > 0\`), and this agent has no spending
+  authority — so its allowed requests carry none, and requiring one would refuse every allowed
+  request. Consequence: a validly signed request can be reused, with different content, until the
+  guard's freshness window (5 minutes from its \`issuedAt\`) lapses.
+- **The issuer's stateful floors** (rate limit, circuit breaker) are not re-checked at this gateway.
+  If your policy relies on them, enforce them where the call originates.
+
+## Run
+
+\`\`\`bash
+npm install
+npm start           # listens on :${port} (PORT to change)
+\`\`\`
+
+Start this **before** the agent. \`MAGP_API\` overrides the issuer URL it fetches the policy bundle from.
+
+## Your real tool
+
+Replace \`performAction()\` in \`server.mjs\` with your implementation and put any credentials in
+\`.env\` (see \`.env.example\`). Add a route per governed action; a path with no route is refused.
+`;
+}
+
+/** The README for a non-financial hosted scaffold. `withGateway` selects the two-process shape. */
+function exampleReadmeNeutral(slug, scope, withGateway, gatewayPort, daemonKey, demo) {
+  const configLine = daemonKey
+    ? `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
+  **Holds no secret key.** Signing goes through your already-running agentsafe-signer daemon instead.`
+    : `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
+  **Contains the agent's secret key — never commit it.** It is already in \`.gitignore\`.`;
+  return `# ${slug}
+
+A MetaMynd/AgentSafe-governed agent, scaffolded with \`create-metamynd-agent\`. It has **no spending
+authority** — it does not move money — so there is no spend cap and no payment demo. What it does is
+governed by the rules you supplied.
+
+## Run
+
+${withGateway ? `Two processes — start the gateway first, in its own terminal:
+
+\`\`\`bash
+cd gateway && npm install && npm start   # the enforcement boundary — see gateway/README.md
+\`\`\`
+
+Then, in this directory:
+
+\`\`\`bash
+npm install
+npm start
+\`\`\`
+` : `\`\`\`bash
+npm install
+npm start
+\`\`\`
+`}
+${demo.cases.length
+  ? `You should see an ALLOW, then one BLOCK or ESCALATE for each rule of yours the demo can stage, and
+finally a BLOCK for an action outside the mandate entirely. Every step says what it expects and flags
+any surprise.`
+  : `None of your rules could be staged in the demo (see below), so it shows only a BLOCK for an action
+outside the mandate. Your rules are still enforced.`}
+
+## Files
+
+${configLine}
+- \`index.mjs\` — the example. ${withGateway ? 'Signs each request and calls `./gateway` for it; `guard.guardTool()` here is a fast local pre-check, not the enforcement boundary.' : 'Wraps a tool with `guard.guardTool(...)`; the tool only runs when the gate allows.'}
+- \`verify-context.json\` — the request fields of a request that satisfies every rule. \`npm test\` sends
+  it, because a policy that REQUIRES an input blocks a request without it.${withGateway ? `
+- \`gateway/\` — a **separate process** that holds the real tool and independently re-verifies every
+  request. See \`gateway/README.md\` — including what it does NOT close.` : ''}
+
+## What your rules read
+
+A rule can only judge a field your application actually supplies with the request. Supply each of
+these (the demo in \`index.mjs\` does):
+
+${demo.inputs.map((i) => `- \`${i.field}\` — ${i.rules.join(', ')}`).join('\n') || '- (none — your rules read no request fields)'}
+
+**A missing field is not a violation** for an allow-list, consent or PII rule: if your application
+forgets to send \`jurisdiction\` or \`consent\`, that rule simply does not fire. Make sure the field is
+always present. These fields are asserted by the calling agent and are not covered by its signature —
+an agent that can sign could omit or forge one, and the rule would not fire. Source them from a system you
+control, not from model output.${demo.notDemonstrated.length ? `
+
+Rules the demo does not stage (they are still enforced):
+
+${demo.notDemonstrated.map((n) => `- ${n.rule} — ${n.why}`).join('\n')}` : ''}
+
+## \`npm test\`
+
+\`agentsafe-guard verify --context ./verify-context.json\` asserts this agent cannot act outside its
+mandate. Controls this mandate does not set (a spend cap, say — it has none) are reported as **not
+configured**, never as passed. Put it in CI.${demo.cases.length ? '' : `
+
+\`verify-context.json\` is empty because no request that satisfies every rule could be derived from
+yours (a rule using a \`none\` combinator fires on exactly such a request). \`npm test\` may therefore
+report that ordinary work is blocked. Edit \`verify-context.json\` to a request your rules permit.`}
+
+${clonedFreshSection(daemonKey)}
+
+## Change the rules
+
+Edit the agent's SOPs in the dashboard (Legal Entity → SOPs). The agent's behaviour changes live —
+no redeploy. An \`escalate\` verdict is held for an owner to approve; poll \`guard.escalationStatus(id)\`.
+
+## What this is not
+
+${withGateway
+  ? `**The gateway closes one real gap, not every gap.** It stops code that cannot sign as this agent from
+running the tool, and refuses anything outside the mandate. It does **not** make input-dependent rules
+tamper-proof: the request fields your rules read are not signed, so an agent that can sign could omit
+or forge one, and a signed request can be reused for 5 minutes (a value-less action has no sealed
+authorization to claim) — see \`gateway/README.md\`.`
+  : `**Without MetaMynd, you can be bypassed.** \`guard.guardTool()\` wraps the tool in the SAME process as
+the check itself: a client-side convenience, not a boundary. Anything able to call \`performAction()\`
+directly gets the same result the gate would have given it. If this tool ever holds a real credential,
+re-scaffold without \`--no-gateway\` so it lives behind a separate process instead.`}
+
+Full integration guide: \`docs/integration/INTEGRATE-WITH-METAMYND.md\`.
+`;
+}
+
+function examplePackageJson(slug, neutral = false) {
   return JSON.stringify(
     {
       name: slug,
@@ -788,7 +1592,7 @@ function examplePackageJson(slug) {
       // `verify` is scaffolded in because governance that lives only in a dashboard is a
       // thing someone has to remember to look at. As a build step it is a control: a change
       // that widens this agent's authority fails `npm test`.
-      scripts: { start: 'node index.mjs', test: 'agentsafe-guard verify' },
+      scripts: { start: 'node index.mjs', test: neutral ? 'agentsafe-guard verify --context ./verify-context.json' : 'agentsafe-guard verify' },
       dependencies: { [GUARD_PKG]: GUARD_VERSION },
     },
     null,
@@ -881,6 +1685,8 @@ shape, which puts the tool behind a separate process instead. This is the same s
 \`--harness\`'s README documents, for the same reason: a cooperative in-process check has no
 counterparty to disagree with a caller that skips it.`
   }
+
+${clonedFreshSection(daemonKey)}
 
 ## Change the rules
 
@@ -1154,25 +1960,55 @@ function assertScaffoldTarget(outDir, force) {
  * enforcement boundary. Off for --sandbox (shared demo identity, never real credentials
  * anyway) and --no-gateway (opt out, e.g. you're already running your own separate gateway).
  */
-function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'USD', merchant = 'skyward-air', sandbox, withGateway, gatewayPort = DEFAULT_GATEWAY_PORT, force = false }) {
+// `demo` (from buildPolicyCases) selects the NON-financial project; without it this is the historical
+// payment scaffold. `merchant` defaults to a payment demo's merchant only in that financial branch.
+function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'USD', merchant, sandbox, withGateway, gatewayPort = DEFAULT_GATEWAY_PORT, force = false, demo = null }) {
+  const neutral = !!demo;
   assertScaffoldTarget(outDir, force);
   console.log(`\n  ${c.b('Scaffolding')} ${c.dim(outDir)}`);
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
   writeFileSafe(outDir, 'agent.metamynd.json', JSON.stringify(config, null, 2) + '\n', force, 0o600);
-  writeFileSafe(outDir, 'index.mjs', withGateway ? exampleIndex(scope, perTxnMax, gatewayPort, currency, merchant) : exampleIndexNoGateway(scope, perTxnMax, currency, merchant), force);
-  writeFileSafe(outDir, 'package.json', examplePackageJson(slug), force);
+  const paymentMerchant = merchant ?? 'skyward-air';
+  writeFileSafe(
+    outDir,
+    'index.mjs',
+    neutral
+      ? exampleIndexNeutral({ scope, gatewayPort: withGateway ? gatewayPort : null, demo, merchant })
+      : withGateway
+        ? exampleIndex(scope, perTxnMax, gatewayPort, currency, paymentMerchant)
+        : exampleIndexNoGateway(scope, perTxnMax, currency, paymentMerchant),
+    force,
+  );
+  writeFileSafe(outDir, 'package.json', examplePackageJson(slug, neutral), force);
   writeFileSafe(outDir, '.gitignore', gitignore(), force);
-  writeFileSafe(outDir, 'README.md', exampleReadme(slug, scope, withGateway, gatewayPort, config.keyProvider === 'daemon'), force);
+  writeFileSafe(
+    outDir,
+    'README.md',
+    neutral
+      ? exampleReadmeNeutral(slug, scope, withGateway, gatewayPort, config.keyProvider === 'daemon', demo)
+      : exampleReadme(slug, scope, withGateway, gatewayPort, config.keyProvider === 'daemon'),
+    force,
+  );
+  // `npm test` (agentsafe-guard verify --context) needs the request inputs of a compliant request:
+  // a policy that requires evidence/consent blocks a bare baseline request and reads as broken.
+  if (neutral) {
+    const context = { ...(demo.cases[0]?.context ?? {}) };
+    // verify's baseline sends riskLevel "low" unless told otherwise. A rule whose threshold IS "low"
+    // would block that, so when the rules read riskLevel and the passing request has none, say
+    // "no risk level" explicitly (null never fires a risk rule).
+    if (demo.inputs.some((i) => i.field === 'riskLevel') && !('riskLevel' in context)) context.riskLevel = null;
+    writeFileSafe(outDir, 'verify-context.json', JSON.stringify(context, null, 2) + '\n', force);
+  }
 
   if (withGateway) {
     const apiBase = config.apiBase ?? config.api ?? DEFAULT_API;
     const gwDir = join(outDir, 'gateway');
     if (!existsSync(gwDir)) mkdirSync(gwDir, { recursive: true });
-    writeFileSafe(gwDir, 'server.mjs', gatewayServerFile(scope, gatewayPort, apiBase), force);
+    writeFileSafe(gwDir, 'server.mjs', neutral ? gatewayServerFileNeutral(scope, gatewayPort, apiBase) : gatewayServerFile(scope, gatewayPort, apiBase), force);
     writeFileSafe(gwDir, 'package.json', gatewayPackageJson(slug), force);
-    writeFileSafe(gwDir, '.env.example', gatewayEnvExample(), force);
+    writeFileSafe(gwDir, '.env.example', neutral ? gatewayEnvExampleNeutral() : gatewayEnvExample(), force);
     writeFileSafe(gwDir, '.gitignore', gatewayGitignore(), force);
-    writeFileSafe(gwDir, 'README.md', gatewayReadme(slug, scope, gatewayPort), force);
+    writeFileSafe(gwDir, 'README.md', neutral ? gatewayReadmeNeutral(slug, scope, gatewayPort) : gatewayReadme(slug, scope, gatewayPort), force);
   }
 
   const rel = outDir.replace(resolve('.'), '.').replace(/\\/g, '/');
@@ -1195,8 +2031,12 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
   console.log(c.cyan(`    npm install`));
   // The example runs FOUR attempts. This summary promised three, so the one carrying the
   // whole argument — the agent asking to raise its own limit — arrived unannounced.
-  console.log(c.cyan(`    npm start`) + c.dim('   → ALLOW · BLOCK (over cap) · ESCALATE (high risk)'));
-  console.log(c.dim('                 · BLOCK (the agent asking to raise its OWN limit)\n'));
+  if (neutral) {
+    console.log(c.cyan(`    npm start`) + c.dim(`   → ${demoOutcomes(demo)}\n`));
+  } else {
+    console.log(c.cyan(`    npm start`) + c.dim('   → ALLOW · BLOCK (over cap) · ESCALATE (high risk)'));
+    console.log(c.dim('                 · BLOCK (the agent asking to raise its OWN limit)\n'));
+  }
   console.log(c.cyan(`    npm test`) + c.dim('    → assert it CANNOT exceed its mandate. Put this in CI.\n'));
   console.log(c.dim(`  Change the rules any time in the dashboard (Legal Entity → SOPs) — no redeploy.\n`));
 }
@@ -1209,11 +2049,28 @@ async function runSandbox(args) {
   // server-side and then throw it away.
   const outDir = resolve(String(args.out || './metamynd-sandbox'));
   assertScaffoldTarget(outDir, !!args.force);
-  console.log(c.dim(`  → requesting a sandbox agent from ${base} …`));
-  const provisioned = await apiPost(base, '/onboarding/sandbox', {}, null);
+  // The same decision --harness and the hosted flow make, so one policy file scaffolds the same shape everywhere.
+  const fileConfig = typeof args.config === 'string' ? loadConfigFile(args.config) : null;
+  if (fileConfig) console.log(`  ${c.green('✓')} loaded policy config ${c.dim(args.config)}`);
+  const { financial } = announceFinancial(args, fileConfig);
+  warnRulesNotApplied(fileConfig, 'the shared sandbox agent');
+  if (!financial && typeof fileConfig?.scope === 'string' && fileConfig.scope !== 'perform-action') {
+    console.log(`  ${c.yellow('!')} the scope "${fileConfig.scope}" in the config file is not used: the shared sandbox agent's scope is "perform-action".`);
+  }
+  console.log(c.dim(`  → requesting a ${financial ? '' : 'non-financial '}sandbox agent from ${base} …`));
+  const provisioned = await apiPost(base, '/onboarding/sandbox', financial ? {} : { financial: false }, null);
   const config = provisioned?.data;
   if (!config?.agentDid) fail('Sandbox did not return a config with an agentDid.');
+  // A server that predates the non-financial sandbox agent ignores the field and returns the shared PAYMENT agent.
+  // Scaffolding a payment-free project on top of it would hand out spend authority nobody asked for: stop.
+  if (!financial && config.financial !== false) {
+    fail('This server does not offer a non-financial sandbox agent yet: it returned an agent that has spend limits. Use --harness for a free local demo, or provision your own agent (drop --sandbox).');
+  }
   console.log(`  ${c.green('✓')} sandbox agent ${c.b(config.agentDid)} ${c.dim('(shared test identity)')}`);
+  if (!financial) {
+    scaffoldProject({ demo: defaultNeutralDemo(), outDir, config, slug: 'metamynd-sandbox', scope: config.mandate?.scope || 'perform-action', sandbox: true, withGateway: false, force: !!args.force });
+    return;
+  }
   const scope = config.mandate?.scope || 'flight-purchase';
   const perTxnMax = Number(config.perTxnMax) || 500;
   scaffoldProject({ outDir, config, slug: 'metamynd-sandbox', scope, perTxnMax, sandbox: true, withGateway: false, force: !!args.force });
@@ -1262,10 +2119,23 @@ function harnessDefaultSop(perTxnMax, currency) {
   };
 }
 
+/** The default SOP for a NON-financial agent: nothing about amounts (an `amount-unknown` block
+ *  would refuse every action that carries no amount — i.e. all of them), just the amount-free
+ *  high-risk review. The caller's own rules replace this whenever a config file supplies any. */
+function harnessDefaultSopNeutral() {
+  return {
+    molecules: [
+      { id: 'review', name: 'High-risk review', combinator: 'any', atoms: [{ id: 'a2', predicate: 'risk-at-or-above', config: { level: 'high' } }], decision: 'escalate', reasonCode: 'RISK_REVIEW' },
+    ],
+  };
+}
+
 /** Mirrors issueMandate()'s document shape in backend/src/features/policy/mandate/mandate.service.ts
  *  (minus the parts only a real principal/issuer can do: no VC, no Hedera anchor, no signature) —
- *  same shape evaluateMandate() in policy-core.mjs expects either way. */
-function harnessMandate({ scope, currency, maxAmount, perTxnMax, merchants }) {
+ *  same shape evaluateMandate() in policy-core.mjs expects either way.
+ *  `financial: false` adds NO spend constraint at all (mirrors onboarding.provision.ts, where
+ *  omitting currency/maxAmount/perTxnMax together is a non-financial mandate). */
+function harnessMandate({ scope, currency, maxAmount, perTxnMax, merchants, financial = true }) {
   return {
     uid: `urn:metamynd:mandate:local-${crypto.randomUUID()}`,
     profile: 'https://metamynd.ai/odrl/agent-mandate/v1',
@@ -1276,8 +2146,12 @@ function harnessMandate({ scope, currency, maxAmount, perTxnMax, merchants }) {
         target: scope,
         action: 'execute',
         constraint: [
-          { leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: perTxnMax, unit: currency },
-          { leftOperand: 'mm:cumulativeSpend', operator: 'lteq', rightOperand: maxAmount, unit: currency },
+          ...(financial
+            ? [
+                { leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: perTxnMax, unit: currency },
+                { leftOperand: 'mm:cumulativeSpend', operator: 'lteq', rightOperand: maxAmount, unit: currency },
+              ]
+            : []),
           ...(merchants?.length ? [{ leftOperand: 'mm:merchant', operator: 'isAnyOf', rightOperand: merchants }] : []),
         ],
       },
@@ -1332,10 +2206,10 @@ function harnessRulesFile(mandate, sopDocument) {
 // this gateway does per-request re-evaluation only, same as the hosted gateway's baseline
 // before `requireAuthorization` is added. The README says so.
 
-function harnessGatewayServerFile(scope, gatewayPort, agentDid) {
+function harnessGatewayServerFile(scope, gatewayPort, agentDid, neutral = false) {
   return `#!/usr/bin/env node
-// harness-gateway.mjs — a SEPARATE process from your agent. It holds the tool (bookFlight
-// below never runs anywhere else) and independently re-verifies every request against
+// harness-gateway.mjs — a SEPARATE process from your agent. It holds the tool (${neutral ? 'the action below' : 'bookFlight below'}
+// never runs anywhere else) and independently re-verifies every request against
 // ../metamynd-rules.json using the REAL @metamynd/agentsafe-mcp-guard — the same package a
 // production Service uses, just pointed at a local file instead of a hosted issuer. See
 // ../README.md#--gateway for exactly what this does and does not close.
@@ -1378,7 +2252,7 @@ const guard = createMcpGuard({
 // One protected route per gated action in index.mjs. A path with no route below is refused —
 // there is nothing to fall through TO; this gateway IS the tool, not a proxy in front of one.
 const ROUTES = {
-  '/book-flight': { action: '${scope}', run: async (args) => ({ pnr: 'PNR-DEMO', ...args }) },
+  ${neutral ? `'/perform': { action: '${scope}', run: async (args) => ({ done: true, action: '${scope}' }) },` : `'/book-flight': { action: '${scope}', run: async (args) => ({ pnr: 'PNR-DEMO', ...args }) },`}
   '/raise-limit': { action: 'permissions.update', run: async (args) => ({ updated: true, ...args }) },
 };
 
@@ -1812,8 +2686,8 @@ function harnessIndexFile(scope, perTxnMax, port, withGateway, gatewayPort, curr
 import { readFileSync } from 'node:fs';
 import { createGuard } from '${GUARD_PKG}';
 import { startDashboard } from './harness-server.mjs';
-
-const config = JSON.parse(readFileSync('./agent.metamynd.json', 'utf8'));
+${guardFreshnessCheck()}
+${harnessConfigLoad()}
 // 'local' as the api: guardToolLocal() never calls it. Kept required-but-unused rather than
 // silently accepting no api at all, so a later switch to a real gate is one field, not a rewrite.
 const guard = createGuard({ api: 'local', agentDid: config.agentDid, agentKey: config.agentKey });
@@ -1987,6 +2861,193 @@ dashboard.close();
 `;
 }
 
+/**
+ * The harness entry point for a NON-financial agent (BR-006). Same machinery as harnessIndexFile —
+ * guardToolLocal, the local dashboard, the optional gateway process — but nothing in it is about
+ * flights or money: the action is the caller's own scope, and the steps are `demo.cases`, derived
+ * from the caller's own rules (buildPolicyCases). Each step states what it expects and says so
+ * when the evaluator disagrees, so editing the rules file visibly changes the outcome.
+ */
+function harnessIndexFileNeutral({ scope, port, withGateway, gatewayPort, demo, merchant }) {
+  const steps = [
+    ...demo.cases,
+    { kind: 'block', intent: 'the agent asks to change its OWN permissions - an action nobody delegated. Expected to be blocked.', expect: 'block', reasonCode: 'NO_PERMISSION_FOR_ACTION', action: 'permissions.update', context: {} },
+  ];
+  return `// index.mjs — your agent, governed entirely on this machine. No account, no network call
+// for a decision: guardToolLocal() decides allow/block/escalate against ./metamynd-rules.json
+// (edit it directly, or at the dashboard). An escalate is held here for YOU to approve —
+// there is no hosted owner queue in this mode, so open the dashboard URL printed below.
+// The steps below were DERIVED FROM YOUR OWN RULES when this project was scaffolded: one request
+// that should pass, and one per rule that should trip it. Nothing here is about payments.${withGateway ? `
+// Your tool runs in ./harness-gateway/harness-gateway.mjs, a SEPARATE process — it independently
+// re-verifies every signed request for itself. See README.md#--gateway for what that closes.` : ''}
+import { readFileSync } from 'node:fs';
+import { createGuard } from '${GUARD_PKG}';
+import { startDashboard } from './harness-server.mjs';
+${guardFreshnessCheck()}
+${harnessConfigLoad()}
+// 'local' as the api: guardToolLocal() never calls it. Kept required-but-unused rather than
+// silently accepting no api at all, so a later switch to a real gate is one field, not a rewrite.
+const guard = createGuard({ api: 'local', agentDid: config.agentDid, agentKey: config.agentKey });
+
+const dim = (t) => '\\x1b[2m' + t + '\\x1b[0m';
+const bold = (t) => '\\x1b[1m' + t + '\\x1b[0m';
+const rule = (n) => '  ' + '-'.repeat(n);
+
+const dashboard = startDashboard({
+  port: ${port},
+  agentDid: config.agentDid,
+  scope: '${scope}',
+  rulesPath: './metamynd-rules.json',
+  logPath: './metamynd-harness.log.jsonl',
+});
+console.log(dim('  dashboard: ' + dashboard.url + ' (rules, approvals, decision log)'));
+${withGateway ? `console.log(dim('  gateway  : http://localhost:${gatewayPort} (a SEPARATE process — run \\'npm start\\' in ./harness-gateway first)'));\nconsole.log('');` : `console.log('');`}
+
+// Reads the CURRENT rules file fresh every call — editing it (by hand, or at the dashboard)
+// takes effect on the next decision, no restart. The gateway process (when scaffolded) reads the SAME file.
+const getBundle = () => JSON.parse(readFileSync('./metamynd-rules.json', 'utf8'));
+
+// The request's own fields (consent, piiPresent, jurisdiction, ...) travel as the gate's \`context\`.
+const MERCHANT = ${merchant ? JSON.stringify(merchant) : 'undefined'};
+${withGateway ? `const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://localhost:${gatewayPort}';
+// Calls the gateway process instead of a local function — there is no raw performAction() in THIS
+// file to call directly. buildSignedRequest() is pure (no network, no issuer): it signs the request
+// offline with this agent's own did:key, and the gateway verifies that signature for itself.
+async function callGateway(path, action, args) {
+  const signed = await guard.buildSignedRequest({ action, merchant: MERCHANT, context: args });
+  const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ signed, args }) });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
+    err.name = 'GovernanceBlocked';
+    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR' };
+    throw err;
+  }
+  return body;
+}
+` : `// --- Your real tool. Replace the body with your actual implementation. ---
+async function performAction(args) {
+  return { done: true, action: '${scope}' };
+}
+`}
+// --- The GATED version. Register THIS with your agent instead of the raw handler. ---
+const gatedAction = guard.guardToolLocal(
+  '${scope}',                                   // = your mandate scope
+  ${withGateway ? `(args) => callGateway('/perform', '${scope}', args)` : 'performAction'},
+  (a) => ({ merchant: MERCHANT, context: a }),   // map tool args → gate inputs
+  getBundle,
+);
+
+// --- An action the agent was NEVER granted. Wrapping it is the demonstration: no rule anywhere
+// --- forbids it. The mandate simply never mentioned the action.${withGateway ? '' : `
+async function changeOwnPermissions(args) {
+  return { updated: true, ...args };          // never runs, and that is the point
+}`}
+const gatedChangeOwnPermissions = guard.guardToolLocal(
+  'permissions.update',                       // an action NOT in the mandate
+  ${withGateway ? `(args) => callGateway('/raise-limit', 'permissions.update', args)` : 'changeOwnPermissions'},
+  (a) => ({ context: a }),
+  getBundle,
+);
+
+const STEPS = ${JSON.stringify(steps, null, 2)};
+const INPUTS = ${JSON.stringify(demo.inputs)};
+const NOT_STAGED = ${JSON.stringify(demo.notDemonstrated)};
+
+let waitedForApproval = false;
+async function attempt(n, total, step) {
+  const tool = step.action === 'permissions.update' ? gatedChangeOwnPermissions : gatedAction;
+  const action = step.action ?? '${scope}';
+  console.log('');
+  console.log(bold('  Step ' + n + ' of ' + total) + ' - ' + step.intent);
+  console.log(dim('     evaluating locally, no network call...'));
+  let got;
+  let g = {};
+  try {
+    await tool(step.context);
+    got = 'allow';
+    console.log('\\x1b[32m     ALLOWED\\x1b[0m  your tool ran');
+  } catch (e) {
+    g = e.governance ?? {};
+    got = g.decision ?? 'error';
+    if (g.decision === 'escalate') {
+      console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for you to approve - ' + g.reasonCode);
+      const { id, promise } = dashboard.holdForApproval(action, step.context, g);
+      console.log(dim('     open ' + dashboard.url + ' and click Approve/Deny (hold ' + id.slice(0, 8) + '…)'));
+      // Wait for a human once, not once per escalation: a policy with several review rules would
+      // otherwise sit for 20 seconds at each. The rest stay pending on the dashboard.
+      if (!waitedForApproval) {
+        waitedForApproval = true;
+        const result = await Promise.race([promise, new Promise((r) => setTimeout(() => r('timeout'), 20000))]);
+        if (result === 'timeout') console.log(dim('     still pending after 20s — this demo will not wait forever; the dashboard will.'));
+        else console.log(dim('     ' + (result ? 'approved.' : 'denied.')));
+      }
+    } else {
+      console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? e.message));
+      console.log(dim('     your tool never ran - the gate refused before execution.'));
+    }
+    dashboard.logDecision(action, step.context, g);
+  }
+  const asExpected = got === step.expect && (!step.reasonCode || g.reasonCode === step.reasonCode);
+  if (asExpected) console.log(dim('     as expected.'));
+  else console.log('\\x1b[33m     NOT AS EXPECTED\\x1b[0m  expected ' + step.expect + (step.reasonCode ? ' (' + step.reasonCode + ')' : '') + ' — ./metamynd-rules.json or this step has changed since scaffolding.');
+}
+
+console.log(bold('  What this simulation shows'));
+console.log('');
+console.log('  An agent should not be the thing that decides what it is allowed to do. Each step');
+console.log('  below takes the SAME code path and the rules decide - on this machine, with no');
+console.log('  network call. The steps come from YOUR rules in ./metamynd-rules.json.');
+console.log('');
+console.log(dim('  scope   ${scope}  (no spending authority - this agent does not move money)'));
+console.log(dim('  inputs  the fields your application must supply for these rules to judge anything:'));
+for (const i of INPUTS) console.log(dim('            ' + i.field + '  <-  ' + i.rules.join(', ')));
+if (INPUTS.length) console.log(dim('          A missing field never trips an allow-list, consent or PII rule - supply it.'));
+for (const n of NOT_STAGED) console.log(dim('  not staged  ' + n.rule + ' - ' + n.why));
+
+console.log('');
+console.log(rule(66));
+for (let i = 0; i < STEPS.length; i++) await attempt(i + 1, STEPS.length, STEPS[i]);
+console.log('');
+console.log(rule(66));
+
+console.log('');
+console.log(bold('  What this proved'));
+console.log('');
+console.log(dim('   - one code path, several outcomes, decided with zero network calls.'));
+console.log(dim('   - the last step needed no rule to stop it. The agent could not widen its own'));
+console.log(dim('     authority, because it cannot name an action nobody delegated to it.'));
+console.log(dim('   - a blocked or held call never reached your tool at all.'));
+console.log(dim('   - every decision is in ./metamynd-harness.log.jsonl - yours, locally.'));
+console.log('');${withGateway ? `
+console.log(bold('  Checked twice, by two processes.') + ' Your tool lives in ./harness-gateway/harness-gateway.mjs -');
+console.log(dim('  not here. It independently re-verified every step above against the SAME'));
+console.log(dim('  ./metamynd-rules.json, over a signed request, before running your tool.'));
+console.log(dim('  It enforces scope and identity firmly; the rule inputs above are NOT signed, so an'));
+console.log(dim('  agent that can sign could omit or forge one and its rule would not fire.'));
+console.log('');
+console.log(dim('  What --gateway does NOT close: nonce replay across many calls. That needs a STATEFUL'));
+console.log(dim('  authority (the hosted gate claims a real, single-use id against a database) - a local'));
+console.log(dim('  harness has none. See README.md#--gateway for exactly what this does and does not prove.'));
+console.log('');
+console.log('  Edit ./metamynd-rules.json (or the dashboard) and run again - the outcome');
+console.log(dim('  changes, in BOTH processes, from the one file. That is the point.'));` : `
+console.log(bold('  Without MetaMynd, you can be bypassed.') + ' performAction() above runs in THIS');
+console.log(dim('  process - call it directly instead of gatedAction and nothing stops you.'));
+console.log(dim('  --harness proves your policy logic; it does not enforce it against that.'));
+console.log('');
+console.log('  Edit ./metamynd-rules.json (or the dashboard) and run again - the outcome');
+console.log(dim('  changes. This file does not. That is the point.'));
+console.log('');
+console.log(dim('  Want a SEPARATE process that closes the bypass above, still free and local?'));
+console.log(dim('  Re-scaffold with --gateway. Want more than one machine, a queue someone else can'));
+console.log(dim('  approve from, or anchored evidence? That is the hosted platform - drop --harness.'));`}
+console.log('');
+dashboard.close();
+`;
+}
+
 function harnessPackageJson(slug) {
   return JSON.stringify(
     {
@@ -2002,7 +3063,12 @@ function harnessPackageJson(slug) {
   ) + '\n';
 }
 
-function harnessReadme(slug, scope, port, withGateway, gatewayPort) {
+function harnessReadme(slug, scope, port, withGateway, gatewayPort, demo = null) {
+  // `demo` is set for a NON-financial scaffold (BR-006): the steps, inputs and any rule the demo
+  // could not stage are the caller's own, so this README must not talk about spend limits/flights.
+  const neutral = !!demo;
+  const tool = neutral ? 'performAction' : 'bookFlight';
+  const gatedTool = neutral ? 'gatedAction' : 'gatedBookFlight';
   return `# ${slug}
 
 A free, local MetaMynd/AgentSafe governance harness — your own rules, your own identity,
@@ -2015,8 +3081,15 @@ npm install${withGateway ? ' && (cd harness-gateway && npm install)' : ''}
 ${withGateway ? `(cd harness-gateway && npm start &)   # the second process, in the background\n` : ''}npm start
 \`\`\`
 
-You should see an ALLOW, a BLOCK (over the per-transaction cap), an ESCALATE (high risk —
-open the dashboard to approve it), and a BLOCK (an action outside the mandate entirely).
+${neutral
+  ? (demo.cases.length
+    ? `You should see an ALLOW, then one BLOCK or ESCALATE for each rule of yours the demo can stage
+(an ESCALATE is held for you — open the dashboard to approve it), and finally a BLOCK for an
+action outside the mandate entirely. Every step says what it expects and flags any surprise.`
+    : `None of your rules could be staged in the demo (see below), so it shows only a BLOCK for an
+action outside the mandate. Your rules are still enforced; see \`metamynd-rules.json\`.`)
+  : `You should see an ALLOW, a BLOCK (over the per-transaction cap), an ESCALATE (high risk —
+open the dashboard to approve it), and a BLOCK (an action outside the mandate entirely).`}
 
 ## Files
 
@@ -2024,7 +3097,7 @@ open the dashboard to approve it), and a BLOCK (an action outside the mandate en
   \`did:key\` (self-certifying — the verification key is embedded in the DID itself, so a
   signature against it is checkable completely offline). Not anchored to Hedera; that's the
   hosted platform. **Contains a secret key — never commit it.**
-- \`metamynd-rules.json\` — your rules: the mandate (scope + spend limits) and SOP (extra checks).
+- \`metamynd-rules.json\` — your rules: the mandate (${neutral ? 'scope only — this agent has no spending authority' : 'scope + spend limits'}) and SOP (${neutral ? 'your rules' : 'extra checks'}).
   Edit it directly, or at the dashboard. Reloaded on every decision — no restart${withGateway ? ', in BOTH processes' : ''}.
 - \`metamynd-harness.log.jsonl\` — every decision this agent made, append-only.
 - \`harness-server.mjs\` — the local dashboard (port ${port}): rules, pending approvals, decision log.
@@ -2035,16 +3108,37 @@ open the dashboard to approve it), and a BLOCK (an action outside the mandate en
   \`../metamynd-rules.json\`, using the real \`@metamynd/agentsafe-mcp-guard\` — the identical
   package a production Service uses, just pointed at a local file instead of a hosted issuer.` : ''}
 
-## What this is not
+${neutral ? `## What your rules read
+
+A rule can only judge a field your application actually supplies with the request. Supply each
+of these (the demo in \`index.mjs\` does):
+
+${demo.inputs.map((i) => `- \`${i.field}\` — ${i.rules.join(', ')}`).join('\n') || '- (none — your rules read no request fields)'}
+
+**A missing field is not a violation** for an allow-list, consent or PII rule: if your application
+forgets to send \`jurisdiction\` or \`consent\`, that rule simply does not fire. Make sure the
+field is always present.${demo.notDemonstrated.length ? `
+
+Rules the demo does not stage (they are still enforced):
+
+${demo.notDemonstrated.map((n) => `- ${n.rule} — ${n.why}`).join('\n')}` : ''}
+
+` : ''}## What this is not
 
 ${withGateway ? `**\`--gateway\` closes one real gap, not every gap.** Precisely:
 
-**Closed:** the agent process lying to itself. Call \`gatedBookFlight\`'s underlying handler
+**Closed:** the agent process lying to itself. Call \`${gatedTool}\`'s underlying handler
 directly (or skip \`index.mjs\` and hand a forged/altered request straight to
 \`harness-gateway.mjs\`) — either way, the gateway independently re-verifies the Ed25519
-signature and re-evaluates the SAME rules file for itself. There is no raw \`bookFlight()\` left
-in \`index.mjs\` to call for a shortcut, and a signature over an altered amount/merchant fails
-verification regardless of which process sent it.
+signature and re-evaluates the SAME rules file for itself. There is no raw \`${tool}()\` left
+in \`index.mjs\` to call for a shortcut, and a signature over an altered request fails
+verification regardless of which process sent it.${neutral ? `
+
+**Also NOT closed — rule inputs are not signed.** The request fields your rules read (\`consent\`,
+\`piiPresent\`, \`jurisdiction\`, …) travel in the signed request's context, which the signature does
+not cover. An agent that can sign could omit a field or send a different one, and the rule that reads
+it would not fire. The gateway enforces scope and identity firmly; an input-dependent rule is only as
+strong as whatever supplies its input.` : ''}
 
 **NOT closed:** nonce replay and cumulative spend across many calls. Those need a STATEFUL
 authority — the hosted gate's \`requireAuthorization\` atomically claims a real, single-use
@@ -2091,12 +3185,21 @@ async function runHarness(args) {
   const fileConfig = typeof args.config === 'string' ? loadConfigFile(args.config) : null;
   if (fileConfig) console.log(`  ${c.green('✓')} loaded policy config ${c.dim(args.config)}`);
 
+  // Is this a financial agent? A policy file with no spend limit and no monetary rule is taken at its
+  // word: nothing money-shaped is added on the caller's behalf (BR-006). Say what was decided.
+  const { financial } = announceFinancial(args, fileConfig);
+
   const name = await pick('name', 'Agent name', fileConfig?.name ?? 'Local Agent');
-  const scope = await pick('scope', 'Mandate scope (governed action)', fileConfig?.scope ?? 'flight-purchase');
-  const perTxnMax = Number(await pick('per-txn-max', 'Per-transaction cap', String(fileConfig?.perTxnMax ?? '500'))) || 500;
-  const maxAmount = Number(await pick('max-amount', 'Total mandate budget', String(fileConfig?.maxAmount ?? '10000'))) || 10000;
-  const currency = (await pick('currency', 'Currency', fileConfig?.currency ?? 'USD')) || 'USD';
-  const merchantsRaw = await pick('merchants', 'Allowed merchants (comma-sep, blank = any)', Array.isArray(fileConfig?.merchants) ? fileConfig.merchants.join(',') : '');
+  const scope = await pick('scope', 'Mandate scope (governed action)', fileConfig?.scope ?? (financial ? 'flight-purchase' : 'perform-action'));
+  assertSafeScope(scope);
+  const perTxnMax = financial ? Number(await pick('per-txn-max', 'Per-transaction cap', String(fileConfig?.perTxnMax ?? '500'))) || 500 : undefined;
+  const maxAmount = financial ? Number(await pick('max-amount', 'Total mandate budget', String(fileConfig?.maxAmount ?? '10000'))) || 10000 : undefined;
+  const currency = financial ? (await pick('currency', 'Currency', fileConfig?.currency ?? 'USD')) || 'USD' : undefined;
+  if (financial && !interactive && !['per-txn-max', 'max-amount', 'currency'].some((k) => typeof args[k] === 'string') && !['perTxnMax', 'maxAmount', 'currency'].some((k) => fileConfig?.[k] !== undefined)) {
+    // A default the caller never asked for must at least be visible (conformance spec, section B).
+    console.log(`  ${c.yellow('!')} no spend limits supplied — using the defaults ${currency} ${perTxnMax} per transaction, ${maxAmount} in total. If this agent does not move money, pass ${c.b('--non-financial')}.`);
+  }
+  const merchantsRaw = await pick('merchants', financial ? 'Allowed merchants (comma-sep, blank = any)' : 'Allowed recipients (comma-sep, blank = any)', Array.isArray(fileConfig?.merchants) ? fileConfig.merchants.join(',') : '');
   const merchants = String(merchantsRaw).split(',').map((s) => s.trim()).filter(Boolean);
   const port = Number(args.port) || 4400;
   const withGateway = !!args.gateway;
@@ -2112,24 +3215,37 @@ async function runHarness(args) {
   console.log(`  ${c.green('✓')} local agent ${c.b(agentDid)}`);
 
   const sopFields = configFileSopFields(fileConfig);
-  const sopDocument = sopFields.sop ? sopFields.sop.documentJson : harnessDefaultSop(perTxnMax, currency);
+  const sopDocument = sopFields.sop ? sopFields.sop.documentJson : financial ? harnessDefaultSop(perTxnMax, currency) : harnessDefaultSopNeutral();
   if (sopFields.sop) console.log(`  ${c.green('✓')} compiled ${sopDocument.molecules.length} rule(s) from the config file`);
-  const mandate = harnessMandate({ scope, currency, maxAmount, perTxnMax, merchants });
+  const mandate = harnessMandate({ scope, currency, maxAmount, perTxnMax, merchants, financial });
+  // Non-financial: the demo is derived from the rules actually in force, and what it cannot stage is said out loud.
+  const demo = financial ? null : buildPolicyCases(sopDocument.molecules ?? []);
+  if (demo) {
+    console.log(`  ${c.green('✓')} derived ${demo.cases.length} demo case(s) from your rules`);
+    for (const n of demo.notDemonstrated) console.log(`  ${c.yellow('!')} not staged in the demo: ${n.rule} ${c.dim('— ' + n.why + '; still enforced')}`);
+  }
 
   console.log(`\n  ${c.b('Scaffolding')} ${c.dim(outDir)}`);
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
   writeFileSafe(outDir, 'agent.metamynd.json', JSON.stringify({ agentDid, agentKey: privateKeyHex, mode: 'harness' }, null, 2) + '\n', !!args.force, 0o600);
   writeFileSafe(outDir, 'metamynd-rules.json', harnessRulesFile(mandate, sopDocument), !!args.force);
   writeFileSafe(outDir, 'harness-server.mjs', harnessServerFile(), !!args.force);
-  writeFileSafe(outDir, 'index.mjs', harnessIndexFile(scope, perTxnMax, port, withGateway, gatewayPort, currency, merchants[0] || 'demo-merchant'), !!args.force);
+  writeFileSafe(
+    outDir,
+    'index.mjs',
+    financial
+      ? harnessIndexFile(scope, perTxnMax, port, withGateway, gatewayPort, currency, merchants[0] || 'demo-merchant')
+      : harnessIndexFileNeutral({ scope, port, withGateway, gatewayPort, demo, merchant: merchants[0] }),
+    !!args.force,
+  );
   writeFileSafe(outDir, 'package.json', harnessPackageJson(slug), !!args.force);
   writeFileSafe(outDir, '.gitignore', gitignore(), !!args.force);
-  writeFileSafe(outDir, 'README.md', harnessReadme(slug, scope, port, withGateway, gatewayPort), !!args.force);
+  writeFileSafe(outDir, 'README.md', harnessReadme(slug, scope, port, withGateway, gatewayPort, demo), !!args.force);
 
   if (withGateway) {
     const gwDir = join(outDir, 'harness-gateway');
     if (!existsSync(gwDir)) mkdirSync(gwDir, { recursive: true });
-    writeFileSafe(gwDir, 'harness-gateway.mjs', harnessGatewayServerFile(scope, gatewayPort, agentDid), !!args.force);
+    writeFileSafe(gwDir, 'harness-gateway.mjs', harnessGatewayServerFile(scope, gatewayPort, agentDid, !financial), !!args.force);
     writeFileSafe(gwDir, 'package.json', harnessGatewayPackageJson(slug), !!args.force);
     writeFileSafe(gwDir, '.gitignore', gatewayGitignore(), !!args.force);
   }
@@ -2139,13 +3255,16 @@ async function runHarness(args) {
   console.log(`  ${c.dim('Free, local, no account. Not the hosted platform — see README#what-this-is-not.')}\n`);
   console.log(`  Next:`);
   console.log(c.cyan(`    cd ${rel}`));
+  const outcomes = financial
+    ? '   → ALLOW · BLOCK (over cap) · ESCALATE (approve at the dashboard) · BLOCK (ungranted action)\n'
+    : `   → ${demoOutcomes(demo)}\n`;
   if (withGateway) {
     console.log(c.cyan(`    npm install && (cd harness-gateway && npm install)`));
     console.log(c.cyan(`    (cd harness-gateway && npm start &)`) + c.dim('   → the second process, in the background'));
-    console.log(c.cyan(`    npm start`) + c.dim('   → ALLOW · BLOCK (over cap) · ESCALATE (approve at the dashboard) · BLOCK (ungranted action)\n'));
+    console.log(c.cyan(`    npm start`) + c.dim(outcomes));
   } else {
     console.log(c.cyan(`    npm install`));
-    console.log(c.cyan(`    npm start`) + c.dim('   → ALLOW · BLOCK (over cap) · ESCALATE (approve at the dashboard) · BLOCK (ungranted action)\n'));
+    console.log(c.cyan(`    npm start`) + c.dim(outcomes));
   }
   console.log(c.dim(`  Edit ./metamynd-rules.json any time (by hand, or at http://127.0.0.1:${port}) — no redeploy.\n`));
 }
@@ -2198,9 +3317,24 @@ async function runRequest(args) {
   if (!owner) fail('--owner <ownerEmail> is required for a delegated request.');
   const { base, token } = await authFlow(args);
 
-  const name = (typeof args.name === 'string' ? args.name : undefined) ?? 'Delegated Agent';
-  const scope = (typeof args.scope === 'string' ? args.scope : undefined) ?? 'flight-purchase';
-  const perTxnMax = Number(args['per-txn-max']) || 500;
+  // The same decision --harness and the hosted flow make (see announceFinancial): a non-financial request asks the
+  // OWNER to approve no spending authority at all, and says so explicitly - an omitted amount means "use the
+  // defaults" to every existing server, so absence alone must never be read as non-financial.
+  const fileConfig = typeof args.config === 'string' ? loadConfigFile(args.config) : null;
+  if (fileConfig) console.log(`  ${c.green('✓')} loaded policy config ${c.dim(args.config)}`);
+  const { financial } = announceFinancial(args, fileConfig);
+  warnRulesNotApplied(fileConfig, 'a delegated request');
+  const name = (typeof args.name === 'string' ? args.name : undefined) ?? fileConfig?.name ?? 'Delegated Agent';
+  const scope = (typeof args.scope === 'string' ? args.scope : undefined) ?? fileConfig?.scope ?? (financial ? 'flight-purchase' : 'perform-action');
+  assertSafeScope(scope);
+  const perTxnMax = financial ? Number(args['per-txn-max'] ?? fileConfig?.perTxnMax) || 500 : undefined;
+  // Only what was SUPPLIED is sent, so an ordinary `--request` is byte-for-byte what it always was. Before this the
+  // other financial fields in a --config file were read and silently dropped, and the owner saw the server defaults.
+  const maxAmountReq = financial && (args['max-amount'] ?? fileConfig?.maxAmount) !== undefined ? Number(args['max-amount'] ?? fileConfig?.maxAmount) : undefined;
+  const currencyReq = financial ? (typeof args.currency === 'string' ? args.currency : typeof fileConfig?.currency === 'string' ? fileConfig.currency : undefined) : undefined;
+  const merchantsReq = typeof args.merchants === 'string'
+    ? args.merchants.split(',').map((s) => s.trim()).filter(Boolean)
+    : Array.isArray(fileConfig?.merchants) ? fileConfig.merchants.map(String) : [];
   let publicKey, generated;
   if (args.byok) {
     generated = generateAgentKeypair();
@@ -2209,15 +3343,21 @@ async function runRequest(args) {
   }
 
   console.log(c.dim(`  → requesting "${name}" for ${owner} …`));
-  const res = await apiPost(base, '/onboarding/requests', { ownerEmail: owner, name, scope, perTxnMax, ...(publicKey ? { publicKey } : {}) }, token);
+  const res = await apiPost(base, '/onboarding/requests', { ownerEmail: owner, name, scope, ...(financial ? { perTxnMax, ...(maxAmountReq !== undefined && Number.isFinite(maxAmountReq) ? { maxAmount: maxAmountReq } : {}), ...(currencyReq ? { currency: currencyReq } : {}) } : { financial: false }), ...(merchantsReq.length ? { merchants: merchantsReq } : {}), ...(publicKey ? { publicKey } : {}) }, token);
   const d = res.data;
-  const state = { api: base, requestId: d.requestId, claimToken: d.claimToken, byok: !!generated, privateKey: generated?.privateKeyHex ?? null, name, scope, perTxnMax };
+  // A server that predates non-financial requests ignores the field and files the request WITH default spend
+  // limits. The developer cannot withdraw it, so say exactly what now exists and who can deny it; do not save a
+  // claim file for a request this scaffolder must not build on.
+  if (!financial && d?.financial !== false) {
+    fail(`This server does not support non-financial requests yet. Request ${d?.requestId ?? '(unknown id)'} WAS submitted, with default spend limits, so it is not the agent you asked for: ask ${owner} to DENY it in the dashboard (AgentSafe → Agent Requests), and do not claim it.`);
+  }
+  const state = { api: base, requestId: d.requestId, claimToken: d.claimToken, byok: !!generated, privateKey: generated?.privateKeyHex ?? null, name, scope, financial, ...(financial ? { perTxnMax, ...(currencyReq ? { currency: currencyReq } : {}) } : {}) };
   const file = resolve(String(args.out || '.'), REQUEST_STATE_FILE);
   // May carry a BYOK private key (state.privateKey) — same 0600 treatment as agent.metamynd.json.
   writeFileSync(file, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
   if (existsSync(file)) chmodSync(file, 0o600);
 
-  console.log(`  ${c.green('✓')} request ${c.b(d.requestId)} submitted — awaiting ${owner}'s approval`);
+  console.log(`  ${c.green('✓')} request ${c.b(d.requestId)} submitted — awaiting ${owner}'s approval${financial ? '' : c.dim(' (no spending authority requested)')}`);
   console.log(`  ${c.yellow('⚠ saved the one-time claim token to')} ${file.replace(resolve('.'), '.').replace(/\\/g, '/')} ${c.dim('(secret — do not commit)')}\n`);
   console.log(`  The owner approves in the dashboard (AgentSafe → Agent Requests). Then run:`);
   console.log(c.cyan(`    npx create-metamynd-agent --claim --watch\n`));
@@ -2227,10 +3367,19 @@ async function runRequest(args) {
 async function runClaim(args) {
   const file = resolve(String(args['request-file'] || `./${REQUEST_STATE_FILE}`));
   const state = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
-  const base = String((typeof args.api === 'string' ? args.api : undefined) ?? state.api ?? DEFAULT_API).replace(/\/+$/, '');
+  const base = String((typeof args.api === 'string' ? args.api : undefined) ?? state.api ?? process.env.METAMYND_API ?? DEFAULT_API).replace(/\/+$/, '');
   const requestId = (typeof args['request-id'] === 'string' ? args['request-id'] : undefined) ?? state.requestId;
   const claimToken = (typeof args.token === 'string' ? args.token : undefined) ?? state.claimToken;
   if (!requestId || !claimToken) fail(`Need a requestId + claim token (--request-id/--token, or a ${REQUEST_STATE_FILE}).`);
+
+  // Claiming returns a managed key ONCE and wipes it from the server, so nothing that can be caught before the
+  // request may be caught after it.
+  if (args.financial && (args['non-financial'] || state.financial === false)) {
+    fail('--financial contradicts a non-financial request (--non-financial, or the request file says so). Drop one.');
+  }
+  if (args['non-financial'] && state.financial === true) {
+    fail('--non-financial contradicts the request file, which records a request WITH spend limits. Drop the flag, or submit a new non-financial request.');
+  }
 
   const watch = !!args.watch;
   let claimed;
@@ -2261,9 +3410,42 @@ async function runClaim(args) {
     console.log(`  ${c.green('✓')} key verified — MetaMynd never saw your private key`);
   }
 
+  // What was ISSUED decides the shape, not what was hoped for: the config the server returned says whether the
+  // agent carries spend authority. Refuse a mismatch either way rather than scaffold something that contradicts it.
+  const issuedNonFinancial = config.financial === false;
+  const wantsNonFinancial = !!args['non-financial'] || state.financial === false;
+  // The claim has ALREADY happened here: a managed key was returned once and is gone from the server. So before
+  // refusing to scaffold, keep what was returned (never over an existing file) and say the request cannot be denied
+  // any more - it is approved. The remedy is to contain or rotate the agent.
+  const keepConfigAndStop = (why) => {
+    const keptDir = resolve(String(args.out || `./${slugify(state.name || 'metamynd-agent')}`));
+    let kept = null;
+    try {
+      mkdirSync(keptDir, { recursive: true });
+      const name = existsSync(join(keptDir, 'agent.metamynd.json')) ? `agent.metamynd.${String(requestId).slice(0, 8)}.json` : 'agent.metamynd.json';
+      kept = join(keptDir, name);
+      writeFileSync(kept, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+      if (existsSync(kept)) chmodSync(kept, 0o600);
+    } catch { kept = null; }
+    fail(`${why}\n  The request is already APPROVED, so it cannot be denied. ${kept ? `Its config was saved to ${kept.replace(/\\/g, '/')} (a managed key is returned once and cannot be fetched again). ` : ''}NOTHING was scaffolded. Contain or rotate the agent in the dashboard (Agent Identities), or keep it and set the project up by hand.`);
+  };
+  if (wantsNonFinancial && !issuedNonFinancial) {
+    keepConfigAndStop(`You asked for a non-financial agent, but the approved config does not say it is one (financial: ${String(config.financial)}), so it may carry spend limits.`);
+  }
+  if (args.financial && issuedNonFinancial) {
+    keepConfigAndStop('--financial was passed, but the approved agent has NO spending authority (the request was non-financial).');
+  }
   const slug = slugify(state.name || 'metamynd-agent');
   const outDir = resolve(String(args.out || `./${slug}`));
-  scaffoldProject({ outDir, config, slug, scope: state.scope || config.mandate?.scope || 'flight-purchase', perTxnMax: Number(state.perTxnMax) || 500, sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
+  if (issuedNonFinancial) {
+    console.log(`  ${c.green('✓')} non-financial agent ${c.dim('(the approved config has no spending authority) — no spend limits, no payment demo')}`);
+    scaffoldProject({ demo: defaultNeutralDemo(), outDir, config, slug, scope: state.scope || config.mandate?.scope || 'perform-action', sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
+    return;
+  }
+  // The demo must be in the currency the request was filed in: the gate refuses a request in any other currency
+  // against a currency-scoped cap, so a USD demo against a GBP agent is blocked at step 1 and reads as a broken agent.
+  // A request file from before the currency was recorded was filed without one, i.e. in USD.
+  scaffoldProject({ outDir, config, slug, scope: state.scope || config.mandate?.scope || 'flight-purchase', perTxnMax: Number(state.perTxnMax) || 500, currency: typeof state.currency === 'string' && state.currency ? state.currency : 'USD', sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
 }
 
 // ---------- main ----------
@@ -2292,6 +3474,11 @@ async function main() {
   // password in a policy file that gets checked into source control).
   const fileConfig = typeof args.config === 'string' ? loadConfigFile(args.config) : null;
   if (fileConfig) console.log(`  ${c.green('✓')} loaded policy config ${c.dim(args.config)}`);
+
+  // BR-006: is this a financial agent? Same rule as --harness, so one policy file scaffolds the same
+  // shape either way. A non-financial agent is provisioned with NO spend fields (the backend treats
+  // their absence as a non-financial mandate) and gets the neutral project; say what was decided.
+  const { financial } = announceFinancial(args, fileConfig);
 
   const interactive = !args.yes && process.stdin.isTTY;
   const rl = interactive ? makeRl() : null;
@@ -2326,12 +3513,17 @@ async function main() {
 
   // 2. Agent details — a --config file's fields are the default at every prompt/flag below.
   const name = await pick('name', null, 'Agent name', fileConfig?.name ?? 'Support Bot');
-  const scope = await pick('scope', null, 'Mandate scope (governed action)', fileConfig?.scope ?? 'flight-purchase');
-  const perTxnMax = Number(await pick('per-txn-max', null, 'Per-transaction cap', String(fileConfig?.perTxnMax ?? '500'))) || 500;
-  const maxAmount = Number(await pick('max-amount', null, 'Total mandate budget', String(fileConfig?.maxAmount ?? '10000'))) || 10000;
-  const currency = (await pick('currency', null, 'Currency', fileConfig?.currency ?? 'USD')) || 'USD';
+  const scope = await pick('scope', null, 'Mandate scope (governed action)', fileConfig?.scope ?? (financial ? 'flight-purchase' : 'perform-action'));
+  assertSafeScope(scope);
+  const perTxnMax = financial ? Number(await pick('per-txn-max', null, 'Per-transaction cap', String(fileConfig?.perTxnMax ?? '500'))) || 500 : undefined;
+  const maxAmount = financial ? Number(await pick('max-amount', null, 'Total mandate budget', String(fileConfig?.maxAmount ?? '10000'))) || 10000 : undefined;
+  const currency = financial ? (await pick('currency', null, 'Currency', fileConfig?.currency ?? 'USD')) || 'USD' : undefined;
+  if (financial && !interactive && !['per-txn-max', 'max-amount', 'currency'].some((k) => typeof args[k] === 'string') && !['perTxnMax', 'maxAmount', 'currency'].some((k) => fileConfig?.[k] !== undefined)) {
+    // A default the caller never asked for must at least be visible (conformance spec, section B).
+    console.log(`  ${c.yellow('!')} no spend limits supplied — using the defaults ${currency} ${perTxnMax} per transaction, ${maxAmount} in total. Set --per-txn-max / --max-amount / --currency (or the config file) to choose your own.`);
+  }
   const merchantsRaw = await pick(
-    'merchants', null, 'Allowed merchants (comma-sep, blank = any)',
+    'merchants', null, financial ? 'Allowed merchants (comma-sep, blank = any)' : 'Allowed recipients (comma-sep, blank = any)',
     Array.isArray(fileConfig?.merchants) ? fileConfig.merchants.join(',') : '',
   );
   const merchants = String(merchantsRaw).split(',').map((s) => s.trim()).filter(Boolean);
@@ -2381,7 +3573,19 @@ async function main() {
   const sopFields = configFileSopFields(fileConfig);
   if (sopFields.sop) console.log(`  ${c.green('✓')} compiled ${sopFields.sop.documentJson.molecules.length} rule(s) from the config file`);
   console.log(c.dim(`\n  → provisioning "${name}" (identity + mandate + SOP + Standards) …`));
-  const body = { name, scope, currency, maxAmount, perTxnMax, merchants, ...(publicKey ? { publicKey } : {}), ...sopFields };
+  // A non-financial agent sends NO spend fields at all (currency/maxAmount/perTxnMax omitted together
+  // is how the backend recognises one). A rule pack is built from spend limits, so it cannot apply.
+  if (!financial && sopFields.rulePack) {
+    console.log(`  ${c.yellow('!')} the rule pack "${sopFields.rulePack}" cannot be applied to a non-financial hosted agent (the platform applies a pack only when spend limits are supplied) — the default (an amount-free high-risk review) applies. List your rules under "rules" to set your own.`);
+    delete sopFields.rulePack;
+  }
+  const body = {
+    name, scope,
+    ...(financial ? { currency, maxAmount, perTxnMax } : {}),
+    merchants,
+    ...(publicKey ? { publicKey } : {}),
+    ...sopFields,
+  };
   const provisioned = await apiPost(base, '/onboarding/agent', body, token);
   const config = provisioned?.data;
   if (!config?.agentDid) fail('Provisioning did not return a config with an agentDid.');
@@ -2424,7 +3628,21 @@ async function main() {
   }
 
   // 4. Scaffold + next steps
-  scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency, merchant: merchants[0] || 'demo-merchant', sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
+  // The demo comes from the rules actually provisioned: the caller's own, else the backend's default
+  // for a non-financial agent (the same amount-free review harnessDefaultSopNeutral describes).
+  const demo = financial ? null : buildPolicyCases(sopFields.sop?.documentJson?.molecules ?? harnessDefaultSopNeutral().molecules);
+  if (demo) {
+    console.log(`  ${c.green('✓')} derived ${demo.cases.length} demo case(s) from your rules`);
+    for (const n of demo.notDemonstrated) console.log(`  ${c.yellow('!')} not staged in the demo: ${n.rule} ${c.dim('— ' + n.why + '; still enforced')}`);
+  }
+  scaffoldProject({ demo, outDir, config, slug, scope, perTxnMax, currency, merchant: financial ? merchants[0] || 'demo-merchant' : merchants[0], sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
 }
 
-main().catch((e) => fail(e?.stack || e?.message || String(e)));
+// Exported so the smoke tests can exercise the generators directly. Importing this file must not
+// start the CLI, hence the opt-out; a normal `npx create-metamynd-agent` never sets it.
+export {
+  buildPolicyCases, resolveFinancial, policyMolecules, ruleToMolecule,
+  generateAgentKeypair, harnessAgentDid, harnessMandate, harnessRulesFile, harnessDefaultSopNeutral,
+  scaffoldProject, exampleIndexNeutral, exampleReadmeNeutral, gatewayServerFileNeutral, gatewayReadmeNeutral,
+};
+if (!process.env.CREATE_METAMYND_AGENT_NO_MAIN) main().catch((e) => fail(e?.stack || e?.message || String(e)));

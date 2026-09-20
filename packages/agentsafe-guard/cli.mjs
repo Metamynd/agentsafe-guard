@@ -19,7 +19,19 @@ if (cmd === 'demo') {
   // or when a control named by --require is not configured at all.
   const { verify } = await import('./verify.mjs');
   try {
+    // --context <file>: the request context of a request that satisfies every rule (see verify.mjs).
+    let context;
+    // flag() is null when absent and '' when given with no value (`--context` last, or an unset shell
+    // variable) — the latter must be an error, not a silent bare run.
+    if (flag('context') !== null) {
+      const path = flag('context');
+      if (!path) throw new Error('--context needs a file path');
+      try { context = JSON.parse((await import('node:fs')).readFileSync(path, 'utf8')); }
+      catch (e) { throw new Error(`cannot read --context ${path}: ${e.message}`); }
+      if (context === null || typeof context !== 'object' || Array.isArray(context)) throw new Error(`--context ${path} must contain a JSON object`);
+    }
     const result = await verify({
+      context,
       configPath: flag('config') ?? './agent.metamynd.json',
       require: (flag('require') ?? '').split(',').map((s) => s.trim()).filter(Boolean),
       json: process.argv.includes('--json'),
@@ -50,6 +62,9 @@ if (cmd === 'demo') {
       --config <path>     agent config (default ./agent.metamynd.json)
       --require <a,b>     fail when a control is NOT configured, e.g.
                           --require merchants,perTxn
+      --context <path>    JSON file: the request context of a request that
+                          satisfies every rule (rule inputs like consent or
+                          evidenceTypes), for policies that require inputs
       --json              machine-readable output
 
     A control the mandate does not set is reported, never passed: an empty

@@ -41,7 +41,7 @@ const CONTROLS = {
     detail: 'the ceiling on any single action',
     configured: (c) => {
       const k = c.find((x) => x.leftOperand === 'mm:payAmount' && x.operator === 'lteq');
-      return k ? { configured: true, summary: `${k.rightOperand}${k.unit ? ' ' + k.unit : ''}`, limit: Number(k.rightOperand) } : { configured: false };
+      return k ? { configured: true, summary: `${k.rightOperand}${k.unit ? ' ' + k.unit : ''}`, limit: Number(k.rightOperand), unit: k.unit } : { configured: false };
     },
   },
   cumulative: {
@@ -49,7 +49,7 @@ const CONTROLS = {
     detail: 'the ceiling on total spend across actions',
     configured: (c) => {
       const k = c.find((x) => x.leftOperand === 'mm:cumulativeSpend' && x.operator === 'lteq');
-      return k ? { configured: true, summary: `${k.rightOperand}${k.unit ? ' ' + k.unit : ''}`, limit: Number(k.rightOperand) } : { configured: false };
+      return k ? { configured: true, summary: `${k.rightOperand}${k.unit ? ' ' + k.unit : ''}`, limit: Number(k.rightOperand), unit: k.unit } : { configured: false };
     },
   },
   merchants: {
@@ -92,7 +92,15 @@ function packsFor(bundle, action) {
 
 const permits = (v) => v.decision === 'allow' || v.decision === 'observe';
 
-export async function verify({ configPath = './agent.metamynd.json', require: required = [], json = false, log = console.log, env = process.env } = {}) {
+/**
+ * `context` is the request context of a request that satisfies every rule in the agent's policy
+ * (rule inputs such as `consent`, `evidenceTypes`, `jurisdiction`). The baseline and cap checks send
+ * it, because a policy that REQUIRES an input blocks a request without it — which would make the
+ * baseline report a healthy agent as broken, and let a cap "hold" for the wrong reason. Omit it for
+ * a policy with no input-dependent rules (the old behaviour, unchanged). The scope check never
+ * uses it: an ungranted action must be refused whatever the context says.
+ */
+export async function verify({ configPath = './agent.metamynd.json', require: required = [], json = false, log = console.log, env = process.env, context: baseContext = {} } = {}) {
   // AGENT_KEY / AGENT_DID / METAMYND_API from the environment win over the config file.
   // CI is the whole point of this command, and a CI story that requires committing the
   // agent's signing key to the repository is not one — so a key-less config plus a secret
@@ -116,6 +124,12 @@ export async function verify({ configPath = './agent.metamynd.json', require: re
   const found = {};
   for (const [key, spec] of Object.entries(CONTROLS)) found[key] = spec.configured(constraints);
 
+  // The probes must be denominated in the currency the mandate's caps are. `evaluateLocally` assumes USD when a
+  // request names none, and a cap in any other currency refuses a currency-less or mismatched request (fail-closed),
+  // so a GBP agent would fail its own baseline check and read as broken. Only a cap that names a unit sets one.
+  const unitOf = (control) => (control.unit ? { currency: control.unit } : {});
+  const baselineCurrency = unitOf(found.perTxn.configured ? found.perTxn : found.cumulative);
+
   const checks = [];
   const add = (control, status, assertion, verdict, note) =>
     checks.push({ control, status, assertion, decision: verdict?.decision ?? null, reasonCode: verdict?.reasonCode ?? null, note });
@@ -125,7 +139,7 @@ export async function verify({ configPath = './agent.metamynd.json', require: re
   {
     const amount = found.perTxn.configured ? Math.max(1, Math.floor(found.perTxn.limit / 2)) : 1;
     const merchant = found.merchants.list?.length ? found.merchants.list[0] : 'any-merchant';
-    const v = evaluate({ action, amount, merchant, context: { riskLevel: 'low' } });
+    const v = evaluate({ action, amount, ...baselineCurrency, merchant, context: { riskLevel: 'low', ...baseContext } });
     add('baseline', permits(v) ? PASS : FAIL, 'permits ordinary in-scope work', v,
       permits(v) ? null : 'the agent cannot perform the action it was issued for');
   }
@@ -141,7 +155,7 @@ export async function verify({ configPath = './agent.metamynd.json', require: re
   // 3–5. Only assert a limit the mandate actually sets. Asserting an absent control is how
   //      you end up believing in one.
   if (found.perTxn.configured) {
-    const v = evaluate({ action, amount: found.perTxn.limit + 1, merchant: found.merchants.list?.length ? found.merchants.list[0] : 'any-merchant', context: {} });
+    const v = evaluate({ action, amount: found.perTxn.limit + 1, ...unitOf(found.perTxn), merchant: found.merchants.list?.length ? found.merchants.list[0] : 'any-merchant', context: { ...baseContext } });
     add('perTxn', permits(v) ? FAIL : PASS, `refuses ${found.perTxn.limit + 1} against a cap of ${found.perTxn.limit}`, v,
       permits(v) ? 'the per-transaction cap did not hold' : null);
   } else {
@@ -150,8 +164,8 @@ export async function verify({ configPath = './agent.metamynd.json', require: re
 
   if (found.cumulative.configured) {
     const v = evaluate({
-      action, amount: 1, merchant: found.merchants.list?.length ? found.merchants.list[0] : 'any-merchant',
-      cumulativeSpend: found.cumulative.limit + 1, context: {},
+      action, amount: 1, ...unitOf(found.cumulative), merchant: found.merchants.list?.length ? found.merchants.list[0] : 'any-merchant',
+      cumulativeSpend: found.cumulative.limit + 1, context: { ...baseContext },
     });
     add('cumulative', permits(v) ? FAIL : PASS, `refuses spending past a total of ${found.cumulative.limit}`, v,
       permits(v) ? 'the cumulative cap did not hold' : null);
@@ -166,7 +180,7 @@ export async function verify({ configPath = './agent.metamynd.json', require: re
     // Deliberately UNDER any cap: a refusal at an amount that also trips a spend limit
     // proves nothing about merchants, which is exactly how this went unnoticed before.
     const amt = found.perTxn.configured ? Math.max(1, Math.floor(found.perTxn.limit / 2)) : 1;
-    const v = evaluate({ action, amount: amt, merchant: '__unapproved_supplier__', context: {} });
+    const v = evaluate({ action, amount: amt, ...baselineCurrency, merchant: '__unapproved_supplier__', context: { ...baseContext } });
     add('merchants', permits(v) ? FAIL : PASS, 'refuses an unlisted merchant, under the cap', v,
       permits(v) ? 'the merchant allow-list did not hold' : null);
   } else {
