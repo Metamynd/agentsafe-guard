@@ -10,6 +10,7 @@
 // The agent's private key is a Hedera Ed25519 DER key (the AGENT_KEY the seed prints).
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
@@ -85,6 +86,38 @@ export function executionAdapterFromEnv(env = (typeof process !== 'undefined' ? 
  *   agentKey the agent's Ed25519 private key (Hedera DER hex, held only by the agent)
  */
 /**
+ * Read + parse an agent config file, failing with the NEXT STEP rather than a bare `ENOENT`.
+ * `agent.metamynd.json` holds the agent's identity (and, for a managed key, its secret), so it is
+ * deliberately gitignored — which means a fresh clone of any agent project can never contain it.
+ * A raw "no such file or directory" left a first-time user with no way forward (beta regression
+ * 2026-09-20, BR-004); the message below names the three ways to get the file.
+ */
+function readConfigFile(path, who) {
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') {
+      throw new Error([
+        `${who}: no agent config at "${resolvePath(path)}".`,
+        `  agent.metamynd.json holds the agent's identity and key, so it is gitignored - a fresh clone never has it.`,
+        `  To get one:`,
+        `    1. New agent:      npx create-metamynd-agent      (creates the agent and writes this file)`,
+        `    2. Existing agent: dashboard -> Agents -> your agent -> download its configuration, save it as ${path}`,
+        `    3. Kept elsewhere: pass its real path, e.g. createGuardFromConfig('/path/to/agent.metamynd.json')`,
+        `  Then re-run. Step-by-step: https://metamynd.ai/developers/quickstart`,
+      ].join('\n'));
+    }
+    throw new Error(`${who}: cannot read agent config "${path}": ${e && e.message}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error(`${who}: "${path}" is not valid JSON (${e.message}). Re-download the configuration rather than editing it by hand.`);
+  }
+}
+
+/**
  * Async loader — build a guard from the portable config the one-call `POST /onboarding/agent`
  * endpoint returns: a URL, a file path, or the config object itself. Overrides win over the config.
  *   const guard = await createGuardFromConfig('./agent.metamynd.json');
@@ -100,7 +133,7 @@ export function executionAdapterFromEnv(env = (typeof process !== 'undefined' ? 
 export async function createGuardFromConfig(source, overrides = {}) {
   let cfg = source;
   if (typeof source === 'string') {
-    cfg = /^https?:\/\//.test(source) ? await (await fetch(source)).json() : JSON.parse(readFileSync(source, 'utf8'));
+    cfg = /^https?:\/\//.test(source) ? await (await fetch(source)).json() : readConfigFile(source, 'createGuardFromConfig');
   }
   if (cfg && cfg.data && !cfg.agentDid) cfg = cfg.data; // unwrap a { success, data } API response
   const { passphrase, ...rest } = overrides;
@@ -119,8 +152,7 @@ export function createGuard(opts = {}) {
   // addition to explicit { api, agentDid, agentKey }. Explicit fields win over the config.
   let cfg = opts.config ?? null;
   if (!cfg && opts.configPath) {
-    try { cfg = JSON.parse(readFileSync(opts.configPath, 'utf8')); }
-    catch (e) { throw new Error(`createGuard: cannot read configPath "${opts.configPath}": ${e.message}`); }
+    cfg = readConfigFile(opts.configPath, 'createGuard');
   }
   if (cfg && cfg.data && !cfg.agentDid) cfg = cfg.data; // unwrap a { success, data } API response
   const api = opts.api ?? cfg?.apiBase ?? cfg?.api;

@@ -227,6 +227,7 @@ METAMYND_PASSWORD='…' npx create-metamynd-agent --yes …
 | `--gateway` | — | off — `--harness` only; ALSO scaffold a second local process (still zero network, zero account) that independently re-verifies every request via the real `@metamynd/agentsafe-mcp-guard`. Does not close nonce replay/cumulative spend — see the generated `harness-gateway/README.md#--gateway`. |
 | `--sandbox` | — | off (skips login/KYB; shared sandbox agent, still hosted) |
 | `--config <file>` | — | a JSON policy file — see [Policy config file](#policy-config-file---config) |
+| `--non-financial` | — | off — the agent does not move money: no spend limits, no payment demo, demo derived from your own rules. Works in every mode: `--harness`, the default hosted flow, `--sandbox`, and `--request` / `--claim`. Implied by a `--config` file with no spend limit, no `merchants` and no monetary rule; `--financial` opts back in. See [Non-financial agents](#non-financial-agents). |
 | `--no-gateway` | — | off — hosted flow only; skips the default separate tool gateway (see above) |
 | `--gateway-port <n>` | — | `4401` — hosted flow or `--harness --gateway`, the gateway process's port |
 | `--force`, `-f` | — | off — scaffold into a non-empty directory, overwriting existing files |
@@ -284,6 +285,62 @@ shape the dashboard's SOP editor produces) — `rules` is ignored when `molecule
 Any CLI flag still overrides the matching field from the file (`--config base.json --name "Other
 Bot"`), and login credentials are never read from the file — use `--email`/`METAMYND_EMAIL` and
 `METAMYND_PASSWORD` as usual, so a policy file is safe to commit.
+
+## Non-financial agents
+
+Not every governed agent moves money. A customer-communications, healthcare-referral or
+recruitment agent has no per-transaction cap and no currency, and a scaffold that invents them —
+or demonstrates a flight booking — teaches the wrong policy. This works with `--harness` **and**
+with the default hosted flow (login + provision):
+
+- **A `--config` file is the whole policy.** If it sets no `perTxnMax` / `maxAmount` / `currency`,
+  lists no `merchants`, and contains no `amount-over` / `amount-unknown` / `cumulative-over` rule,
+  nothing money-shaped is added, and the scaffold says so. A file that only names a `rulePack` is
+  never assumed non-financial. Set `"financial": true` in the file (or pass `--financial`) to opt
+  back in; `"financial": false` or `--non-financial` forces the other way.
+- **No spend constraint anywhere.** The mandate carries none and the default SOP has no amount rule
+  (an `amount-unknown` block would refuse every action that carries no amount). Hosted: the
+  provisioning call sends no `currency` / `maxAmount` / `perTxnMax` at all — the backend treats their
+  absence as a non-financial mandate. A `rulePack` is built from spend limits, so it is ignored (and
+  the CLI says so); list your rules under `rules` instead.
+- **The demo is derived from your rules.** `npm start` runs one request that satisfies every rule,
+  then one per rule that should trip it, then an action nobody delegated. Each step states what it
+  expects and flags any surprise, so changing your rules visibly changes the outcome. Rules the demo
+  cannot stage (monetary rules, the platform-derived trust score, `observe` decisions, rules that
+  share an input with another rule) are listed in the scaffold output and the generated README —
+  never faked, still enforced.
+- **The generated README lists the request fields your rules read** (`consent`, `piiPresent`,
+  `jurisdiction`, …). An allow-list, consent or PII rule does not fire when its field is absent, so
+  your application must supply it. These fields are asserted by the calling agent.
+
+**Hosted specifics.** The default shape is still agent + `gateway/`. The gateway runs with
+`requireAuthorization: false` and a route with no value fields: the guard only seals a single-use
+authorization for a value-bearing action, and this agent has no spending authority, so requiring one
+would refuse every allowed request. The consequence — **replay of an identical signed request is not
+refused** — is stated in the generated `gateway/README.md`, not glossed over. `npm test` runs
+`agentsafe-guard verify --context ./verify-context.json`: the context is the request fields of a
+compliant request, because a policy that *requires* an input blocks a request without it. Controls a
+non-financial mandate does not set (a spend cap) are reported as "not configured", never as passed.
+
+**Every mode honours it.**
+
+- `--sandbox --non-financial` uses a shared sandbox agent that has **no spend authority** (it is its own agent,
+  not a spend tier). The shared agent's rules are the platform's defaults, so the demo is derived from those; a
+  `--config` file's rules cannot reach an agent you do not provision yourself, and the CLI says so.
+- `--request --non-financial` asks the owner to approve **no spending authority**. The request says so
+  explicitly (`financial: false`); the owner's approval screen reads "no spending authority — this agent does
+  not move money" instead of a limit; and on approval the platform provisions the agent with no spend fields
+  (it does not apply the defaults it applies to an ordinary request). `--claim` then scaffolds the payment-free
+  project. `--claim` follows what was **issued**: an approved agent whose config says `financial: false` never
+  gets a payment demo, and a mismatch either way (you asked for non-financial but the config does not say it is
+  one; `--financial` on a non-financial agent) stops instead of scaffolding.
+- **An older server cannot honour it, and the CLI will not pretend it did.** A server that predates this ignores the
+  field: it would return the shared payment agent (`--sandbox`) or file the request with default spend limits
+  (`--request`). The CLI checks the server's `financial: false` echo and stops with an explanation. For
+  `--request` it also tells you which request now exists so the owner can deny it; no claim file is saved for it.
+
+Flag-only scaffolds (no policy file) keep the historical payment defaults; when none of
+`--per-txn-max` / `--max-amount` / `--currency` was given, the CLI now prints the defaults it used.
 
 ## Bring your own key (`--byok`)
 

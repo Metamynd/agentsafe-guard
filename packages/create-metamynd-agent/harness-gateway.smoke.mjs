@@ -6,7 +6,7 @@
 //
 //   node harness-gateway.smoke.mjs   → PASS when every generated file parses.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -48,6 +48,12 @@ function scaffoldAndCheck(label, extraArgs) {
       check(false, `${label}: ${f.slice(outDir.length + 1)} — ${err.stderr?.toString().slice(0, 300) ?? err.message}`);
     }
   }
+  // Fresh-clone journey (BR-004/BR-005): agent.metamynd.json is gitignored, so a clone never has
+  // it. The generated entry point must say what to do rather than throw a bare ENOENT, and must
+  // warn when a committed lockfile pins a guard older than this scaffold expects.
+  const index = readFileSync(join(outDir, 'index.mjs'), 'utf8');
+  check(/No \.\/agent\.metamynd\.json/.test(index) && /code === 'ENOENT'/.test(index), `${label}: index.mjs explains a missing agent.metamynd.json`);
+  check(/Fresh-clone check/.test(index) && /npm install @metamynd\/agentsafe-guard@latest/.test(index), `${label}: index.mjs warns on a stale installed guard`);
   rmSync(outDir, { recursive: true, force: true });
 }
 

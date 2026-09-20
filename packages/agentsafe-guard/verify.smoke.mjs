@@ -126,6 +126,100 @@ console.log('\n  verify — an agent that CAN exceed its mandate\n');
   ok('--require fails it', req.ok === false, `${req.requiredMissing.length} missing`);
 }
 
+console.log('\n  verify — a policy that REQUIRES request inputs (--context)\n');
+{
+  // A non-financial agent: no spend constraint at all, but a rule that fires when the required
+  // evidence is ABSENT. A bare baseline request carries no evidence, so it is blocked and a
+  // healthy agent reads as broken. --context supplies the inputs a compliant request carries.
+  const evidenceSop = [{
+    id: 'sop',
+    document: { molecules: [{ id: 'kyc', name: 'KYC evidence required', combinator: 'all', atoms: [{ id: 'a', predicate: 'evidence-requirement', config: { required: ['kyc'] } }], decision: 'block', reasonCode: 'NO_KYC' }] },
+  }];
+  const withSops = async (constraints, opts = {}) => {
+    stubFetch(constraints);
+    const inner = globalThis.fetch;
+    globalThis.fetch = async (...a) => {
+      const res = await inner(...a);
+      const body = await res.json();
+      body.data.sops = evidenceSop;
+      return { ...res, json: async () => body };
+    };
+    const lines = [];
+    const result = await verify({ configPath: { apiBase: 'https://example.invalid/api/v1', agentDid: AGENT_DID, agentKey: AGENT_KEY, bundleUrl: 'https://example.invalid/bundle' }, log: (l) => lines.push(l), ...opts });
+    return { ...result, output: lines.join('\n') };
+  };
+  const without = await withSops([]);
+  ok('without --context the baseline is blocked by the evidence rule', status(without, 'baseline') === 'failed');
+  ok('...and says the agent cannot do its job', /cannot perform the action it was issued for/.test(without.output));
+  const withCtx = await withSops([], { context: { evidenceTypes: ['kyc'] } });
+  ok('with --context the baseline passes', status(withCtx, 'baseline') === 'held');
+  ok('the overall result is ok (no spend cap is only "not configured")', withCtx.ok === true);
+  ok('scope is still refused whatever the context says', status(withCtx, 'scope') === 'held');
+  // A cap must hold for the RIGHT reason: with the inputs supplied, the refusal is the cap's.
+  const capped = await withSops([CAP], { context: { evidenceTypes: ['kyc'] } });
+  ok('a cap holds when the request is otherwise compliant', status(capped, 'perTxn') === 'held' && capped.checks.find((c) => c.control === 'perTxn').reasonCode !== 'NO_KYC');
+}
+
+console.log('\n  verify — a risk rule at the "low" threshold vs the hard-coded baseline riskLevel\n');
+{
+  // verify's baseline sends riskLevel "low". A rule whose threshold IS "low" fires on that, so a
+  // healthy agent would read as broken. --context can override it: null = "no risk level", which
+  // never fires a risk rule.
+  const lowRisk = [{ id: 'sop', document: { molecules: [{ id: 'r', name: 'Any risk', combinator: 'all', atoms: [{ id: 'a', predicate: 'risk-at-or-above', config: { level: 'low' } }], decision: 'escalate', reasonCode: 'ANY_RISK' }] } }];
+  const withRiskSops = async (opts = {}) => {
+    stubFetch([]);
+    const inner = globalThis.fetch;
+    globalThis.fetch = async (...a) => {
+      const res = await inner(...a);
+      const body = await res.json();
+      body.data.sops = lowRisk;
+      return { ...res, json: async () => body };
+    };
+    return verify({ configPath: { apiBase: 'https://example.invalid/api/v1', agentDid: AGENT_DID, agentKey: AGENT_KEY, bundleUrl: 'https://example.invalid/bundle' }, log: () => {}, ...opts });
+  };
+  ok('bare baseline is escalated by the low-threshold rule', status(await withRiskSops(), 'baseline') === 'failed');
+  ok('context { riskLevel: null } clears it', status(await withRiskSops({ context: { riskLevel: null } }), 'baseline') === 'held');
+}
+
+console.log('\n  verify — the CLI refuses a --context with no value\n');
+{
+  const { spawnSync } = await import('node:child_process');
+  const cli = new URL('./cli.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+  const r = spawnSync(process.execPath, [cli, 'verify', '--context'], { encoding: 'utf8' });
+  ok('exits 2 (could not run), not a silent bare run', r.status === 2, `status ${r.status}`);
+  ok('says it needs a file path', /--context needs a file path/.test(r.stderr));
+}
+
+console.log('\n  verify — an agent whose caps are NOT in USD\n');
+{
+  // Found running a delegated GBP request end to end: the probes assumed USD, so a healthy GBP agent failed its own
+  // baseline ("cannot perform the action it was issued for") and every non-USD team saw a red build for nothing.
+  // The mandate's caps AND the SOP's currency-scoped cap are both GBP, as the hosted provisioning writes them.
+  const GBP_CAP = { ...CAP, unit: 'GBP' };
+  const GBP_TOTAL = { ...TOTAL, unit: 'GBP' };
+  const gbpSop = [{
+    id: 'sop',
+    document: { molecules: [{ id: 'cap', name: 'Per-transaction cap', combinator: 'any', atoms: [{ id: 'a', predicate: 'amount-over', config: { limit: 500, currency: ['GBP'] } }], decision: 'block', reasonCode: 'SOP_SPEND_CAP' }] },
+  }];
+  const runGbp = async (constraints) => {
+    stubFetch(constraints);
+    const inner = globalThis.fetch;
+    globalThis.fetch = async (...a) => {
+      const res = await inner(...a);
+      const body = await res.json();
+      body.data.sops = gbpSop;
+      return { ok: true, status: 200, json: async () => body };
+    };
+    return run(constraints);
+  };
+  const r = await runGbp([GBP_CAP, GBP_TOTAL, MERCHANTS]);
+  ok('a healthy GBP agent passes overall', r.ok === true, r.checks.filter((c) => c.status === 'failed').map((c) => c.control + ':' + c.reasonCode).join(','));
+  ok('ordinary work still runs', status(r, 'baseline') === 'held');
+  ok('per-transaction cap still refuses over the cap', status(r, 'perTxn') === 'held');
+  ok('cumulative cap still refuses', status(r, 'cumulative') === 'held');
+  ok('merchant allow-list still refuses', status(r, 'merchants') === 'held');
+}
+
 console.log('\n  verify — json output\n');
 {
   const r = await run([CAP, TOTAL, MERCHANTS], { json: true });
