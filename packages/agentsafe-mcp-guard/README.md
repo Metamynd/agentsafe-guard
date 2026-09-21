@@ -159,6 +159,53 @@ signing requests close together could race that replacement window and fail with
 `DAEMON_UNREACHABLE` even though the daemon was healthy. `key-providers.mjs` now retries a
 connection that fails with `ENOENT` for up to 3 seconds before giving up. No API change.
 
+**0.9.0 — a lost claim response no longer strands the hold, and a refused claim can be looked up.**
+- Every claim now carries a fresh, unguessable `Idempotency-Key`, and a claim whose response never arrives
+  (dropped connection, a 5xx) is **retried once with the same key**. If the first attempt had actually landed,
+  the issuer recognises the retry as yours and returns your original grant (`claimAuthorization()` reports
+  `replayed: true`) instead of refusing, so you can go on to execute. Before this, a lost response left the
+  hold claimed with nobody executing it, committed to the cap until reconciled. The key is per call and never
+  persisted: a restarted process, or a second request for the same authorization, gets no replay — a claim is
+  still single-use. A definite answer is never retried; the issuer's `EFFECT_TRANSITION_CONTENDED` (an
+  overlapping attempt of yours is mid-claim) is retried, since it is not a refusal.
+- A second claim of the same authorization is now refused with the stable code
+  **`AUTHORIZATION_ALREADY_CLAIMED`** whatever became of the first (it used to be
+  `INVALID_EFFECT_TRANSITION` or `EFFECT_TRANSITION_CONTENDED` depending on timing).
+- New `lookupOutcome({ authorizationId })` — what became of it? Returns `outcome`
+  (`not_started | expired | in_flight | settled | not_executed | unknown | reversing | reversed |
+  reversal_failed`) and two safety bits: `nothingExecuted` (nothing has run *so far*) and **`retrySafe`**
+  (nothing can run *later* either — true only for `expired` and `not_executed`). Re-authorize and retry only on
+  `retrySafe`. A `not_started` hold is `nothingExecuted` but **not** `retrySafe`: it can still be claimed until
+  its window closes, so a request queued behind a slow gateway could run it while your retry runs too — void
+  it first, then read `not_executed`. Use it after an `AUTHORIZATION_ALREADY_CLAIMED`, and never retry an
+  `unknown` or `in_flight` outcome blindly.
+- The idempotency key must stay secret from the agent (128 bits of randomness; the issuer refuses one under 32
+  characters or containing the authorization id). Never use the authorization id as a *claim* key — it is the
+  one thing the agent knows; it is only the right key to give an *upstream* to de-duplicate on.
+- The authorization id is the effect's natural idempotency key: pass `decision.authorizationId` to an
+  upstream that de-duplicates, and the effect is exactly-once even if you ever run the same call twice.
+  (`@metamynd/agentsafe-http-gateway` 0.9.0 does this for you.) Needs an issuer that understands
+  `Idempotency-Key` (MAGP §8.7.7); an older issuer ignores it and behaves as before.
+
+**0.8.0 — a Service can prove who it is.** A claim token is a bearer secret: it proves "I made the claim",
+not who you are. Give the guard a signing identity and it signs the claim and every settlement call
+(capture / release / mark-unknown) instead:
+
+```js
+const guard = createMcpGuard({
+  serviceDid: 'did:hedera:testnet:…',   // did:key or did:hedera; the key must be the one the DID commits to
+  serviceKey: privateKeyHex,            // or keyProvider: a signing-capable provider
+  issuerApi, requireAuthorization: true,
+});
+```
+
+The issuer records `svc:<did>` as the claimer and only that identity can lower or void the hold; no
+claim token is issued, so nothing can leak. The signature covers the action, the authorization id and
+the amount/reason fields, plus a one-time nonce and timestamp, so a captured call can't be replayed or
+edited. A `serviceDid` with no key (or a non-DID label) keeps the 0.7.0 token behaviour. Limits, stated
+plainly: the issuer verifies the key controls the DID, not that the DID is one you trust — see spec
+§8.7.6. The `daemon` key provider does not sign service messages yet.
+
 **0.7.0 — the claim token is relayed, and a Service can close the hold it claimed.** The issuer now
 treats a *claimed* hold as a commitment: it stays against the mandate's cap until it is settled (it no
 longer lapses with the 15-minute hold TTL), and once claimed it can be settled *below* its amount, or

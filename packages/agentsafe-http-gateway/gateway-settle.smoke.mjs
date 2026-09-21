@@ -13,13 +13,14 @@ import { createHttpGateway } from './gateway.mjs';
 const TOKEN = 'cd'.repeat(32);
 
 /** A guard that "claims" like agentsafe-mcp-guard >= 0.7: the token rides non-enumerable on the verdict. */
-function fakeGuard({ claim = true, helpers = true, throwIn } = {}) {
+function fakeGuard({ claim = true, helpers = true, throwIn, authenticated = false } = {}) {
   const calls = [];
   const guard = {
     async verifyRequest(req) {
       const d = { decision: 'allow', reasonCode: 'AUTHORIZED' };
       if (claim) {
-        Object.defineProperty(d, 'claimToken', { value: TOKEN, enumerable: false });
+        if (authenticated) Object.defineProperty(d, 'counterpartyAuthenticated', { value: true, enumerable: false });
+        else Object.defineProperty(d, 'claimToken', { value: TOKEN, enumerable: false });
         Object.defineProperty(d, 'authorizationId', { value: req.authorizationId, enumerable: false });
       }
       return d;
@@ -48,6 +49,18 @@ test('a 2xx is captured at the authorized amount, with the claim token', async (
   const res = await make({ guard, forward: upstream(200) })(req);
   assert.equal(res.status, 200);
   assert.deepEqual(calls, [['capture', { authorizationId: 'auth-1', claimToken: TOKEN, amountCharged: 250 }]]);
+});
+
+test('an AUTHENTICATED claim (no token) is closed too: captured at the authorized amount, parked UNKNOWN otherwise', async () => {
+  let f = fakeGuard({ authenticated: true });
+  await make({ guard: f.guard, forward: upstream(200) })(req);
+  assert.deepEqual(f.calls, [['capture', { authorizationId: 'auth-1', claimToken: undefined, amountCharged: 250 }]]);
+  f = fakeGuard({ authenticated: true });
+  await make({ guard: f.guard, forward: upstream(503) })(req);
+  assert.deepEqual(f.calls.map((c) => c[0]), ['unknown']);
+  f = fakeGuard({ authenticated: true });
+  await make({ guard: f.guard, forward: upstream(422), gw: { releaseOnStatus: [422] } })(req);
+  assert.deepEqual(f.calls.map((c) => c[0]), ['release']);
 });
 
 test('the caller-visible result never carries the token', async () => {
@@ -127,6 +140,51 @@ test('a blocked verdict never reaches the upstream and never touches a hold', as
   assert.equal(res.status, 403);
   assert.equal(forwarded, false);
   assert.deepEqual(calls, []);
+});
+
+// --- the authorization is the upstream's idempotency key ---
+/** A forward() that records the headers the upstream would have received. */
+const recording = () => { const seen = []; return { seen, forward: async (r) => { seen.push(r.headers); return { status: 200, body: {} }; } }; };
+
+test('the upstream receives the authorization as Idempotency-Key, so a dedupe there makes the effect exactly-once', async () => {
+  const { guard } = fakeGuard();
+  const { seen, forward } = recording();
+  await make({ guard, forward })(req);
+  assert.equal(seen[0]['idempotency-key'], 'auth-1');
+});
+
+test('an Idempotency-Key the AGENT sent is replaced, whatever its casing — never honoured', async () => {
+  const { guard } = fakeGuard();
+  const { seen, forward } = recording();
+  await make({ guard, forward })({ ...req, headers: { 'Idempotency-Key': 'attacker-chosen', 'X-Other': 'kept' } });
+  assert.equal(seen[0]['idempotency-key'], 'auth-1');
+  assert.ok(!('Idempotency-Key' in seen[0]), 'the agent\'s spelling is removed, not left beside ours');
+  assert.equal(seen[0]['X-Other'], 'kept', 'unrelated headers pass through');
+});
+
+test('with no hold claimed nothing is sent — and the AGENT\'s own key is still stripped, never forwarded', async () => {
+  const { guard } = fakeGuard({ claim: false });
+  const { seen, forward } = recording();
+  await make({ guard, forward })(req);
+  assert.ok(!('idempotency-key' in seen[0]));
+  const again = recording();
+  await make({ guard, forward: again.forward })({ ...req, headers: { 'IDEMPOTENCY-KEY': 'attacker-chosen', 'x-a': '1' } });
+  assert.deepEqual(again.seen[0], { 'x-a': '1' }, 'an upstream that dedupes must never see an agent-chosen key');
+});
+
+test('it survives resolveCredential (the credential is added to the same headers, not to a fresh copy of the original)', async () => {
+  const { guard } = fakeGuard();
+  const { seen, forward } = recording();
+  await make({ guard, forward, gw: { resolveCredential: async () => ({ header: 'authorization', value: 'Bearer upstream-secret' }) } })(req);
+  assert.equal(seen[0]['idempotency-key'], 'auth-1');
+  assert.equal(seen[0].authorization, 'Bearer upstream-secret');
+});
+
+test('the original request object is never mutated', async () => {
+  const { guard } = fakeGuard();
+  const headers = { 'x-a': '1' };
+  await make({ guard, forward: upstream(200) })({ ...req, headers });
+  assert.deepEqual(headers, { 'x-a': '1' });
 });
 
 let failed = 0;

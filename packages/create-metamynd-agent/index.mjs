@@ -102,7 +102,7 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.6.0 brings buildAuthMessage's `resource` field and buildLocalDecisionMessage into this
 // package's own bundled policy-core.mjs (alongside the guard's own 0.10.0) — no scaffolded
 // template code changes, but the floor must still cover the real current version.
-const MCP_GUARD_VERSION = '^0.7.0';
+const MCP_GUARD_VERSION = '^0.9.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -114,7 +114,7 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.5.0 adds the OPTIONAL Credential Vault `resolveCredential` hook on createHttpGateway (Module
 // G) — additive and backward-compatible (every existing consumer sees zero behavior change), but
 // the floor must still cover the real current version per this repo's own package-version check.
-const GATEWAY_VERSION = '^0.7.0';
+const GATEWAY_VERSION = '^0.9.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 

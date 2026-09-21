@@ -12,6 +12,14 @@ export function createStaticKeyProvider(serviceKeyHex) {
     async signHandshakeNonce(nonce) {
       return crypto.sign(null, Buffer.from(nonce, 'utf8'), privateKey).toString('hex');
     },
+    /**
+     * Sign one settlement-surface call (claim / capture / void / unknown) as this Service's own identity —
+     * the issuer verifies it against the key embedded in `serviceDid`. The daemon provider does not offer
+     * this yet, so a daemon-backed Service keeps making anonymous (token-bearing) calls.
+     */
+    async signServiceMessage(message) {
+      return crypto.sign(null, Buffer.from(message, 'utf8'), privateKey).toString('hex');
+    },
   };
 }
 
