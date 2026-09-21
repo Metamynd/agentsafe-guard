@@ -253,6 +253,14 @@ Everything here is best-effort and never changes the response the caller gets. I
 `settle: false`, with a guard older than `@metamynd/agentsafe-mcp-guard` 0.7.0 (no token to relay),
 or when the request made no claim (a value-less action, or `requireAuthorization` off).
 
+**0.11.0 — payload binding: the body you forward is the body the agent signed (MAGP §8.3.9, §8.7.11).** When the agent signed a
+payload digest (`agentsafe-guard` 0.14.0 `payload:`, Python `payload=`), the gateway digests the JSON body it is about to
+forward — the same bytes — and the claim it makes states that digest; the issuer refuses a body that is not the one signed and the
+hold stays claimable. This binds the fields the eight-field signature never covered (a payee, an account number). A body that
+is not JSON, or has none, for a request that bound a payload is refused (`PAYLOAD_NOT_BOUND`). `requirePayloadBinding: true` (gateway-wide,
+or per route) also refuses an authorization the agent did not bind (`PAYLOAD_BINDING_REQUIRED`); `route.payload(req)` chooses what is
+digested when the body alone is not the whole call (path parameters, say). Off by default; requires `agentsafe-mcp-guard` 0.11.0.
+
 **0.10.0 — a route can state its own risk (`route.trustedContext`).** The signed request's `riskLevel` is the
 agent's word; a route knows what its own action is. Set `route.trustedContext` to an object, or to
 `(signedRequest, req) => object`, and the gateway hands it to the guard as context it *derived* — most usefully

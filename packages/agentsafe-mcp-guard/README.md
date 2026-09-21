@@ -159,6 +159,15 @@ signing requests close together could race that replacement window and fail with
 `DAEMON_UNREACHABLE` even though the daemon was healthy. `key-providers.mjs` now retries a
 connection that fails with `ENOENT` for up to 3 seconds before giving up. No API change.
 
+**0.11.0 — payload binding: the claim states what this Service will actually execute (MAGP §8.3.9, §8.7.11).**
+`guardIncomingTool(action, handler, { bindPayload: true })` digests the tool's arguments (or `bindPayload: (signed, ...args) => value`
+to choose), refuses locally (`PAYLOAD_NOT_BOUND`) when they differ from the digest the agent signed, and sends the digest with the
+claim — in the `x-magp-payload-digest` header and as a signed field of the claim message — so the issuer compares it with the
+digest it stored at authorize time and refuses a mismatch, leaving the hold unclaimed. `requirePayloadBinding: true` also refuses
+an authorization the agent did not bind (`PAYLOAD_BINDING_REQUIRED`). A payload JSON cannot carry is refused
+(`PAYLOAD_NOT_CANONICALIZABLE`), not skipped, and a grant that does not echo the digest (an issuer that predates binding) is
+refused too. Both options are off by default; `verifyRequest(signed, { payloadDigest, requirePayloadBinding })` is the lower-level form.
+
 **0.10.0 — the agent can no longer skip a risk rule by hiding or understating its risk (D-03).** The rules
 now judge `riskLevel` with provenance (MAGP §6.3), identically to the issuer's gate:
 

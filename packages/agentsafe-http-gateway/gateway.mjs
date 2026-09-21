@@ -19,7 +19,137 @@
 // request actually constrains, not against whatever shape the body happens to expose.
 
 import { matchRoute } from './route-match.mjs';
+import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
 
+/**
+ * Parse the JSON body STRICTLY, for digesting. `JSON.parse` is lossy in ways an attacker between the agent and this gateway can
+ * use: a repeated key is last-wins (an upstream that reads first-wins runs a different payee), an integer beyond 2^53 or a
+ * 20-digit decimal collapses to the nearest double (two different ids or amounts share a digest), and invalid UTF-8 becomes
+ * U+FFFD. The digest is only worth anything if every reader of the forwarded bytes agrees what they say, so a body that is
+ * ambiguous in any of those ways is refused rather than digested:
+ *   - a duplicate object key (compared after unescaping);
+ *   - a number that a double cannot carry exactly: an integer at or beyond 2^53 (2^53 and 2^53+1 are the same double; send large identifiers and amounts as strings), or a
+ *     non-integer with more than 15 significant digits, or one that overflows or underflows;
+ *   - bytes that are not valid UTF-8, or a leading byte-order mark;
+ *   - anything after the value, or a control character inside a string.
+ */
+const NUMBER = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+const MAX_PARSE_DEPTH = 64;
+
+export function parseStrictJson(text) {
+  let i = 0;
+  const fail = (why) => { throw new Error(`body is not strict JSON: ${why} (at ${i})`); };
+  const ws = () => { while (i < text.length && (text[i] === ' ' || text[i] === '\t' || text[i] === '\n' || text[i] === '\r')) i++; };
+  function string() {
+    const start = i;
+    i++;
+    while (i < text.length) {
+      const c = text.charCodeAt(i);
+      if (c === 0x22) { i++; return JSON.parse(text.slice(start, i)); } // JSON.parse validates the escapes
+      if (c < 0x20) fail('a control character inside a string');
+      i += c === 0x5c ? 2 : 1;
+    }
+    return fail('an unterminated string');
+  }
+  function number() {
+    NUMBER.lastIndex = i;
+    const m = NUMBER.exec(text);
+    if (!m) fail('a malformed number');
+    const lit = m[0];
+    i += lit.length;
+    const n = Number(lit);
+    if (!Number.isFinite(n)) fail('a number out of range');
+    const mantissa = lit.replace(/^-/, '').split(/[eE]/)[0].replace('.', '').replace(/^0+/, '').replace(/0+$/, '');
+    if (/^-?\d+$/.test(lit)) {
+      if (Math.abs(n) > Number.MAX_SAFE_INTEGER) fail('an integer at or beyond 2^53 (send large identifiers and amounts as strings)');
+    } else if (mantissa.length > 15) {
+      fail('a number with more than 15 significant digits, which a double cannot carry exactly');
+    }
+    if (n === 0 && mantissa.length > 0) fail('a number that underflows to zero');
+    return n;
+  }
+  function value(depth) {
+    if (depth > MAX_PARSE_DEPTH) fail('nesting too deep');
+    ws();
+    const c = text[i];
+    if (c === '{') {
+      i++;
+      const out = {};
+      const seen = new Set();
+      ws();
+      if (text[i] === '}') { i++; return out; }
+      for (;;) {
+        ws();
+        if (text[i] !== '"') fail('an object key must be a string');
+        const key = string();
+        if (seen.has(key)) fail(`a duplicate key "${key}"`);
+        seen.add(key);
+        ws();
+        if (text[i] !== ':') fail('expected ":"');
+        i++;
+        // defineProperty, not assignment: a key named __proto__ is a key, never the prototype
+        Object.defineProperty(out, key, { value: value(depth + 1), enumerable: true, writable: true, configurable: true });
+        ws();
+        if (text[i] === ',') { i++; continue; }
+        if (text[i] === '}') { i++; return out; }
+        fail('expected "," or "}"');
+      }
+    }
+    if (c === '[') {
+      i++;
+      const out = [];
+      ws();
+      if (text[i] === ']') { i++; return out; }
+      for (;;) {
+        out.push(value(depth + 1));
+        ws();
+        if (text[i] === ',') { i++; continue; }
+        if (text[i] === ']') { i++; return out; }
+        fail('expected "," or "]"');
+      }
+    }
+    if (c === '"') return string();
+    if (c === '-' || (c >= '0' && c <= '9')) return number();
+    for (const [literal, v] of [['true', true], ['false', false], ['null', null]]) {
+      if (text.startsWith(literal, i)) { i += literal.length; return v; }
+    }
+    return fail('an unexpected token');
+  }
+  const result = value(0);
+  ws();
+  if (i < text.length) fail('data after the value');
+  return result;
+}
+
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/**
+ * The digest (spec 8.3.9) of the payload this gateway is about to FORWARD: the JSON body it received, or whatever the route's
+ * `payload(req)` picks (e.g. a body plus path parameters). `{ none: true }` when there is no body to digest; `{ error }` when
+ * there is one JSON cannot carry (a non-JSON body, NaN, a lone surrogate) or one that is ambiguous between readers (a duplicate
+ * key, a number a double cannot hold exactly, invalid UTF-8; see parseStrictJson) — the caller decides what that means, and it
+ * never means "skip the check". The body is decoded and parsed from the SAME bytes that are forwarded.
+ */
+export function executedPayloadDigest(req, route) {
+  try {
+    let value;
+    if (typeof route?.payload === 'function') {
+      value = route.payload(req);
+    } else {
+      const raw = req.rawBody ?? req.body;
+      if (raw == null) return { none: true };
+      value = raw;
+      if (typeof raw === 'string' || raw instanceof Uint8Array) {
+        const text = typeof raw === 'string' ? raw : UTF8.decode(raw);
+        if (!text.trim()) return { none: true };
+        value = parseStrictJson(text);
+      }
+    }
+    return { digest: payloadDigestOf(toWireJson(value)) };
+  } catch (error) {
+    return { error };
+  }
+}
 /** Default extractor: parse the signed MAGP request from the `x-magp-request` header (JSON). */
 export function defaultExtractGovernance(req) {
   const raw = req.headers?.['x-magp-request'] ?? req.headers?.['X-MAGP-Request'];
@@ -268,7 +398,7 @@ function withHeader(headers, name, value) {
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
  */
-export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [] } = {}) {
+export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false } = {}) {
   if (typeof forward !== 'function') throw new Error('createHttpGateway requires a forward(req) function');
 
   /**
@@ -400,6 +530,23 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       }
     }
 
+    // Payload binding (spec 8.3.9): digest the payload this gateway is about to forward and hand it to the guard, which refuses
+    // a mismatch with what the agent signed and states it in the CLAIM — where the issuer compares it with the digest IT stored
+    // at authorize time. `requirePayloadBinding` (per route or gateway-wide) refuses a request whose authorization binds none.
+    // A body that JSON cannot carry, for a request that DID bind a payload, is refused: it cannot be shown to be the one signed.
+    const requireBinding = route.requirePayloadBinding ?? requirePayloadBinding;
+    let payloadDigest;
+    if (request.payloadDigest !== undefined || request.payloadSignature !== undefined || requireBinding) {
+      const executed = executedPayloadDigest(req, route);
+      if (executed.digest) {
+        payloadDigest = executed.digest;
+      } else if (request.payloadDigest !== undefined) {
+        return { status: 403, body: { decision: 'block', reasonCode: 'PAYLOAD_NOT_BOUND', field: 'payload', action: route.action } };
+      } else if (requireBinding) {
+        return { status: 403, body: { decision: 'block', reasonCode: 'PAYLOAD_BINDING_REQUIRED', action: route.action } };
+      }
+    }
+
     let decision;
     try {
       // What THIS route knows about its own action (`route.trustedContext`: an object, or
@@ -413,7 +560,13 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       // a non-object, a riskLevel that is not a level) has a broken deriver. Refuse it — never fall back to the
       // agent's word, which is exactly what the deriver was there to avoid.
       if (configured) assertTrustedContext(trustedContext, route);
-      decision = trustedContext === undefined ? await guard.verifyRequest(request) : await guard.verifyRequest(request, { trustedContext });
+      // What is passed on is only what is set, so a guard that predates an option is called exactly as it always was.
+      const verifyOptions = {
+        ...(trustedContext !== undefined ? { trustedContext } : {}),
+        ...(payloadDigest !== undefined ? { payloadDigest } : {}),
+        ...(requireBinding ? { requirePayloadBinding: true } : {}),
+      };
+      decision = Object.keys(verifyOptions).length ? await guard.verifyRequest(request, verifyOptions) : await guard.verifyRequest(request);
     } catch (err) {
       // Fail CLOSED: a governance error blocks the upstream call.
       return { status: 502, body: { decision: 'block', reasonCode: 'GOVERNANCE_ERROR', error: String(err?.message ?? err) } };

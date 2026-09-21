@@ -5,7 +5,7 @@
  * Zero runtime dependencies: no DB, no IO, no `@hashgraph/sdk`, no clock, no LLM.
  * Given identical inputs, every importer computes an identical verdict (spec §6.3).
  * Signature verification is intentionally NOT here — it needs the key material,
- * not the evaluator; policy-core only builds the canonical message (§7.3).
+ * not the evaluator; policy-core only builds the canonical message (§8.3).
  */
 
 // Types
