@@ -1,5 +1,129 @@
 // GENERATED from backend/src/policy-core — do not edit. Regenerate: npm run build:guard-core
 
+// src/policy-core/provenance.ts
+var PROVENANCE_LEVELS = ["agent_asserted", "agent_signed", "gateway_derived", "authoritative", "attested"];
+var PROVENANCE_RANK = {
+  agent_asserted: 0,
+  agent_signed: 1,
+  gateway_derived: 2,
+  authoritative: 3,
+  attested: 4
+};
+function isProvenance(v) {
+  return typeof v === "string" && Object.prototype.hasOwnProperty.call(PROVENANCE_RANK, v);
+}
+var PROVENANCE_KEY = Symbol.for("magp.context.provenance");
+function provenanceOf(ctx, field) {
+  const map = ctx?.[PROVENANCE_KEY];
+  const p = map && typeof map === "object" ? map[field] : void 0;
+  return isProvenance(p) ? p : "agent_asserted";
+}
+function meetsProvenance(actual, minimum) {
+  return PROVENANCE_RANK[actual] >= PROVENANCE_RANK[minimum];
+}
+var RISK_LEVELS = ["low", "medium", "high", "critical"];
+var RISK_ORDER = { low: 0, medium: 1, high: 2, critical: 3 };
+function normalizeRiskLevel(v) {
+  if (typeof v !== "string") return null;
+  const s = v.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(RISK_ORDER, s) ? s : null;
+}
+function maxRisk(...levels) {
+  let best = null;
+  for (const l of levels) if (l && (best === null || RISK_ORDER[l] > RISK_ORDER[best])) best = l;
+  return best;
+}
+function riskFloorFor(mandate, target) {
+  if (!mandate) return null;
+  let floor = null;
+  for (const p of mandate.permission ?? []) {
+    if (!p || typeof p !== "object") continue;
+    if ((p.target ?? mandate.target) !== target) continue;
+    floor = maxRisk(floor, normalizeRiskLevel(p.riskTier));
+  }
+  return floor;
+}
+var FIELD_KINDS = {
+  riskLevel: "risk",
+  consent: "boolean",
+  piiPresent: "boolean",
+  amount: "number",
+  cumulativeSpend: "number",
+  callCount: "number",
+  evidenceConfidence: "number",
+  holTrustScore: "number",
+  dataSourceId: "string",
+  jurisdiction: "string",
+  dataResidency: "string",
+  model: "string",
+  tool: "string",
+  currency: "string",
+  action: "string",
+  prompt: "string",
+  output: "string",
+  evidenceTypes: "string[]"
+};
+function contextFieldProblem(ctx, field) {
+  const v = ctx?.[field];
+  if (v === void 0 || v === null) return "missing";
+  if (typeof v === "string" && v.trim() === "") return "missing";
+  switch (FIELD_KINDS[field]) {
+    case "risk":
+      return normalizeRiskLevel(v) === null ? "malformed" : null;
+    case "boolean":
+      return typeof v === "boolean" ? null : "malformed";
+    case "number":
+      return typeof v === "number" && Number.isFinite(v) ? null : "malformed";
+    case "string":
+      return typeof v === "string" ? null : "malformed";
+    case "string[]":
+      return Array.isArray(v) && v.every((x) => typeof x === "string") ? null : "malformed";
+    default:
+      return null;
+  }
+}
+var ATOM_DEFAULT_REQUIRED_CONTEXT = {
+  "risk-at-or-above": ["riskLevel"]
+};
+function buildRuleContext(src) {
+  const ctx = {};
+  const prov = /* @__PURE__ */ Object.create(null);
+  const put = (k, v, level) => {
+    Object.defineProperty(ctx, k, { value: v, enumerable: true, writable: true, configurable: true });
+    prov[k] = level;
+  };
+  const layers = [
+    [src.unsigned, "agent_asserted"],
+    [src.signed, "agent_signed"],
+    [src.gatewayDerived, "gateway_derived"],
+    [src.serverDerived, "authoritative"]
+  ];
+  for (const [layer, level] of layers) {
+    for (const [k, v] of Object.entries(layer ?? {})) {
+      if (k === "riskLevel" && (level === "gateway_derived" || level === "authoritative") && normalizeRiskLevel(v) === null) continue;
+      put(k, v, level);
+    }
+  }
+  const floors = [];
+  const addFloor = (v, source) => {
+    const n = normalizeRiskLevel(v);
+    if (n) floors.push({ level: n, source });
+  };
+  addFloor(src.riskFloor, "authoritative");
+  addFloor(src.gatewayDerived?.riskLevel, "gateway_derived");
+  addFloor(src.serverDerived?.riskLevel, "authoritative");
+  const assertedUnsigned = normalizeRiskLevel(src.unsigned?.riskLevel);
+  const assertedSigned = normalizeRiskLevel(src.signed?.riskLevel);
+  const asserted = maxRisk(assertedUnsigned, assertedSigned);
+  if (floors.length > 0) {
+    put("riskLevel", maxRisk(asserted, ...floors.map((f) => f.level)), floors.reduce((best, f) => PROVENANCE_RANK[f.source] > PROVENANCE_RANK[best] ? f.source : best, "agent_asserted"));
+  } else if (asserted) {
+    put("riskLevel", asserted, assertedSigned ? "agent_signed" : "agent_asserted");
+  }
+  Object.defineProperty(ctx, PROVENANCE_KEY, { value: prov, enumerable: true, writable: false });
+  return ctx;
+}
+
 // src/policy-core/atom-registry.ts
 var RISK_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
 function currencyOutOfScope(ctx, cfgCurrency) {
@@ -14,7 +138,8 @@ var ATOM_REGISTRY = {
   "data-source-not-approved": (c, cfg) => !!c.dataSourceId && !(cfg?.approved ?? []).includes(String(c.dataSourceId)),
   "consent-missing": (c) => c.consent === false,
   "risk-at-or-above": (c, cfg) => {
-    const have = RISK_RANK[String(c.riskLevel)];
+    const haveLevel = normalizeRiskLevel(c.riskLevel);
+    const have = haveLevel === null ? void 0 : RISK_RANK[haveLevel];
     const need = RISK_RANK[String(cfg?.level ?? "high")];
     return have !== void 0 && need !== void 0 && have >= need;
   },
@@ -276,6 +401,7 @@ function requiredContextFor(predicates) {
 }
 
 // src/policy-core/standards-rules.ts
+var CONTEXT_UNVERIFIABLE = "CONTEXT_UNVERIFIABLE";
 var PRECEDENCE = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
 function atomFires(atom, ctx) {
   const pred = ATOM_REGISTRY[atom.predicate];
@@ -304,17 +430,49 @@ function moleculeFires(m, ctx) {
       return false;
   }
 }
+function requiredContextOf(m) {
+  const required = /* @__PURE__ */ new Map();
+  const need = (field, level) => {
+    const have = required.get(field);
+    if (!have || PROVENANCE_RANK[level] > PROVENANCE_RANK[have]) required.set(field, level);
+  };
+  for (const a of m.atoms ?? []) {
+    if (!Object.prototype.hasOwnProperty.call(ATOM_DEFAULT_REQUIRED_CONTEXT, a.predicate)) continue;
+    for (const f of ATOM_DEFAULT_REQUIRED_CONTEXT[a.predicate]) need(f, "agent_asserted");
+  }
+  for (const [f, level] of Object.entries(m.requireProvenance ?? {})) {
+    need(f, isProvenance(level) ? level : "attested");
+  }
+  return required;
+}
+function moleculeUnverifiable(m, ctx) {
+  const bad = [];
+  for (const [field, minimum] of requiredContextOf(m)) {
+    if (contextFieldProblem(ctx, field) !== null || !meetsProvenance(provenanceOf(ctx, field), minimum)) bad.push(field);
+  }
+  return bad.sort();
+}
 function evaluateStandardRules(molecules, ctx, standardKey = null) {
   let best = null;
   for (const m of molecules ?? []) {
-    if (moleculeFires(m, ctx)) {
-      if (!best || PRECEDENCE[m.decision] > PRECEDENCE[best.decision]) {
-        best = { decision: m.decision, reasonCode: m.reasonCode, id: m.id };
-      }
+    const fired = moleculeFires(m, ctx);
+    const unverifiable = moleculeUnverifiable(m, ctx);
+    if (!fired && unverifiable.length === 0) continue;
+    let decision = fired ? m.decision : "escalate";
+    if (unverifiable.length > 0 && PRECEDENCE[decision] < PRECEDENCE.escalate) decision = "escalate";
+    const reasonCode = fired ? m.reasonCode : CONTEXT_UNVERIFIABLE;
+    if (!best || PRECEDENCE[decision] > PRECEDENCE[best.decision]) {
+      best = { decision, reasonCode, id: m.id, unverifiable: unverifiable.length > 0 ? unverifiable : void 0 };
     }
   }
   if (!best) return { decision: "allow", reasonCode: null, firedMoleculeId: null, standardKey };
-  return { decision: best.decision, reasonCode: best.reasonCode, firedMoleculeId: best.id, standardKey };
+  return {
+    decision: best.decision,
+    reasonCode: best.reasonCode,
+    firedMoleculeId: best.id,
+    standardKey,
+    ...best.unverifiable ? { unverifiableContext: best.unverifiable } : {}
+  };
 }
 function evaluateBoundStandards(standards, ctx) {
   let best = { decision: "allow", reasonCode: null, firedMoleculeId: null, standardKey: null };
@@ -369,6 +527,19 @@ function validateMolecules(molecules) {
     if (!m.atoms || m.atoms.length === 0) {
       issues.push({ moleculeId: m.id, message: "molecule has no atoms" });
     }
+    if (m.requireProvenance !== void 0) {
+      const rp = m.requireProvenance;
+      if (rp === null || typeof rp !== "object" || Array.isArray(rp)) {
+        issues.push({ moleculeId: m.id, message: "requireProvenance must be an object of { field: level }" });
+      } else {
+        for (const [field, level] of Object.entries(rp)) {
+          if (field.trim() === "") issues.push({ moleculeId: m.id, message: "requireProvenance has an empty field name" });
+          if (!isProvenance(level)) {
+            issues.push({ moleculeId: m.id, message: `requireProvenance '${field}' must be one of agent_asserted|agent_signed|gateway_derived|authoritative|attested` });
+          }
+        }
+      }
+    }
     for (const a of m.atoms ?? []) {
       if (!ATOM_REGISTRY[a.predicate]) {
         issues.push({ moleculeId: m.id, message: `unknown atom predicate '${a.predicate}'` });
@@ -406,9 +577,14 @@ var REASON_BY_OPERAND = {
   "mm:route": "ROUTE_NOT_ALLOWED",
   "mm:counterparty": "COUNTERPARTY_NOT_ALLOWED"
 };
-function reasonFor(constraint) {
+var AMOUNT_OPERANDS = /* @__PURE__ */ new Set(["mm:payAmount", "mm:cumulativeSpend"]);
+function reasonFor(constraint, req) {
   if (!constraint) return "CONSTRAINT_FAILED";
-  return REASON_BY_OPERAND[constraint.leftOperand] ?? `CONSTRAINT_FAILED:${constraint.leftOperand}`;
+  const { leftOperand } = constraint;
+  if (AMOUNT_OPERANDS.has(leftOperand) && !Object.prototype.hasOwnProperty.call(req.values, leftOperand)) {
+    return "AMOUNT_NOT_DETERMINABLE";
+  }
+  return REASON_BY_OPERAND[leftOperand] ?? `CONSTRAINT_FAILED:${leftOperand}`;
 }
 function constraintSatisfied(c, req, strict) {
   const op = OPERATORS[c.operator];
@@ -464,7 +640,7 @@ function evaluateMandate(mandate, req) {
   const firstFail = (perms[0].constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
   return {
     decision: firstFail?.onFail ?? "block",
-    reasonCode: reasonFor(firstFail),
+    reasonCode: reasonFor(firstFail, req),
     matched: { kind: "permission", target: perms[0].target, constraint: firstFail }
   };
 }
@@ -515,6 +691,9 @@ function escapeField(v) {
 }
 function buildAuthMessage(f) {
   return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.resource ?? "", f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+}
+function buildLegacyAuthMessageV1(f) {
+  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
 }
 function buildLocalDecisionMessage(f) {
   return [f.agentDid, f.action, f.decision, f.reasonCode, f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
@@ -569,11 +748,17 @@ function operatingModeGate(mode, ctx) {
   }
 }
 export {
+  ATOM_DEFAULT_REQUIRED_CONTEXT,
   ATOM_REGISTRY,
   ATOM_SPECS,
   CATALOGUED_ATOMS,
+  CONTEXT_UNVERIFIABLE,
   MODES_BY_RANK,
   MODE_RANK,
+  PROVENANCE_KEY,
+  PROVENANCE_LEVELS,
+  PROVENANCE_RANK,
+  RISK_LEVELS,
   SUPERVISED_AMOUNT_CAP,
   applyCapture,
   applyHold,
@@ -582,20 +767,31 @@ export {
   authorityFailure,
   buildAuthMessage,
   buildCheckpointAnchorMessage,
+  buildLegacyAuthMessageV1,
   buildLocalDecisionMessage,
+  buildRuleContext,
   canAuthorize,
+  contextFieldProblem,
   evaluate,
   evaluateBoundStandards,
   evaluateMandate,
   evaluateStandardRules,
   isAuthorityFailure,
   isOperatingMode,
+  isProvenance,
+  maxRisk,
+  meetsProvenance,
   moleculeFires,
+  moleculeUnverifiable,
   moreRestrictive,
+  normalizeRiskLevel,
   operatingModeGate,
+  provenanceOf,
   releaseHold,
   remainingBudget,
   requiredContextFor,
+  requiredContextOf,
+  riskFloorFor,
   sumEventField,
   validateMolecules
 };

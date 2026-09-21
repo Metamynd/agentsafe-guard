@@ -33,6 +33,7 @@
  */
 
 import type { Constraint, Mandate, Operator, Permission } from './mandate.types.js';
+import { maxRisk, normalizeRiskLevel } from './provenance.js';
 
 /**
  * How deep a delegation chain may go.
@@ -169,6 +170,19 @@ function permissionNarrows(parent: Permission, child: Permission): DelegationVer
     }
     if (!comparable) return no('UNCOMPARABLE', `${pc.leftOperand} (${pc.operator})`);
     if (!narrowed) return no('CONSTRAINT_WIDENED', pc.leftOperand);
+  }
+
+  // The owner's risk tier is a FLOOR under whatever risk an agent claims (spec §6.3.3), so a lower one is LESS
+  // scrutiny — a widening, however innocent it looks. A child may keep or raise its parent's tier, never drop or
+  // lower it; and a tier that is not a recognised level is refused outright rather than read as "no floor", so a
+  // typo ("HIGHH") cannot quietly remove the floor either.
+  const childTierRaw = (child as { riskTier?: unknown }).riskTier;
+  if (childTierRaw !== undefined && normalizeRiskLevel(childTierRaw) === null) return no('UNCOMPARABLE', 'riskTier');
+  const parentTier = normalizeRiskLevel((parent as { riskTier?: unknown }).riskTier);
+  if (parentTier) {
+    const childTier = normalizeRiskLevel(childTierRaw);
+    if (!childTier) return no('CONSTRAINT_DROPPED', 'riskTier');
+    if (maxRisk(parentTier, childTier) !== childTier) return no('CONSTRAINT_WIDENED', 'riskTier');
   }
   return ok();
 }

@@ -192,6 +192,21 @@ function isNonScalar(v) {
   return v !== null && typeof v === 'object';
 }
 
+const RISK_LEVELS = new Set(['low', 'medium', 'high', 'critical']);
+
+/**
+ * A route's `trustedContext`, once resolved, must be a real object, and any `riskLevel` in it a real level (read
+ * case- and whitespace-tolerantly, as policy-core does). Anything else means the deriver is broken; throwing here
+ * fails the request closed (502 GOVERNANCE_ERROR, nothing forwarded).
+ */
+function assertTrustedContext(tc, route) {
+  const where = `route "${route?.method ?? '*'} ${route?.path}"`;
+  if (tc === null || typeof tc !== 'object' || Array.isArray(tc)) throw new Error(`trustedContext for ${where} must be an object (got ${tc === null ? 'null' : Array.isArray(tc) ? 'an array' : typeof tc})`);
+  if (Object.prototype.hasOwnProperty.call(tc, 'riskLevel') && !(typeof tc.riskLevel === 'string' && RISK_LEVELS.has(tc.riskLevel.trim().toLowerCase()))) {
+    throw new Error(`trustedContext.riskLevel for ${where} is not one of low|medium|high|critical`);
+  }
+}
+
 /** A copy of `headers` with every spelling of `name` removed, then `name` set to `value` when there is one. */
 function withHeader(headers, name, value) {
   const out = {};
@@ -387,7 +402,18 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
 
     let decision;
     try {
-      decision = await guard.verifyRequest(request);
+      // What THIS route knows about its own action (`route.trustedContext`: an object, or
+      // `(request, req) => object`) is context the gateway DERIVED, not the agent's claim — most usefully
+      // `{ riskLevel: 'high' }` for a wire-transfer route. The guard applies it over whatever the agent said and
+      // labels it `gateway_derived` (spec §6.4.3): the agent can raise its risk, never lower it below this. A
+      // throwing deriver fails the request closed (below), never silently down to the agent's word.
+      const configured = route?.trustedContext !== undefined;
+      const trustedContext = typeof route?.trustedContext === 'function' ? await route.trustedContext(request, req) : route?.trustedContext;
+      // A route that CONFIGURES a deriver but gets nothing usable back (a lookup that missed and returned undefined,
+      // a non-object, a riskLevel that is not a level) has a broken deriver. Refuse it — never fall back to the
+      // agent's word, which is exactly what the deriver was there to avoid.
+      if (configured) assertTrustedContext(trustedContext, route);
+      decision = trustedContext === undefined ? await guard.verifyRequest(request) : await guard.verifyRequest(request, { trustedContext });
     } catch (err) {
       // Fail CLOSED: a governance error blocks the upstream call.
       return { status: 502, body: { decision: 'block', reasonCode: 'GOVERNANCE_ERROR', error: String(err?.message ?? err) } };

@@ -67,7 +67,9 @@ const bundle = {
 const guard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
 
 /** Build a signed authorize request the way the agent guard would. */
-function signedRequest({ amount, currency = 'USD', merchant = 'amadeus', context = {}, issuedAt = new Date().toISOString(), tamper = false }) {
+// An honest client states its risk: the bundle's Standard has a risk rule, and a request that leaves `riskLevel`
+// out is escalated, not waved through (see the D-03 section below).
+function signedRequest({ amount, currency = 'USD', merchant = 'amadeus', context = { riskLevel: 'low' }, issuedAt = new Date().toISOString(), tamper = false }) {
   const action = 'flight-purchase';
   const nonce = crypto.randomUUID();
   const message = buildAuthMessage({ agentDid: agent.did, action, amount, currency, merchant, nonce, issuedAt });
@@ -94,7 +96,82 @@ await check('a few seconds in the future (ordinary clock skew) → allow', signe
 // Math.abs() used to treat a future issuedAt identically to a past one, accepting a request
 // signed up to 5 minutes ahead of server time — not clock skew, a pre-signing window.
 await check('minutes in the future → block (was accepted before this was fixed)', signedRequest({ amount: 100, issuedAt: new Date(Date.now() + 4 * 60 * 1000).toISOString() }), ['block', 'REQUEST_EXPIRED']);
-await check('forged itinerary cannot shadow signed $600 → block', signedRequest({ amount: 600, context: { 'mm:payAmount': 1 } }), ['block', 'SOP_SPEND_CAP']);
+await check('forged itinerary cannot shadow signed $600 → block', signedRequest({ amount: 600, context: { riskLevel: 'low', 'mm:payAmount': 1 } }), ['block', 'SOP_SPEND_CAP']);
+
+console.log('\n— D-03: the agent cannot skip a risk rule by hiding, garbling or understating its risk (spec §6.4.3) —');
+{
+  await check('OMITTING riskLevel → escalate (was allow)', signedRequest({ amount: 100, context: {} }), ['escalate', 'CONTEXT_UNVERIFIABLE']);
+  await check('"HIGH" upper-case is read as high → escalate RISK_REVIEW (was allow)', signedRequest({ amount: 100, context: { riskLevel: 'HIGH' } }), ['escalate', 'RISK_REVIEW']);
+  await check('an unrecognised riskLevel → escalate, never "not risky"', signedRequest({ amount: 100, context: { riskLevel: 'banana' } }), ['escalate', 'CONTEXT_UNVERIFIABLE']);
+  await check('null riskLevel → escalate', signedRequest({ amount: 100, context: { riskLevel: null } }), ['escalate', 'CONTEXT_UNVERIFIABLE']);
+
+  // The owner classed the action high: it travels in the signed mandate, so the guard applies the same floor.
+  const tiered = { ...bundle, mandates: [{ action: 'flight-purchase', document: { permission: [{ ...bundle.mandates[0].document.permission[0], riskTier: 'high' }] } }] };
+  const tierGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => tiered });
+  const checkTier = async (name, req, expect) => {
+    const v = await tierGuard.verifyRequest(req);
+    const ok = v.decision === expect[0] && v.reasonCode === expect[1];
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}  →  ${v.decision}/${v.reasonCode}`);
+  };
+  await checkTier('owner tier=high: an agent claiming "low" is still judged high → escalate', signedRequest({ amount: 100, context: { riskLevel: 'low' } }), ['escalate', 'RISK_REVIEW']);
+  await checkTier('owner tier=high: an agent that says nothing is judged high too', signedRequest({ amount: 100, context: {} }), ['escalate', 'RISK_REVIEW']);
+  await checkTier('owner tier=high: garbage cannot hurt the floor', signedRequest({ amount: 100, context: { riskLevel: 'banana' } }), ['escalate', 'RISK_REVIEW']);
+
+  // What the SERVICE derived from the real call beats the agent's claim, and the agent can only raise it.
+  const gwCheck = async (name, req, trustedContext, expect) => {
+    const v = await guard.verifyRequest(req, { trustedContext });
+    const ok = v.decision === expect[0] && v.reasonCode === expect[1];
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}  →  ${v.decision}/${v.reasonCode}`);
+  };
+  await gwCheck('gateway-derived riskLevel=high beats an agent claim of "low" → escalate', signedRequest({ amount: 100, context: { riskLevel: 'low' } }), { riskLevel: 'high' }, ['escalate', 'RISK_REVIEW']);
+  await gwCheck('gateway-derived riskLevel=low supplies the risk when the agent sent none → allow', signedRequest({ amount: 100, context: {} }), { riskLevel: 'low' }, ['allow', 'AUTHORIZED']);
+  await gwCheck('the agent may still raise its own risk above the gateway\'s → escalate', signedRequest({ amount: 100, context: { riskLevel: 'high' } }), { riskLevel: 'low' }, ['escalate', 'RISK_REVIEW']);
+
+  // A rule can DEMAND a trusted source: the agent's own honest "low" is then not enough.
+  const strict = JSON.parse(JSON.stringify(bundle));
+  strict.standards[0].document.molecules[0].requireProvenance = { riskLevel: 'gateway_derived' };
+  const strictGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => strict });
+  const strictCheck = async (name, req, opts, expect) => {
+    const v = await strictGuard.verifyRequest(req, opts);
+    const ok = v.decision === expect[0] && v.reasonCode === expect[1];
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}  →  ${v.decision}/${v.reasonCode}`);
+  };
+  await strictCheck('requireProvenance=gateway_derived: an honest agent-only "low" → escalate', signedRequest({ amount: 100, context: { riskLevel: 'low' } }), undefined, ['escalate', 'CONTEXT_UNVERIFIABLE']);
+  await strictCheck('requireProvenance=gateway_derived: satisfied by the gateway\'s own derivation → allow', signedRequest({ amount: 100, context: { riskLevel: 'low' } }), { trustedContext: { riskLevel: 'low' } }, ['allow', 'AUTHORIZED']);
+
+  // A trustedContext the Service CONFIGURED but that yields nothing usable means the deriver is broken. That is a
+  // refused request — never a quiet fallback to the agent's own word, which is what the deriver was there to avoid.
+  for (const [name, bad] of [['riskLevel that is not a level', { riskLevel: 'severe' }], ['riskLevel undefined (a lookup that missed)', { riskLevel: undefined }], ['riskLevel a number', { riskLevel: 7 }], ['null', null], ['an array', ['high']], ['a string', 'high']]) {
+    const v = await guard.verifyRequest(signedRequest({ amount: 100, context: { riskLevel: 'low' } }), { trustedContext: bad });
+    const good = v.decision === 'block' && v.reasonCode === 'GUARD_ERROR';
+    if (!good) failed++;
+    console.log(`${good ? 'ok  ' : 'FAIL'}  broken trustedContext (${name}) → refused, not a quiet fallback  →  ${v.decision}/${v.reasonCode}`);
+  }
+  {
+    const empty = await guard.verifyRequest(signedRequest({ amount: 100, context: { riskLevel: 'low' } }), { trustedContext: {} });
+    const good = empty.decision === 'allow';
+    if (!good) failed++;
+    console.log(`${good ? 'ok  ' : 'FAIL'}  an empty trustedContext object is valid (it states nothing; requireProvenance is how a rule insists)  →  ${empty.decision}/${empty.reasonCode}`);
+  }
+  const broken = async (opt) => { try { await guard.guardIncomingTool('flight-purchase', async () => 'done', { trustedContext: opt })(signedRequest({ amount: 100, context: { riskLevel: 'low' } })); return 'ran'; } catch (e) { return `threw:${/trustedContext/.test(String(e?.message))}`; } };
+  for (const [name, opt, want] of [['a function returning undefined', () => undefined, 'threw:true'], ['a function returning a junk riskLevel', () => ({ riskLevel: 'nope' }), 'threw:true'], ['a function that throws', () => { throw new Error('classifier down'); }, 'threw:false']]) {
+    const got = await broken(opt); const good = got === want; if (!good) failed++;
+    console.log(`${good ? 'ok  ' : 'FAIL'}  guardIncomingTool trustedContext ${name} → the call is refused, the handler never runs  →  ${got}`);
+  }
+
+  // guardIncomingTool: the tool author states the risk of THIS tool; an object or a function of the call.
+  const denied = async (tool) => { try { await tool(signedRequest({ amount: 100, context: { riskLevel: 'low' } })); return 'ran'; } catch (e) { return `${e.governance?.decision}/${e.governance?.reasonCode}`; } };
+  const okA = await denied(guard.guardIncomingTool('flight-purchase', async () => 'done', { trustedContext: { riskLevel: 'high' } }));
+  const okB = await denied(guard.guardIncomingTool('flight-purchase', async () => 'done', { trustedContext: () => ({ riskLevel: 'high' }) }));
+  const okC = await denied(guard.guardIncomingTool('flight-purchase', async () => 'done', { trustedContext: { riskLevel: 'low' } }));
+  for (const [name, got, want] of [['guardIncomingTool trustedContext object', okA, 'escalate/RISK_REVIEW'], ['guardIncomingTool trustedContext function', okB, 'escalate/RISK_REVIEW'], ['guardIncomingTool low trustedContext lets an honest request run', okC, 'ran']]) {
+    const ok = got === want; if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}  →  ${got}`);
+  }
+}
 
 console.log('\n— unit-bearing mandate constraint (currency) —');
 {
@@ -176,7 +253,7 @@ console.log('\n— resource included in the signed message (canonical §7.3, 8 f
     const issuedAt = new Date().toISOString();
     const message = buildAuthMessage({ agentDid: agent.did, action, amount: 0, currency: 'USD', merchant: '', resource, nonce, issuedAt });
     const signature = agent.sign(message);
-    return { agentDid: agent.did, action, amount: 0, currency: 'USD', resource: tamperResource ?? resource, nonce, issuedAt, signature };
+    return { agentDid: agent.did, action, amount: 0, currency: 'USD', resource: tamperResource ?? resource, itinerary: { riskLevel: 'low' }, nonce, issuedAt, signature };
   }
   const checkResource = async (name, req, expect) => {
     const v = await resourceGuard.verifyRequest(req);
@@ -209,6 +286,23 @@ console.log('\n— operating-mode autonomy ladder at the edge (Phase 2.5b) —')
   await checkMode('SUPERVISED escalates a spend at/above the cap', 'supervised', signedRequest({ amount: 100 }), ['escalate', 'MODE_SUPERVISED_REVIEW']);
   await checkMode('SUPERVISED allows a small spend below the cap', 'supervised', signedRequest({ amount: 10 }), ['allow', 'AUTHORIZED']);
   await checkMode('a mode escalate never downgrades a rule block', 'restricted', signedRequest({ amount: 600 }), ['block', 'SOP_SPEND_CAP']);
+
+  // SUPERVISED escalates a HIGH-risk action even for a small spend — and the risk it judges is the effective one,
+  // so an agent cannot skip that by claiming "low" about an action its owner classed high.
+  const tieredMode = (mode) => createMcpGuard({
+    serviceDid: service.did, serviceKey: service.keyHex,
+    fetchBundle: async () => {
+      const b = JSON.parse(JSON.stringify(bundle));
+      b.standards = []; // isolate the mode gate from the rule layer
+      b.mandates[0].document.permission[0].riskTier = 'high';
+      Object.defineProperty(b, '__operatingMode', { value: { mode }, enumerable: false });
+      return b;
+    },
+  });
+  const tv = await tieredMode('supervised').verifyRequest(signedRequest({ amount: 10, context: { riskLevel: 'low' } }));
+  const tvOk = tv.decision === 'escalate' && tv.reasonCode === 'MODE_SUPERVISED_REVIEW';
+  if (!tvOk) failed++;
+  console.log(`${tvOk ? 'ok  ' : 'FAIL'}  SUPERVISED + owner tier=high: a small spend claimed "low" still escalates  →  ${tv.decision}/${tv.reasonCode}`);
 }
 
 console.log('\n— mutual handshake (§8.2) —');

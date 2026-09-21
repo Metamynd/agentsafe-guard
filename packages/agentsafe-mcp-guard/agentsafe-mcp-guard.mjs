@@ -12,13 +12,27 @@
 // Dependencies are the two generated, zero-external-dependency bundles:
 //   policy-core.mjs (deterministic evaluator) and magp-did.mjs (key-in-DID verify).
 import crypto from 'node:crypto';
-import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, maxRisk, normalizeRiskLevel } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 import { verifyBundle } from './magp-policy.mjs';
 import { resolveKeyProvider } from './key-providers.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A `trustedContext` this Service configured must be a real object, and any `riskLevel` in it must be a real
+ * level. One that is not (a lookup that missed and returned undefined, a typo, a junk value) means the deriver is
+ * BROKEN — and the safe reading of a broken deriver is a refused call, never "carry on with the agent's word",
+ * which is exactly what the deriver was there to avoid. `undefined` itself means "not configured".
+ */
+function assertTrustedContext(tc, where) {
+  if (tc === undefined) return;
+  if (tc === null || typeof tc !== 'object' || Array.isArray(tc)) throw new Error(`trustedContext${where ? ` for ${where}` : ''} must be an object (got ${tc === null ? 'null' : Array.isArray(tc) ? 'an array' : typeof tc})`);
+  if (Object.prototype.hasOwnProperty.call(tc, 'riskLevel') && normalizeRiskLevel(tc.riskLevel) === null) {
+    throw new Error(`trustedContext${where ? ` for ${where}` : ''}.riskLevel is not one of low|medium|high|critical`);
+  }
+}
 
 /** Freshness window for signed requests and handshake nonces (spec §7.7). How far `issuedAt`
  *  may be BEHIND server time — network/processing delay. */
@@ -310,8 +324,15 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     return body.data;
   }
 
-  /** Evaluate the agent's bundle against the request via policy-core (signed fields last). */
-  function verdictFromBundle(bundle, req) {
+  /**
+   * Evaluate the agent's bundle against the request via policy-core (signed fields last).
+   *
+   * `trustedContext` is context THIS SERVICE derived from the real request (never from the agent): it is applied
+   * over the agent's claim and labelled `gateway_derived`, so a rule can require it (`requireProvenance`) and a
+   * lie in the itinerary cannot outvote it. The mandate's own `riskTier` (in the signed bundle) is a risk floor
+   * under whatever the agent claims, exactly as at the issuer's gate (spec §6.4.3).
+   */
+  function verdictFromBundle(bundle, req, trustedContext) {
     const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, itinerary = {}, cumulativeSpend = amount, now } = req;
     const mandates = bundle.mandates ?? [];
     const mandate = mandates.find((m) => m.action === action)?.document;
@@ -333,7 +354,12 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // cumulative-over Standards/SOP atom always sees currency as absent and fires closed
       // (SOP_SPEND_CAP on a genuinely in-cap request), and a resource-scope atom never runs
       // at all. Mirrors mandate.service.ts's ruleCtx (PR #588), the parity target for this.
-      context: applySignedLast(itinerary, { action, agentDid, amount, currency, merchant, resource }),
+      context: buildRuleContext({
+        unsigned: itinerary,
+        signed: { action, agentDid, amount, currency, merchant, resource },
+        gatewayDerived: trustedContext,
+        riskFloor: riskFloorFor(mandate, action),
+      }),
       mandateRequest: mandate
         ? {
             target: action,
@@ -361,10 +387,15 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * locally against the agent's issuer-hosted bundle. Fails CLOSED: any bad
    * signature, staleness, fetch error, or evaluation error returns a block.
    * @param {{agentDid,action,amount?,currency?,merchant?,resource?,itinerary?,nonce,issuedAt,signature}} signed
+   * @param {{ trustedContext?: Record<string, unknown> }} [options] `trustedContext`: context this Service derived
+   *   from the real request (e.g. `{ riskLevel: 'high' }` for a wire-transfer route) — NEVER anything the agent sent.
+   *   It outranks the agent's claim and is labelled `gateway_derived`; a risk it states can be raised by the agent
+   *   but not lowered. Without it the rules see the agent's own claim, as before.
    * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
-  async function verifyRequest(signed = {}) {
+  async function verifyRequest(signed = {}, { trustedContext } = {}) {
     try {
+      assertTrustedContext(trustedContext); // a broken deriver is a refused request (GUARD_ERROR), never a quiet downgrade
       const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature } = signed;
       if (!agentDid || !action || !nonce || !issuedAt || !signature) {
         return { decision: 'block', reasonCode: 'MALFORMED_REQUEST' };
@@ -403,7 +434,11 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // as a non-enumerable sibling. READ_ONLY refuses a value-bearing action up-front;
       // SUPERVISED/RESTRICTED only ESCALATE, applied to the verdict below so a rule block
       // still outranks the floor (most-restrictive-wins, mirroring the gate).
-      const modeGate = operatingModeGate(bundle?.__operatingMode?.mode, { amount, riskLevel: signed?.itinerary?.riskLevel });
+      // The risk it judges is the EFFECTIVE one — the owner's tier (in the signed bundle) and this Service's own
+      // derivation are floors under the agent's claim, so "low" cannot dodge the SUPERVISED high-risk escalation.
+      const mandateForRisk = (bundle?.mandates ?? []).find((m) => m.action === action)?.document;
+      const effectiveRisk = maxRisk(riskFloorFor(mandateForRisk, action), normalizeRiskLevel(trustedContext?.riskLevel), normalizeRiskLevel(signed?.itinerary?.riskLevel)) ?? undefined;
+      const modeGate = operatingModeGate(bundle?.__operatingMode?.mode, { amount, riskLevel: effectiveRisk });
       if (modeGate.decision === 'block') return { decision: 'block', reasonCode: modeGate.reasonCode };
       // 3b. Signed-bundle verification + risk-tiered fail-closed (Phase F, §5.3.2/§5.3.3). When a
       // policy key is configured, a value-bearing action (amount > 0) MUST fail closed on an
@@ -413,7 +448,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         const v = verifyBundle(bundle, { publicKey: policyPublicKey, valueBearing: Number(amount) > 0 });
         if (!v.ok) return { decision: 'block', reasonCode: v.reasonCode };
       }
-      const verdict = verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} });
+      const verdict = verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} }, trustedContext);
       // Mode ESCALATE floor lifts an otherwise-PERMIT (allow or observe) to human review
       // (escalate outranks observe, so a flag never masks it) — mirrors the backend gate.
       const final = (verdict.decision === 'allow' || verdict.decision === 'observe') && modeGate.decision === 'escalate'
@@ -463,7 +498,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * agent's signed request must be passed as the first argument. Throws
    * GovernanceBlocked on any non-allow decision.
    */
-  function guardIncomingTool(action, handler, { settle: settleClaim = false } = {}) {
+  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext } = {}) {
     return async (signed, ...rest) => {
       // The WRAPPED TOOL's own `action` is authoritative — never `signed?.action` (the caller's
       // own claim). A Service that wraps more than one tool with ONE guard instance (the normal
@@ -475,7 +510,14 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // this guard (e.g. a wire transfer) and have it execute under that unrelated verification.
       // Mirrors gateway.mjs's `route.action ?? signed.action` — "the route pins the action ...
       // the client can't pick it" — for exactly the same reason, one layer down at the tool call.
-      const decision = await verifyRequest({ ...signed, action });
+      // `trustedContext` (an object, or `(signed, ...rest) => object`) is what THIS tool's author derived from
+      // the real call — the risk of wiring money vs reading a report — never the agent's claim. A throwing
+      // deriver fails the call closed (a governance error, not a silent downgrade to the agent's word).
+      const derived = typeof trustedContext === 'function' ? await trustedContext(signed, ...rest) : trustedContext;
+      // Configured but yielding nothing usable (a function that returned undefined) is a broken deriver, not "no
+      // trusted context": refuse rather than fall back to the agent's word. `undefined` option = not configured.
+      if (trustedContext !== undefined) assertTrustedContext(derived === undefined ? null : derived, `"${action}"`);
+      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived });
       // allow/observe both PERMIT the tool call; observe is permit-but-flag (SAFR §11).
       if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`MCP guard ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);

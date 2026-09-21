@@ -388,6 +388,16 @@ polls until the owner approves, then scaffolds the project (the same default two
 the full flow above — `--no-gateway`/`--gateway-port` work here too). With `--byok` the keypair is
 generated locally and control is proven on claim — MetaMynd never sees the private key.
 
+## Risk: say it, or have your owner set it
+
+The starter rules include a high-risk review. A request that sends **no** `riskLevel` (or an unrecognised one)
+is no longer waved through: it is **escalated** (`CONTEXT_UNVERIFIABLE`) for a human, because an agent that omits
+its risk is indistinguishable from one hiding it. The scaffolded financial examples send `riskLevel` (`'low'`
+unless you say otherwise) — that default is a placeholder, not an assessment — and the neutral template passes
+your own `args` as the context, so include it there. A real integration should send an honest one — or, better, not depend on the agent at all: a mandate
+permission can carry an owner-set `riskTier` that no claim can lower, and a gateway route can derive the risk
+itself with `route.trustedContext` (`@metamynd/agentsafe-http-gateway` 0.10.0). See MAGP §6.3.
+
 ## Security
 
 `agent.metamynd.json` contains the agent's **secret key** (a managed key, or — with `--byok` — the one

@@ -107,6 +107,53 @@ async function main() {
     ok(res.status === 403 && res.body.reasonCode === 'ROUTE_NOT_ALLOWED', 'denyByDefault blocks an unmatched route');
   }
 
+  // route.trustedContext: what the ROUTE knows about its own action (its risk tier) is handed to the guard as context
+  // the gateway DERIVED, never the agent's claim (spec §6.4.3).
+  {
+    const seen = [];
+    const spyGuard = { verifyRequest: async (r, opts) => { seen.push({ trustedContext: opts?.trustedContext, args: opts === undefined ? 1 : 2 }); return { decision: 'allow', reasonCode: 'OK' }; } };
+    const wireRoute = (extra) => [{ method: 'POST', path: '/wire', action: 'wire-transfer', bind: false, ...extra }];
+    const call = (gw) => gw({ method: 'POST', path: '/wire', headers: signedHeader({ action: 'wire-transfer' }), body: null });
+
+    let gw = createHttpGateway({ guard: spyGuard, routes: wireRoute({ trustedContext: { riskLevel: 'high' } }), forward });
+    await call(gw);
+    ok(seen[0].trustedContext?.riskLevel === 'high', 'route.trustedContext (object) reaches the guard as trustedContext');
+
+    seen.length = 0;
+    gw = createHttpGateway({ guard: spyGuard, routes: wireRoute({ trustedContext: (request, req) => ({ riskLevel: request.amount > 50 ? 'high' : 'low', path: req.path }) }), forward });
+    await call(gw);
+    ok(seen[0].trustedContext?.riskLevel === 'high' && seen[0].trustedContext?.path === '/wire', 'route.trustedContext (function) derives from the signed request AND the real request');
+
+    seen.length = 0;
+    gw = createHttpGateway({ guard: spyGuard, routes: wireRoute({}), forward });
+    await call(gw);
+    ok(seen[0].args === 1, 'a route with no trustedContext calls the guard exactly as before (one argument) — no behaviour change for existing routes');
+
+    // an AGENT cannot supply it: nothing in the request the agent controls is read as trusted context
+    seen.length = 0;
+    gw = createHttpGateway({ guard: spyGuard, routes: wireRoute({}), forward });
+    await gw({ method: 'POST', path: '/wire', headers: { ...signedHeader({ action: 'wire-transfer', trustedContext: { riskLevel: 'low' }, itinerary: { trustedContext: { riskLevel: 'low' } } }), 'x-trusted-context': '{"riskLevel":"low"}' }, body: null });
+    ok(seen[0].args === 1, 'a trustedContext smuggled in the agent\'s request or headers is ignored');
+
+    // a CONFIGURED deriver that yields nothing usable is a broken deriver: fail CLOSED, never fall back to the agent's word
+    for (const [name, bad] of [['a function returning undefined', () => undefined], ['an object with a junk riskLevel', { riskLevel: 'severe' }], ['a riskLevel that is undefined', () => ({ riskLevel: undefined })], ['null', () => null], ['an array', ['high']], ['a string', 'high']]) {
+      const b4 = forwarded.length; seen.length = 0;
+      const g = createHttpGateway({ guard: spyGuard, routes: wireRoute({ trustedContext: bad }), forward });
+      const r = await call(g);
+      ok(r.status === 502 && r.body.reasonCode === 'GOVERNANCE_ERROR' && forwarded.length === b4 && seen.length === 0, `a broken trustedContext (${name}) fails CLOSED: 502, the guard is never consulted, nothing forwarded`);
+    }
+    // ...whereas an empty object is a valid statement of nothing, and a real level (any casing) is accepted
+    seen.length = 0;
+    await call(createHttpGateway({ guard: spyGuard, routes: wireRoute({ trustedContext: { riskLevel: ' HIGH ' } }), forward }));
+    ok(seen.length === 1 && seen[0].trustedContext.riskLevel === ' HIGH ', 'a riskLevel in any casing is accepted (the guard normalises it)');
+
+    // a throwing deriver fails the request CLOSED — never silently down to the agent's word, and nothing is forwarded
+    const before = forwarded.length;
+    gw = createHttpGateway({ guard: spyGuard, routes: wireRoute({ trustedContext: () => { throw new Error('classifier down'); } }), forward });
+    const res = await call(gw);
+    ok(res.status === 502 && res.body.decision === 'block' && res.body.reasonCode === 'GOVERNANCE_ERROR' && forwarded.length === before, 'a throwing trustedContext deriver fails CLOSED (502 GOVERNANCE_ERROR) and forwards nothing');
+  }
+
   if (failed === 0) { console.log('\nPASS — generic HTTP interception gateway governs protected routes'); process.exit(0); }
   else { console.error(`\nFAIL — ${failed} check(s) failed`); process.exit(1); }
 }

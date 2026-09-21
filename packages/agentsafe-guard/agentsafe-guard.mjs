@@ -11,7 +11,7 @@
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, maxRisk, normalizeRiskLevel } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
@@ -347,7 +347,9 @@ export function createGuard(opts = {}) {
     // SIBLING (like `contained`) and biases the edge verdict identically to the gate.
     // READ_ONLY denies a value-bearing action up-front; SUPERVISED/RESTRICTED only
     // ESCALATE, applied to the verdict below so a rule block/escalate still outranks it.
-    const modeGate = operatingModeGate(operatingMode?.mode, { amount, riskLevel: context?.riskLevel });
+    // The EFFECTIVE risk (spec §6.4.3): the owner's tier in the mandate is a floor under the agent's own claim, so
+    // this local pre-check agrees with the gate instead of telling the agent "low" is enough.
+    const modeGate = operatingModeGate(operatingMode?.mode, { amount, riskLevel: maxRisk(riskFloorFor(mandate, action), normalizeRiskLevel(context?.riskLevel)) ?? undefined });
     if (modeGate.decision === 'block') {
       return { decision: 'block', reasonCode: modeGate.reasonCode, authorizationId: null, remaining: null, proofRef: null };
     }
@@ -362,7 +364,7 @@ export function createGuard(opts = {}) {
       // omitting them here means a currency-scoped amount-over/cumulative-over Standards/SOP
       // atom always sees currency as absent and fires closed. Mirrors mandate.service.ts's
       // ruleCtx (PR #588) and the same fix in agentsafe-mcp-guard.mjs's verdictFromBundle.
-      context: applySignedLast(context, { action, agentDid, amount, currency, merchant, resource }),
+      context: buildRuleContext({ unsigned: context, signed: { action, agentDid, amount, currency, merchant, resource }, riskFloor: riskFloorFor(mandate, action) }),
       mandateRequest: mandate
         ? {
             target: action,

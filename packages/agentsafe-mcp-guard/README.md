@@ -159,6 +159,27 @@ signing requests close together could race that replacement window and fail with
 `DAEMON_UNREACHABLE` even though the daemon was healthy. `key-providers.mjs` now retries a
 connection that fails with `ENOENT` for up to 3 seconds before giving up. No API change.
 
+**0.10.0 — the agent can no longer skip a risk rule by hiding or understating its risk (D-03).** The rules
+now judge `riskLevel` with provenance (MAGP §6.3), identically to the issuer's gate:
+
+- A missing or unrecognised `riskLevel` **escalates** (`CONTEXT_UNVERIFIABLE`) for any rule that uses the
+  risk atom (it used to read as "not risky" and be allowed); `"HIGH"` is read as `high`. An agent that sends no
+  `riskLevel` will now be escalated.
+- **`trustedContext`** — what *this Service* derived from the real call, never from the agent. Pass it to
+  `verifyRequest(signed, { trustedContext: { riskLevel: 'high' } })`, or per tool:
+  `guardIncomingTool('wire-transfer', handler, { trustedContext: { riskLevel: 'high' } })` (an object, or
+  `(signed, ...rest) => object`). It is applied over the agent's claim and labelled `gateway_derived`; the agent
+  can raise its risk above it, never lower it below it. A deriver that throws, or that is configured but yields
+  nothing usable (returns `undefined`, a non-object, or a `riskLevel` that is not a level), fails the call closed —
+  it never falls back to the agent's word.
+- The mandate's owner-set **`riskTier`** (in the signed bundle) is a further floor, so the agent's "low" about an
+  action the owner classed `high` is judged `high`; and the SUPERVISED-mode high-risk escalation judges that
+  effective risk too.
+- A rule can demand a trusted source with `requireProvenance: { riskLevel: 'gateway_derived' }`.
+
+Without `trustedContext`, an owner tier or `requireProvenance`, the agent's claim is still all the rules see —
+this closes hiding and garbling; those three close understating.
+
 **0.9.0 — a lost claim response no longer strands the hold, and a refused claim can be looked up.**
 - Every claim now carries a fresh, unguessable `Idempotency-Key`, and a claim whose response never arrives
   (dropped connection, a 5xx) is **retried once with the same key**. If the first attempt had actually landed,

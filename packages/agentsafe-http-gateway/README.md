@@ -253,6 +253,25 @@ Everything here is best-effort and never changes the response the caller gets. I
 `settle: false`, with a guard older than `@metamynd/agentsafe-mcp-guard` 0.7.0 (no token to relay),
 or when the request made no claim (a value-less action, or `requireAuthorization` off).
 
+**0.10.0 — a route can state its own risk (`route.trustedContext`).** The signed request's `riskLevel` is the
+agent's word; a route knows what its own action is. Set `route.trustedContext` to an object, or to
+`(signedRequest, req) => object`, and the gateway hands it to the guard as context it *derived* — most usefully
+`{ riskLevel: 'high' }` on a wire-transfer route:
+
+```js
+routes: [{ method: 'POST', path: '/wire', action: 'wire-transfer', valueFields: ['amount'], allowedFields: ['amount'],
+           trustedContext: { riskLevel: 'high' } }]
+```
+
+The guard applies it over whatever the agent said and labels it `gateway_derived` (MAGP §6.3): the agent can
+raise its risk above it, never lower it below it, and a rule that `requireProvenance` a trusted source is
+satisfied by it. Nothing in the agent's request or headers is ever read as trusted context. A deriver that
+throws, or that is configured but yields nothing usable (`undefined`, a non-object, a `riskLevel` that is not
+a level), fails the request closed (`502 GOVERNANCE_ERROR`, nothing forwarded) — never a fallback to the agent's word. A route with no `trustedContext`
+calls the guard exactly as before. Raised the `agentsafe-mcp-guard` floor to `^0.10.0`: a missing or
+unrecognised `riskLevel` now escalates there (`CONTEXT_UNVERIFIABLE`), so an agent that sends none is held for
+review — set `trustedContext` (or an owner `riskTier`) and it no longer depends on the agent.
+
 **0.9.0 — the upstream gets the authorization as its `Idempotency-Key`.** One authorization is one
 execution, so the gateway now sends `Idempotency-Key: <authorizationId>` on the forwarded request. An
 upstream that de-duplicates on that header makes the effect exactly-once even if the gateway is ever asked

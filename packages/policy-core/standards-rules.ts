@@ -1,6 +1,18 @@
 import { ATOM_REGISTRY } from './atom-registry.js';
 import { ATOM_SPECS, type AtomConfigField } from './atom-catalog.js';
 import type { EvaluationContext, PolicyDecision } from './types.js';
+import {
+  ATOM_DEFAULT_REQUIRED_CONTEXT,
+  PROVENANCE_RANK,
+  contextFieldProblem,
+  isProvenance,
+  meetsProvenance,
+  provenanceOf,
+  type ContextProvenance,
+} from './provenance.js';
+
+/** The reason a molecule escalated because it could not trust the context it was asked to judge. */
+export const CONTEXT_UNVERIFIABLE = 'CONTEXT_UNVERIFIABLE';
 
 /**
  * The Standards rules engine — the DETERMINISTIC runtime gate.
@@ -47,6 +59,15 @@ export interface Molecule {
   decision: FireDecision;
   reasonCode: string;
   /**
+   * Optional minimum PROVENANCE per context field (spec §6.4.3): `{ riskLevel: 'authoritative' }` says this
+   * rule may only judge a `riskLevel` the issuer, the mandate's owner or an attestation vouches for — never
+   * one the agent merely asserted. A field that is missing, malformed, or less trusted than required makes
+   * the molecule ESCALATE (`CONTEXT_UNVERIFIABLE`), whatever its combinator, instead of quietly not
+   * firing. Omitted = no requirement beyond ATOM_DEFAULT_REQUIRED_CONTEXT, so every existing document
+   * behaves exactly as before.
+   */
+  requireProvenance?: Record<string, ContextProvenance>;
+  /**
    * Optional control namespace (SAFR §8) — a FREEFORM classifier tag, e.g.
    * `safr.exposure` or `metamynd.sop`. policy-core stays framework-agnostic: the tag
    * is metadata for filtering/stacking/export, never used by the deterministic gate.
@@ -71,6 +92,8 @@ export interface StandardRuleResult {
   reasonCode: string | null;
   firedMoleculeId: string | null;
   standardKey: string | null;
+  /** Present when the winning molecule could not trust the context it judged: the fields it could not. */
+  unverifiableContext?: string[];
 }
 
 /**
@@ -120,25 +143,77 @@ export function moleculeFires(m: Molecule, ctx: EvaluationContext): boolean {
 }
 
 /**
+ * The context fields a molecule cannot be trusted to judge without, and the least trust it accepts for each:
+ * what its atoms always require (ATOM_DEFAULT_REQUIRED_CONTEXT, at least the agent's own word, but present
+ * and well-formed), raised by whatever the molecule itself declares in `requireProvenance`.
+ */
+export function requiredContextOf(m: Molecule): Map<string, ContextProvenance> {
+  const required = new Map<string, ContextProvenance>();
+  const need = (field: string, level: ContextProvenance) => {
+    const have = required.get(field);
+    if (!have || PROVENANCE_RANK[level] > PROVENANCE_RANK[have]) required.set(field, level);
+  };
+  // hasOwn, not a bare lookup: a predicate named "constructor" or "__proto__" would otherwise read an INHERITED
+  // property and make the iteration below throw — and this runs outside atomFires' try/catch.
+  for (const a of m.atoms ?? []) {
+    if (!Object.prototype.hasOwnProperty.call(ATOM_DEFAULT_REQUIRED_CONTEXT, a.predicate)) continue;
+    for (const f of ATOM_DEFAULT_REQUIRED_CONTEXT[a.predicate]) need(f, 'agent_asserted');
+  }
+  for (const [f, level] of Object.entries(m.requireProvenance ?? {})) {
+    // An unknown level is a mis-authored document (validateMolecules rejects it): read it as the STRICTEST
+    // requirement, so a typo can only make the rule refuse more, never less.
+    need(f, isProvenance(level) ? level : 'attested');
+  }
+  return required;
+}
+
+/**
+ * The fields, in a stable order, this molecule was required to judge and could not: absent, malformed, or
+ * less trusted than the molecule demands. Empty = every requirement is met (or there are none).
+ */
+export function moleculeUnverifiable(m: Molecule, ctx: EvaluationContext): string[] {
+  const bad: string[] = [];
+  for (const [field, minimum] of requiredContextOf(m)) {
+    if (contextFieldProblem(ctx, field) !== null || !meetsProvenance(provenanceOf(ctx, field), minimum)) bad.push(field);
+  }
+  return bad.sort();
+}
+
+/**
  * Evaluate one standard's molecules. Most-restrictive firing molecule wins
  * (block > escalate > allow); iteration is over the pinned document's stable
  * molecule order, so the outcome is deterministic. Non-firing → allow.
+ *
+ * A molecule that could not be judged (`moleculeUnverifiable`) counts as at least an ESCALATE, whether or
+ * not its atoms would have fired: "the field was not sent" is indistinguishable from an agent hiding it, and
+ * a `none` rule would otherwise read the very same absence as "nothing wrong". If it also fires on its own,
+ * its own decision and reason code stand (raised to escalate if it was only `observe`).
  */
 export function evaluateStandardRules(
   molecules: Molecule[] | undefined,
   ctx: EvaluationContext,
   standardKey: string | null = null,
 ): StandardRuleResult {
-  let best: { decision: FireDecision; reasonCode: string; id: string } | null = null;
+  let best: { decision: FireDecision; reasonCode: string; id: string; unverifiable?: string[] } | null = null;
   for (const m of molecules ?? []) {
-    if (moleculeFires(m, ctx)) {
-      if (!best || PRECEDENCE[m.decision] > PRECEDENCE[best.decision]) {
-        best = { decision: m.decision, reasonCode: m.reasonCode, id: m.id };
-      }
+    const fired = moleculeFires(m, ctx);
+    const unverifiable = moleculeUnverifiable(m, ctx);
+    if (!fired && unverifiable.length === 0) continue;
+    let decision: FireDecision = fired ? m.decision : 'escalate';
+    if (unverifiable.length > 0 && PRECEDENCE[decision] < PRECEDENCE.escalate) decision = 'escalate';
+    const reasonCode = fired ? m.reasonCode : CONTEXT_UNVERIFIABLE;
+    if (!best || PRECEDENCE[decision] > PRECEDENCE[best.decision]) {
+      best = { decision, reasonCode, id: m.id, unverifiable: unverifiable.length > 0 ? unverifiable : undefined };
     }
   }
   if (!best) return { decision: 'allow', reasonCode: null, firedMoleculeId: null, standardKey };
-  return { decision: best.decision, reasonCode: best.reasonCode, firedMoleculeId: best.id, standardKey };
+  return {
+    decision: best.decision,
+    reasonCode: best.reasonCode,
+    firedMoleculeId: best.id,
+    standardKey,
+    ...(best.unverifiable ? { unverifiableContext: best.unverifiable } : {}),
+  };
 }
 
 /**
@@ -223,6 +298,19 @@ export function validateMolecules(molecules: Molecule[] | undefined): { ok: bool
     if (!m.reasonCode) issues.push({ moleculeId: m.id, message: 'molecule is missing a reasonCode' });
     if (!m.atoms || m.atoms.length === 0) {
       issues.push({ moleculeId: m.id, message: 'molecule has no atoms' });
+    }
+    if (m.requireProvenance !== undefined) {
+      const rp = m.requireProvenance as unknown;
+      if (rp === null || typeof rp !== 'object' || Array.isArray(rp)) {
+        issues.push({ moleculeId: m.id, message: "requireProvenance must be an object of { field: level }" });
+      } else {
+        for (const [field, level] of Object.entries(rp as Record<string, unknown>)) {
+          if (field.trim() === '') issues.push({ moleculeId: m.id, message: 'requireProvenance has an empty field name' });
+          if (!isProvenance(level)) {
+            issues.push({ moleculeId: m.id, message: `requireProvenance '${field}' must be one of agent_asserted|agent_signed|gateway_derived|authoritative|attested` });
+          }
+        }
+      }
     }
     for (const a of m.atoms ?? []) {
       if (!ATOM_REGISTRY[a.predicate]) {
