@@ -81,6 +81,12 @@ export const UNBINDABLE = Symbol('agentsafe-http-gateway:unbindable');
 const DEFAULT_VALUE_FIELDS = ['amount', 'merchant'];
 
 /**
+ * The top-level body keys a route accepts when it declares no `allowedFields`: exactly the governed
+ * value fields (BOUND_FIELDS). Everything else is an agent-chosen key the signature does not cover.
+ */
+export const DEFAULT_ALLOWED_FIELDS = Object.freeze([...BOUND_FIELDS]);
+
+/**
  * Default payload binder: pull the governed value fields out of a JSON body, and REQUIRE
  * that every field in `route.valueFields` (default: `amount`, `merchant`) be found there,
  * present and matching — full stop, not conditioned on what the signed request happens to
@@ -105,7 +111,10 @@ const DEFAULT_VALUE_FIELDS = ['amount', 'merchant'];
  */
 export function defaultBindPayload(req, signed, route) {
   const required = route?.valueFields ?? DEFAULT_VALUE_FIELDS;
-  const allowedFields = route?.allowedFields; // optional strict allowlist — see below
+  // The body allowlist is ON by default (0.7.0): a route that says nothing accepts only the governed
+  // value fields. `route.allowedFields` widens it to the tool's real fields; `null` is the explicit,
+  // discouraged opt-out that permits any top-level key.
+  const allowedFields = route?.allowedFields === undefined ? DEFAULT_ALLOWED_FIELDS : route.allowedFields;
   const whenUnconfirmed = required.length > 0 ? UNBINDABLE : null;
 
   const raw = req.rawBody ?? req.body;
@@ -118,13 +127,13 @@ export function defaultBindPayload(req, signed, route) {
   }
   if (!parsed || typeof parsed !== 'object') return whenUnconfirmed; // a JSON scalar/null
 
-  // Strict mode (opt-in via `route.allowedFields`): amount/merchant genuinely matching what
-  // was signed is not, by itself, evidence the request is safe to forward — a body can carry
-  // an ADDITIVE key (`surcharge`, `feeOverride`, ...) this generic binder has no way to know
-  // an upstream also honors. Left off by default (a residual, documented limitation — see
-  // README), because a fixed three-field binder cannot know a specific upstream's full schema
-  // without being told. A route that declares its complete expected shape here gets that
-  // extra key refused outright instead of silently forwarded.
+  // Strict body (ON by default since 0.7.0, `route.allowedFields` to widen, `null` to opt out):
+  // amount/merchant genuinely matching what was signed is not, by itself, evidence the request is
+  // safe to forward — a body can carry an ADDITIVE key (`surcharge`, `feeOverride`, ...) this
+  // generic binder has no way to know an upstream also honors. Through 0.6.x this was opt-in, which
+  // left every route that did not think about it forwarding whatever extra keys the agent chose to
+  // add (a documented residual gap that was reproduced: `surcharge` reached the upstream). Now an
+  // unknown key is refused unless the route declares its complete expected shape.
   if (allowedFields) {
     if (Array.isArray(parsed)) return UNBINDABLE; // a strict route never expects an array body
     if (Object.keys(parsed).some((k) => !allowedFields.includes(k))) return UNBINDABLE;
@@ -293,6 +302,20 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
         `present and matching in the body). Set route.valueFields (e.g. ['amount','merchant'], or [] if this ` +
         `route carries no value fields), route.bind:false, or a custom route.bind(req, signed, route) — a ` +
         `future version will refuse to start instead of guessing. See README "Payload binding".`,
+      );
+    }
+  }
+
+  // Since 0.7.0 a governed route refuses any top-level body key it has not been told about. Say so at
+  // startup for a route relying on the default, because that is the moment an operator whose tool
+  // legitimately takes more fields (`items`, `riskLevel`, ...) needs to declare them.
+  for (const route of routes) {
+    if (route?.action && route.bind === undefined && route.allowedFields === undefined) {
+      console.warn(
+        `[gateway] route "${route.method ?? '*'} ${route.path}" (action: "${route.action}") declares no ` +
+        `allowedFields, so its body may carry only ${DEFAULT_ALLOWED_FIELDS.join('/')} — any other top-level key is ` +
+        `refused (PAYLOAD_UNBINDABLE). Set route.allowedFields to the fields your tool actually reads (or [] for a ` +
+        `tool that reads none); null permits any key and is not recommended. See README "Payload binding".`,
       );
     }
   }

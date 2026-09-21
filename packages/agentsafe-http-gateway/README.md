@@ -163,11 +163,13 @@ routes: [{
 }]
 ```
 
-**By default, this still can't do anything about:** a body whose amount/merchant genuinely
-match what was signed, but which ALSO carries an extra key an upstream happens to honor (a
-`surcharge` field that silently inflates the real charge past what the binder checked). A
-generic three-field binder has no way to know which arbitrary extra keys a specific upstream
-treats as meaningful BY DEFAULT — that's what `route.allowedFields` (0.4.7, below) is for.
+**Through 0.6.x this was the residual gap, and it is closed by default since 0.7.0:** a body whose
+amount/merchant genuinely match what was signed but which ALSO carries an extra key an upstream
+happens to honor (a `surcharge` field that silently inflates the real charge past what the binder
+checked). A generic three-field binder cannot know which extra keys a specific upstream treats as
+meaningful, so it no longer guesses: a route with no `allowedFields` accepts only `amount`,
+`currency` and `merchant`, and refuses any other top-level key (`PAYLOAD_UNBINDABLE`). See
+*Unknown fields are refused by default* below.
 
 **0.4.5 — raised the `agentsafe-mcp-guard` floor to `^0.3.3`.** This package's canonical
 signed-message format must match the guard's exactly (both sides run policy-core's
@@ -255,6 +257,39 @@ or when the request made no claim (a value-less action, or `requireAuthorization
 `[]`) options; raised the `agentsafe-mcp-guard` floor to `^0.7.0`, which relays the claim token. Before
 this the token was discarded, so a gateway could never settle below the hold or release one after an
 upstream failure, and (with the issuer fixed) every executed purchase simply stayed committed.
+
+## Unknown fields are refused by default — since 0.7.0
+
+The signature covers the governed value fields (`amount`, `currency`, `merchant`, plus the action and
+resource). Anything else in the body is chosen by the agent and covered by nothing, so a governed
+route now accepts **only** those fields unless it says otherwise:
+
+```js
+routes: [
+  // a tool that reads amount, merchant and a passenger name:
+  { method: 'POST', path: '/book', action: 'flight-purchase', valueFields: ['amount', 'merchant'],
+    allowedFields: ['amount', 'currency', 'merchant', 'passenger'] },
+  // a tool that reads nothing from the body:
+  { method: 'POST', path: '/perform', action: 'send-notice', valueFields: [], allowedFields: [] },
+]
+```
+
+| `route.allowedFields` | Body may carry |
+|---|---|
+| omitted (default) | `amount`, `currency`, `merchant` only; anything else is `PAYLOAD_UNBINDABLE` |
+| `['a', 'b']` | exactly those top-level keys |
+| `[]` | no keys (an empty object or empty body) |
+| `null` | any key — the explicit, discouraged opt-out (the pre-0.7.0 behaviour) |
+
+An array body and a string-typed `amount` are refused under the default too. A governed route that
+declares nothing logs a startup warning naming it, because that is the moment an operator whose tool
+legitimately takes more fields (`items`, `riskLevel`, ...) needs to list them. Values that policy
+needs to see but the tool does not read (a risk level, say) belong in the signed request's context,
+not the tool body.
+
+**0.7.0 — the body allowlist is on by default** (**breaking** for a route that relied on extra body
+keys: list them in `allowedFields`, or set `allowedFields: null`). Reproduced before the change: a
+request signed for $250 to an approved merchant, carrying `surcharge: 9999`, reached the upstream.
 
 ## Embed the core
 

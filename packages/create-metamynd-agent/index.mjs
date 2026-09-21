@@ -114,7 +114,7 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.5.0 adds the OPTIONAL Credential Vault `resolveCredential` hook on createHttpGateway (Module
 // G) — additive and backward-compatible (every existing consumer sees zero behavior change), but
 // the floor must still cover the real current version per this repo's own package-version check.
-const GATEWAY_VERSION = '^0.6.0';
+const GATEWAY_VERSION = '^0.7.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -998,7 +998,7 @@ async function bookFlightViaGateway(args, decision) {
   const res = await fetch(GATEWAY + '/book-flight', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) },
-    body: JSON.stringify(args),
+    body: JSON.stringify({ amount: args.amount, merchant: args.merchant, currency: args.currency ?? '${currency}' }),
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -1207,7 +1207,7 @@ async function performViaGateway(args, decision) {
   const res = await fetch(GATEWAY + '/perform', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) },
-    body: JSON.stringify(args),
+    body: '{}', // this tool reads nothing from the body; the request's fields travel in the SIGNED context
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -1357,7 +1357,11 @@ async function performAction(args) {
 //
 // valueFields: [] because this action carries no amount or merchant to bind the body to — say so
 // explicitly rather than lean on the library default, which would demand both.
-const routes = [{ method: 'POST', path: '/perform', action: '${scope}', valueFields: [] }];
+//
+// allowedFields: [] because performAction() reads nothing from the body, so any key the agent adds is
+// refused (PAYLOAD_UNBINDABLE): nothing signed covers it. When your real tool reads body fields, list
+// exactly those keys here — the gateway refuses every top-level key you do not name.
+const routes = [{ method: 'POST', path: '/perform', action: '${scope}', valueFields: [], allowedFields: [] }];
 
 // requireAuthorization is OFF on purpose. It makes the gateway claim a single-use, stateful
 // authorization before running the tool — but the agent's guard only seals one for a value-bearing
@@ -1739,7 +1743,13 @@ async function bookFlight(args) {
 // this exact list anyway): a route with a real amount/merchant should always say so itself,
 // rather than relying on a library default to guess right. A route with NO value concept at
 // all (a read, a status check) should set valueFields: [] instead — see the gateway's README.
-const routes = [{ method: 'POST', path: '/book-flight', action: '${scope}', valueFields: ['amount', 'merchant'] }];
+//
+// allowedFields is the COMPLETE list of top-level body keys bookFlight() reads. The gateway refuses
+// every other key (PAYLOAD_UNBINDABLE) because nothing the agent signed covers it — that is what
+// stops a request signed for $250 from carrying \`surcharge: 4750\` through to your tool. Add a key
+// here only when your real tool reads it; things policy needs to see (a risk level) travel in the
+// signed context, not the tool body.
+const routes = [{ method: 'POST', path: '/book-flight', action: '${scope}', valueFields: ['amount', 'merchant'], allowedFields: ['amount', 'currency', 'merchant'] }];
 
 // No serviceKey: this minimal gateway only calls verifyRequest() (re-check a signed request),
 // not the mutual-handshake methods, which are the only thing that needs it.
@@ -2220,11 +2230,18 @@ function harnessGatewayServerFile(scope, gatewayPort, agentDid, neutral = false)
 // harness-gateway.mjs — a SEPARATE process from your agent. It holds the tool (${neutral ? 'the action below' : 'bookFlight below'}
 // never runs anywhere else) and independently re-verifies every request against
 // ../metamynd-rules.json using the REAL @metamynd/agentsafe-mcp-guard — the same package a
-// production Service uses, just pointed at a local file instead of a hosted issuer. See
-// ../README.md#--gateway for exactly what this does and does not close.
+// production Service uses, just pointed at a local file instead of a hosted issuer.
+//
+// There is NO enforcement logic of your own in this file. Routing, payload binding and the
+// deny-by-default posture come from @metamynd/agentsafe-http-gateway — the same component the
+// hosted scaffold uses — so what it refuses is what production refuses: a body that does not match
+// what the agent signed (PAYLOAD_NOT_BOUND), a value it cannot find (PAYLOAD_UNBINDABLE), and any
+// top-level key you did not list in allowedFields. See ../README.md#--gateway for what this closes.
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import { createMcpGuard } from '${MCP_GUARD_PKG}';
+import { createHttpGateway } from '${GATEWAY_PKG}';
+import { matchRoute } from '${GATEWAY_PKG}/route-match';
 
 const PORT = Number(process.env.PORT || ${gatewayPort});
 // The agent's did:key, fixed at scaffold time — a request claiming to be any OTHER agentDid
@@ -2258,12 +2275,31 @@ const guard = createMcpGuard({
   },
 });
 
-// One protected route per gated action in index.mjs. A path with no route below is refused —
-// there is nothing to fall through TO; this gateway IS the tool, not a proxy in front of one.
-const ROUTES = {
-  ${neutral ? `'/perform': { action: '${scope}', run: async (args) => ({ done: true, action: '${scope}' }) },` : `'/book-flight': { action: '${scope}', run: async (args) => ({ pnr: 'PNR-DEMO', ...args }) },`}
-  '/raise-limit': { action: 'permissions.update', run: async (args) => ({ updated: true, ...args }) },
-};
+// One protected route per gated action in index.mjs. This gateway IS the tool, not a proxy in
+// front of one, so a path with no route below is refused (denyByDefault) — nothing to fall through TO.
+//
+//   valueFields   the fields the SIGNATURE covers that this route's body must carry and match
+//   allowedFields the COMPLETE list of top-level body keys the tool reads. Anything else is refused,
+//                 because nothing signed covers it. Add a key here only when your tool reads it.
+const ROUTES = [
+  ${neutral
+    ? `{ method: 'POST', path: '/perform', action: '${scope}', valueFields: [], allowedFields: [], run: async () => ({ done: true, action: '${scope}' }) },`
+    : `{ method: 'POST', path: '/book-flight', action: '${scope}', valueFields: ['amount', 'merchant'], allowedFields: ['amount', 'currency', 'merchant'], run: async (args) => ({ pnr: 'PNR-DEMO', ...args }) },`}
+  { method: 'POST', path: '/raise-limit', action: 'permissions.update', valueFields: [], allowedFields: ['amount', 'currency', 'merchant'], run: async (args) => ({ updated: true, ...args }) },
+];
+
+const gateway = createHttpGateway({
+  guard,
+  routes: ROUTES,
+  denyByDefault: true,
+  // Reached ONLY after the guard allowed the request AND the body was bound to what was signed.
+  forward: async (req) => {
+    const route = matchRoute(ROUTES, req.method, req.path);
+    let args = {};
+    try { args = JSON.parse(req.rawBody?.toString('utf8') || '{}'); } catch { /* empty body */ }
+    return { status: 200, body: await route.run(args) };
+  },
+});
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -2275,26 +2311,19 @@ function readBody(req) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const route = ROUTES[req.url];
-  const send = (status, body, decision) => {
-    const headers = { 'content-type': 'application/json' };
-    if (decision) headers['x-agentsafe-decision'] = decision;
-    res.writeHead(status, headers);
-    res.end(JSON.stringify(body));
-  };
-  if (req.method !== 'POST' || !route) return send(404, { decision: 'block', reasonCode: 'NO_SUCH_ROUTE' });
   try {
-    const raw = await readBody(req);
-    const { signed, args } = JSON.parse(raw.toString('utf8') || '{}');
-    const verdict = await guard.verifyRequest({ ...signed, action: route.action });
-    if (verdict.decision !== 'allow' && verdict.decision !== 'observe') {
-      console.log('[harness-gateway] ' + verdict.decision.toUpperCase() + ' ' + req.url + ' — ' + verdict.reasonCode + ' (re-evaluated independently, did not trust the agent)');
-      return send(403, verdict, verdict.decision);
-    }
-    console.log('[harness-gateway] ALLOW ' + req.url + ' — running the real tool here, not in the agent process');
-    return send(200, await route.run(args ?? {}), verdict.decision);
+    const rawBody = await readBody(req);
+    const result = await gateway({ method: req.method, path: req.url, headers: req.headers, rawBody });
+    const headers = { 'content-type': 'application/json' };
+    const decision = result.governance?.decision;
+    if (decision) headers['x-agentsafe-decision'] = decision;
+    if (result.status === 200) console.log('[harness-gateway] ALLOW ' + req.url + ' — running the real tool here, not in the agent process');
+    else console.log('[harness-gateway] ' + String(result.body?.decision ?? 'block').toUpperCase() + ' ' + req.url + ' — ' + (result.body?.reasonCode ?? 'refused') + ' (re-evaluated independently, did not trust the agent)');
+    res.writeHead(result.status, headers);
+    res.end(JSON.stringify(result.body ?? {}));
   } catch (err) {
-    return send(502, { decision: 'block', reasonCode: 'GATEWAY_ERROR', error: String(err?.message ?? err) });
+    res.writeHead(502, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ decision: 'block', reasonCode: 'GATEWAY_ERROR', error: String(err?.message ?? err) }));
   }
 });
 
@@ -2307,7 +2336,7 @@ server.listen(PORT, () => {
 
 function harnessGatewayPackageJson(slug) {
   return JSON.stringify(
-    { name: slug + '-harness-gateway', version: '0.1.0', private: true, type: 'module', scripts: { start: 'node harness-gateway.mjs' }, dependencies: { [MCP_GUARD_PKG]: MCP_GUARD_VERSION } },
+    { name: slug + '-harness-gateway', version: '0.1.0', private: true, type: 'module', scripts: { start: 'node harness-gateway.mjs' }, dependencies: { [MCP_GUARD_PKG]: MCP_GUARD_VERSION, [GATEWAY_PKG]: GATEWAY_VERSION } },
     null,
     2,
   ) + '\n';
@@ -2723,7 +2752,7 @@ const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://localhost:${gatewayPo
 // offline, using this agent's own did:key — the gateway verifies that signature for itself.
 async function callGateway(path, action, args) {
   const signed = await guard.buildSignedRequest({ action, amount: args.amount, currency: args.currency ?? '${currency}', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel ?? 'low' } });
-  const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ signed, args }) });
+  const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: JSON.stringify({ amount: args.amount, merchant: args.merchant, currency: args.currency ?? '${currency}' }) });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
@@ -2925,7 +2954,7 @@ ${withGateway ? `const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://loca
 // offline with this agent's own did:key, and the gateway verifies that signature for itself.
 async function callGateway(path, action, args) {
   const signed = await guard.buildSignedRequest({ action, merchant: MERCHANT, context: args });
-  const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ signed, args }) });
+  const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: '{}' });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
@@ -3141,7 +3170,15 @@ directly (or skip \`index.mjs\` and hand a forged/altered request straight to
 \`harness-gateway.mjs\`) — either way, the gateway independently re-verifies the Ed25519
 signature and re-evaluates the SAME rules file for itself. There is no raw \`${tool}()\` left
 in \`index.mjs\` to call for a shortcut, and a signature over an altered request fails
-verification regardless of which process sent it.${neutral ? `
+verification regardless of which process sent it.
+
+**Also closed — the executed arguments are bound to what was signed.** \`harness-gateway.mjs\` contains
+no enforcement logic of its own: routing, payload binding and deny-by-default come from
+\`@metamynd/agentsafe-http-gateway\`, the same component the hosted scaffold uses. A request signed for
+one amount and merchant but carrying another in the body is refused (\`PAYLOAD_NOT_BOUND\`) before your tool
+runs, and so is any top-level body key you did not list in that route's \`allowedFields\`
+(\`PAYLOAD_UNBINDABLE\`) — nothing signed covers it. When your real tool reads more body fields, list exactly
+those keys; the gateway refuses the rest.${neutral ? `
 
 **Also NOT closed — rule inputs are not signed.** The request fields your rules read (\`consent\`,
 \`piiPresent\`, \`jurisdiction\`, …) travel in the signed request's context, which the signature does
