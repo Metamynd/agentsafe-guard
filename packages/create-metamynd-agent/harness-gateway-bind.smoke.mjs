@@ -67,13 +67,16 @@ async function startGateway(label, extraArgs) {
   const url = `http://127.0.0.1:${port}`;
   const toolRuns = () => (state.log.match(/ALLOW \//g) ?? []).length;
   const sign = (o) => guard.buildSignedRequest({ context: { tool: 'flight-purchase', riskLevel: 'low' }, ...o });
+  // The scaffolded agent signs the COMPLETE body as a payload (MAGP 8.3.9) and the generated gateway requires it, so an honest
+  // request is signed with `payload: <the body it sends>`. `sign` (above, no payload) is what a request WITHOUT a binding looks like.
+  const signBound = (o, payload) => guard.buildSignedRequest({ context: { tool: 'flight-purchase', riskLevel: 'low' }, ...o, payload });
   const post = async (path, { header, body }) => {
     const headers = { 'content-type': 'application/json' };
     if (header) headers['x-magp-request'] = JSON.stringify(header);
     const r = await fetch(url + path, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body ?? {}) });
     return { status: r.status, body: await r.json().catch(() => null) };
   };
-  return { outDir, child, state, sign, post, toolRuns, stop: async () => {
+  return { outDir, child, state, sign, signBound, post, toolRuns, stop: async () => {
     // Wait for THIS child's exit first: on Windows the killed process still holds its cwd, and deleting the
     // directory under it fails with EPERM. Cleanup of a temp dir is best-effort and must never fail the test.
     if (child.exitCode === null) await new Promise((r) => { child.once('exit', r); child.kill(); });
@@ -94,9 +97,29 @@ try {
 
   await check('an honest request runs the tool once', async () => {
     const before = fin.toolRuns();
-    const r = await fin.post('/book-flight', { header: await fin.sign(good), body: { amount: 250, currency: 'USD', merchant: 'skyward-air' } });
+    const body = { amount: 250, currency: 'USD', merchant: 'skyward-air' };
+    const r = await fin.post('/book-flight', { header: await fin.signBound(good, body), body });
     assert.equal(r.status, 200); assert.equal(r.body.pnr, 'PNR-DEMO');
     assert.equal(fin.toolRuns(), before + 1);
+  });
+
+  // The scaffold turns payload binding ON (requirePayloadBinding): a default install is no longer unbound.
+  await check('payload binding is on by default: a request that binds no payload is refused and the tool never runs', async () => {
+    const src = readFileSync(join(fin.outDir, 'harness-gateway', 'harness-gateway.mjs'), 'utf8');
+    assert.match(src, /requirePayloadBinding: true/);
+    const before = fin.toolRuns();
+    const r = await fin.post('/book-flight', { header: await fin.sign(good), body: { amount: 250, currency: 'USD', merchant: 'skyward-air' } });
+    assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_BINDING_REQUIRED');
+    assert.equal(fin.toolRuns(), before, 'the tool must not have run');
+  });
+
+  await check('a payload binding signed for a DIFFERENT body is refused (the digest the agent signed is what runs)', async () => {
+    const before = fin.toolRuns();
+    // Signed for one booking; the body is a different booking that still matches every field the eight-field signature covers.
+    const signedFor = { amount: 250, currency: 'USD', merchant: 'skyward-air', passenger: 'A. Traveller' };
+    const r = await fin.post('/book-flight', { header: await fin.signBound(good, signedFor), body: { amount: 250, currency: 'USD', merchant: 'skyward-air' } });
+    assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_NOT_BOUND');
+    assert.equal(fin.toolRuns(), before);
   });
 
   await check('THE FINDING: signed $250 / skyward-air, body $5,000 / attacker-llc is refused and the tool never runs', async () => {
@@ -141,9 +164,10 @@ try {
 
   await check('the real policy still decides: over the cap, and an action the mandate never granted', async () => {
     const before = fin.toolRuns();
-    let r = await fin.post('/book-flight', { header: await fin.sign({ ...good, amount: 600 }), body: { amount: 600, currency: 'USD', merchant: 'skyward-air' } });
+    const over = { amount: 600, currency: 'USD', merchant: 'skyward-air' };
+    let r = await fin.post('/book-flight', { header: await fin.signBound({ ...good, amount: 600 }, over), body: over });
     assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'SOP_SPEND_CAP');
-    r = await fin.post('/raise-limit', { header: await fin.sign({ ...good, action: 'permissions.update' }), body: {} });
+    r = await fin.post('/raise-limit', { header: await fin.signBound({ ...good, action: 'permissions.update' }, {}), body: {} });
     assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'NO_PERMISSION_FOR_ACTION');
     assert.equal(fin.toolRuns(), before);
   });
@@ -166,7 +190,7 @@ try {
     const base = { action: 'flight-purchase', context: { tool: 'flight-purchase', riskLevel: 'low' } };
     // (the scope is the mandate's scope; a neutral scaffold signs no amount or merchant)
     const before = nf.toolRuns();
-    let r = await nf.post('/perform', { header: await nf.sign(base), body: {} });
+    let r = await nf.post('/perform', { header: await nf.signBound(base, {}), body: {} }); // the empty body is signed as the payload
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(nf.toolRuns(), before + 1);
     r = await nf.post('/perform', { header: await nf.sign(base), body: { recipient: 'someone-else' } });
@@ -191,8 +215,14 @@ await check('hosted financial scaffold: agent body and gateway allowedFields agr
   const gw = readFileSync(join(out, 'gateway', 'server.mjs'), 'utf8');
   const agent = readFileSync(join(out, 'index.mjs'), 'utf8');
   assert.match(gw, /valueFields: \['amount', 'merchant'\], allowedFields: \['amount', 'currency', 'merchant'\]/);
-  assert.match(agent, /body: JSON\.stringify\(\{ amount: args\.amount, merchant: args\.merchant, currency: /);
+  assert.match(agent, /const payload = \{ amount: args\.amount, merchant: args\.merchant, currency: /);
+  assert.match(agent, /body: JSON\.stringify\(payload\)/);
   assert.doesNotMatch(agent, /body: JSON\.stringify\(args\)/, 'the agent must not ship its whole argument object to the gateway');
+  // Payload binding is ON: the body the agent sends is signed as the payload, the authorization made by guardTool is bound to the
+  // same body, and the gateway refuses a request that bound none.
+  assert.match(agent, /^\s+payload,\r?$/m, 'the request handed to the gateway signs the body as its payload');
+  assert.match(agent, /payload: \{ amount: a\.amount, merchant: a\.merchant, currency: a\.currency \?\? /, 'the authorization is bound to the same body');
+  assert.match(gw, /requirePayloadBinding: true/, 'the gateway refuses an unbound request');
   rmSync(out, { recursive: true, force: true });
 });
 

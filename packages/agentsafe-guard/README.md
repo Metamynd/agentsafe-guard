@@ -153,6 +153,29 @@ the guard — see "Passphrase-encrypted managed key" above. New export from `key
 backend's `encryptWithPassword`/`decryptWithPassword`, cross-verified against it). Fully
 additive: a config without `agentKeyEncrypted` is loaded exactly as before, no passphrase needed.
 
+**0.15.0 — payload binding through the signer daemon, and after a reviewer's MODIFY (MAGP §8.3.9, §8.3.11).**
+Two gaps in 0.14.0 are closed:
+
+- **A daemon-backed guard (`keyProvider: 'daemon'`) can now bind a payload.** It signs through the daemon's new `sign-payload`
+  operation (`@metamynd/agentsafe-signer` **0.15.0**), so the key still never enters this process. Against an older daemon, `authorize({
+  payload })` blocks with `PAYLOAD_BINDING_UNSUPPORTED` (naming the fix) instead of sending an unbound request.
+- **`guard.bindPayload({ authorizationId, action, payload })` binds a hold that already exists and has no digest.** A reviewer's
+  MODIFY changes the action this agent signed, so the hold it mints — or the one minted when the re-entered review is approved —
+  carries none, and an executor that requires binding could never claim it. The agent signs a message that names the authorization
+  (so the digest cannot be lifted onto another hold, and cannot be confused with the authorize-time binding) and the gate applies
+  it only while the hold is live, unclaimed and unbound:
+
+  ```js
+  const status = await guard.escalationStatus(escalationId);            // approved, or modified
+  const bound = await guard.bindPayload({ authorizationId: status.authorizationId, action, payload });
+  if (!bound.bound) throw new Error(`payload not bound: ${bound.reasonCode}`);
+  // then hand the executor a FRESH signed request for the same payload and the same authorization
+  const signed = { ...(await guard.buildSignedRequest({ action, ...modified, payload })), authorizationId: status.authorizationId };
+  ```
+
+  It never throws for a gate answer: `{ bound: true, payloadDigest }` or `{ bound: false, reasonCode }` (`PAYLOAD_ALREADY_BOUND`,
+  `AUTHORIZATION_ALREADY_CLAIMED`, `PAYLOAD_BINDING_NOT_CONFIRMED` from a backend that predates it, …). Needs a backend that knows §8.3.11.
+
 **0.14.0 — sign the WHOLE payload, not just eight fields (MAGP §8.3.9).** The signed authorize message covers the
 agent, action, amount, currency, merchant and resource — not a payee, an account number or a passenger list. Pass
 `payload` to `authorize()` / `buildSignedRequest()` and the guard also signs a digest of it (RFC 8785 canonical JSON,

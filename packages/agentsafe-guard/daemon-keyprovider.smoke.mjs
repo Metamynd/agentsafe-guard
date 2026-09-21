@@ -69,6 +69,29 @@ async function main() {
     check(threw !== null && threw.code === 'DAEMON_MALFORMED_REQUEST', 'the daemon itself rejects a non-reportable decision (e.g. "quarantine") even when asked over the real socket, not just in-process');
   }
 
+  // --- payload binding through the REAL daemon (MAGP 8.3.9 / 8.3.11): before signer 0.15.0 a daemon-custody agent asked to bind
+  //     a payload failed closed; now `sign-payload` signs it without the key ever entering this process ---
+  {
+    const { buildPayloadBindingMessage, buildPayloadRebindMessage, payloadDigestOf } = await import('./payload-binding.mjs');
+    const PAYLOAD = { payee: 'NL91ABNA0417164300', amount: 100 };
+    const realFetch = globalThis.fetch;
+    let sent = null;
+    globalThis.fetch = async (url, opts) => { sent = { url: String(url), body: JSON.parse(opts.body) }; return { ok: true, status: 200, json: async () => ({ data: { decision: 'allow', authorizationId: '7f3c1d2e-9a4b-4c5d-8e6f-0a1b2c3d4e5f', payloadDigest: sent.body.payloadDigest ?? null } }) }; };
+    try {
+      const r = await guard.authorize({ action: 'flight-purchase', amount: 100, currency: 'USD', merchant: 'amadeus', payload: PAYLOAD });
+      const b = sent.body;
+      check(r.decision === 'allow' && b.payloadDigest === payloadDigestOf(PAYLOAD), 'guard.authorize({ payload }) through the daemon sends the digest of the payload');
+      check(verifyDidSignature(agentDid, buildPayloadBindingMessage({ agentDid, action: b.action, nonce: b.nonce, issuedAt: b.issuedAt, payloadDigest: b.payloadDigest }), b.payloadSignature), 'the daemon-made binding signature verifies with the shared verifier (the key never entered this process)');
+
+      const authorizationId = '7f3c1d2e-9a4b-4c5d-8e6f-0a1b2c3d4e5f';
+      const late = await guard.bindPayload({ authorizationId, action: 'flight-purchase', payload: PAYLOAD });
+      const c = sent.body;
+      check(late.bound === true && sent.url.endsWith(`/authorize/${authorizationId}/payload-binding`), 'guard.bindPayload() through the daemon binds a hold that already exists');
+      check(verifyDidSignature(agentDid, buildPayloadRebindMessage({ agentDid, action: c.action, authorizationId, nonce: c.nonce, issuedAt: c.issuedAt, payloadDigest: c.payloadDigest }), c.payloadSignature), 'the daemon-made LATE binding verifies over the rebind message naming the authorization');
+      check(!verifyDidSignature(agentDid, buildPayloadBindingMessage({ agentDid, action: c.action, nonce: c.nonce, issuedAt: c.issuedAt, payloadDigest: c.payloadDigest }), c.payloadSignature), '...and not as an authorize-time binding');
+    } finally { globalThis.fetch = realFetch; }
+  }
+
   if (failed) {
     console.error(`\n${failed} case(s) FAILED`);
     process.exit(1);

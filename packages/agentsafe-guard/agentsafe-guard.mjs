@@ -204,6 +204,48 @@ export function createGuard(opts = {}) {
     return { payloadDigest, payloadSignature };
   }
 
+  /**
+   * Bind a payload to a hold that ALREADY EXISTS and carries none (spec §8.3.11). A reviewer's MODIFY changes the action this
+   * agent signed, so the hold it mints — or the one minted when the re-entered review is approved — has no payload digest, and
+   * an executor that requires binding could never claim it. This is how the agent binds the payload of the action that WILL
+   * run: it signs a message naming the authorization (so the digest cannot be lifted onto another hold) and the gate applies it
+   * only while the hold is live, unclaimed and unbound.
+   *
+   *   const status = await guard.escalationStatus(escalationId);              // approved, or modified
+   *   await guard.bindPayload({ authorizationId: status.authorizationId, action, payload });   // then hand the executor a FRESH
+   *   const signed = { ...(await guard.buildSignedRequest({ action, ...modified, payload })), authorizationId: status.authorizationId };
+   *
+   * Never throws for a gate answer: `{ bound: true, payloadDigest }` or `{ bound: false, reasonCode }`. A payload JSON cannot
+   * carry, or a key provider that cannot sign a binding, is `bound: false` too — and the caller must then not proceed as if the
+   * hold were bound.
+   */
+  async function bindPayload({ authorizationId, action, payload } = {}) {
+    if (!authorizationId || !action || payload === undefined) return { bound: false, reasonCode: 'MALFORMED_REQUEST' };
+    try {
+      const nonce = crypto.randomUUID();
+      const issuedAt = new Date().toISOString();
+      let payloadDigest;
+      try {
+        payloadDigest = payloadDigestOf(toWireJson(payload));
+      } catch (err) {
+        return { bound: false, reasonCode: 'PAYLOAD_NOT_CANONICALIZABLE', error: String(err?.message ?? err) };
+      }
+      if (typeof keyProvider.signPayloadBinding !== 'function') return { bound: false, reasonCode: 'PAYLOAD_BINDING_UNSUPPORTED' };
+      const payloadSignature = await keyProvider.signPayloadBinding({ agentDid, action, authorizationId, nonce, issuedAt, payloadDigest });
+      const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/payload-binding`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentDid, action, nonce, issuedAt, payloadDigest, payloadSignature }),
+      });
+      const body = await res.json().catch(() => null);
+      if (res.ok && body?.data?.payloadDigest === payloadDigest) return { bound: true, payloadDigest, authorizationId, ...(body.data.alreadyBound ? { alreadyBound: true } : {}) };
+      // A 200 that does not echo the digest we sent is an issuer that predates late binding answering something else: not bound.
+      return { bound: false, reasonCode: res.ok ? 'PAYLOAD_BINDING_NOT_CONFIRMED' : (body?.data?.reasonCode ?? body?.message ?? `GATE_HTTP_${res.status}`) };
+    } catch (err) {
+      if (err?.code === 'PAYLOAD_BINDING_UNSUPPORTED') return { bound: false, reasonCode: err.code, error: String(err.message) };
+      return { bound: false, reasonCode: err?.code?.startsWith?.('DAEMON_') ? 'SIGNER_UNREACHABLE' : 'GATE_UNREACHABLE', error: String(err?.message ?? err) };
+    }
+  }
+
   // --- Enforcement mode (spec §9.2 + local-first plan) --------------------------------------
   // 'local' (DEFAULT): decide the rule layer LOCALLY against a cached signed bundle — a
   //   block/escalate needs no network; an allowed VALUE action is still sealed by the remote
@@ -933,5 +975,5 @@ export function createGuard(opts = {}) {
     return keyProvider.signKeyControlChallenge(challenge);
   }
 
-  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, proof, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid, executionAdapter: defaultExecutionAdapter };
+  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, bindPayload, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, proof, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid, executionAdapter: defaultExecutionAdapter };
 }

@@ -10,6 +10,7 @@ function escapeField(v) {
 
 // src/features/magp/payload-binding.ts
 var PAYLOAD_BINDING_PREFIX = "MAGP-PAYLOAD-v1";
+var PAYLOAD_REBIND_PREFIX = "MAGP-PAYLOAD-REBIND-v1";
 var PAYLOAD_DIGEST_PREFIX = "sha256:";
 var PAYLOAD_DIGEST_HEADER = "x-magp-payload-digest";
 var MAX_CANONICAL_PAYLOAD_BYTES = 256 * 1024;
@@ -84,6 +85,9 @@ function toWireJson(value) {
 function buildPayloadBindingMessage(input) {
   return [PAYLOAD_BINDING_PREFIX, input.agentDid, input.action, input.nonce, input.issuedAt, input.payloadDigest].map((f) => escapeField(String(f))).join("|");
 }
+function buildPayloadRebindMessage(input) {
+  return [PAYLOAD_REBIND_PREFIX, input.agentDid, input.action, input.authorizationId, input.nonce, input.issuedAt, input.payloadDigest].map((f) => escapeField(String(f))).join("|");
+}
 function decideClaimPayload(stored, presented) {
   if (stored) {
     if (!presented) return { ok: false, reasonCode: "PAYLOAD_DIGEST_REQUIRED" };
@@ -99,8 +103,10 @@ export {
   PAYLOAD_BINDING_PREFIX,
   PAYLOAD_DIGEST_HEADER,
   PAYLOAD_DIGEST_PREFIX,
+  PAYLOAD_REBIND_PREFIX,
   PayloadNotCanonicalizable,
   buildPayloadBindingMessage,
+  buildPayloadRebindMessage,
   canonicalPayload,
   claimDigestField,
   decideClaimPayload,
