@@ -211,6 +211,13 @@ function isNonScalar(v) {
  * safe), but a future version will refuse to start instead of silently guessing. Set
  * `valueFields` explicitly (even to the current default) to silence it.
  *
+ * settle / releaseOnStatus — OPTIONAL: what the gateway does with the HOLD it claimed once the
+ * upstream has answered (needs agentsafe-mcp-guard >= 0.7.0 and `requireAuthorization`). `settle`
+ * (default true) captures a 2xx at the authorized amount, releases a status listed in
+ * `releaseOnStatus` (default `[]` — see closeHold for why releasing is opt-in), and otherwise
+ * marks the effect UNKNOWN so the spend stays committed. Per-route `route.releaseOnStatus`
+ * overrides. `settle: false` restores the old behaviour of never touching the hold.
+ *
  * resolveCredential — OPTIONAL: `({ request, route, decision }) => Promise<{header, value} | null>`,
  * called ONLY on a PERMIT (after the guard already returned allow/observe), right before
  * `forward(req)`. When it resolves a `{header, value}` pair, that header is spliced into a
@@ -229,8 +236,46 @@ function isNonScalar(v) {
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
  */
-export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential } = {}) {
+export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [] } = {}) {
   if (typeof forward !== 'function') throw new Error('createHttpGateway requires a forward(req) function');
+
+  /**
+   * Close out the hold this request CLAIMED, now that the upstream has answered. The issuer treats a
+   * claimed hold as a commitment: it stays against the mandate's cap until settled, and can be
+   * settled below its amount or released only with the claim token the successful claim returned
+   * (`decision.claimToken`, relayed by agentsafe-mcp-guard >= 0.7.0). This gateway is the party that
+   * holds that token, so it is the party that closes the hold:
+   *
+   *   2xx                      → capture at the authorized amount (the body was bound to it)
+   *   status in releaseOnStatus → RELEASE: the upstream declined, nothing happened, the budget returns
+   *   anything else / a throw   → mark UNKNOWN: the outcome is ambiguous, so the spend stays committed
+   *
+   * `releaseOnStatus` defaults to [] on purpose. Releasing hands the budget back, so it is only
+   * correct when a given status GUARANTEES the upstream did not execute; a 4xx from an upstream that
+   * runs the action and then fails its own response validation would otherwise let an agent recover
+   * the budget of something that happened. List the statuses your upstream honours that guarantee
+   * for (e.g. [400, 401, 403, 404, 422]) — per gateway here, or per route with `route.releaseOnStatus`.
+   * With the default a rejected call keeps its budget committed (over-counts, never under-counts).
+   *
+   * Best-effort and non-throwing: closing a hold never changes the response the caller gets. A no-op
+   * when `settle: false`, when the guard predates the settlement helpers, or when the request made no
+   * claim (a value-less action, or `requireAuthorization` off) — there is no token then.
+   */
+  async function closeHold(decision, request, route, status) {
+    if (!settle || !decision?.claimToken || !decision?.authorizationId) return;
+    const claim = { authorizationId: decision.authorizationId, claimToken: decision.claimToken };
+    try {
+      if (status >= 200 && status < 300) {
+        if (typeof guard.captureAuthorization === 'function') await guard.captureAuthorization({ ...claim, amountCharged: Number(request.amount ?? 0) });
+      } else if (status !== undefined && (route.releaseOnStatus ?? releaseOnStatus).includes(status)) {
+        if (typeof guard.releaseAuthorization === 'function') await guard.releaseAuthorization({ ...claim, reason: `UPSTREAM_HTTP_${status}` });
+      } else if (typeof guard.markAuthorizationUnknown === 'function') {
+        await guard.markAuthorizationUnknown({ authorizationId: claim.authorizationId, reason: status === undefined ? 'UPSTREAM_ERROR' : `UPSTREAM_HTTP_${status}` });
+      }
+    } catch (err) {
+      console.warn('[gateway] could not close the claimed hold (it stays committed to the cap):', err?.message ?? err);
+    }
+  }
 
   // Deprecation window: a protected route with an `action` but no EXPLICIT binding decision
   // silently gets the default heuristic (DEFAULT_VALUE_FIELDS) — safe today (see
@@ -333,7 +378,18 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       }
     }
 
-    const upstream = await forward(forwardReq);
+    let upstream;
+    try {
+      upstream = await forward(forwardReq);
+    } catch (err) {
+      // A throw does not prove the upstream did nothing (the request may have been sent and the
+      // response lost) — park the hold as UNKNOWN rather than releasing it, then let the error
+      // propagate exactly as it did before.
+      await closeHold(decision, request, route, undefined);
+      throw err;
+    }
+    const upstreamStatus = Number(upstream?.status);
+    await closeHold(decision, request, route, Number.isFinite(upstreamStatus) ? upstreamStatus : undefined);
     return { ...upstream, governance: decision };
   };
 }
