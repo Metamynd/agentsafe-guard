@@ -225,6 +225,37 @@ is added — this package ships zero-dependency, so the fuzzer is hand-rolled wi
 `Math.random()`-equivalent (xorshift32) and Node built-ins, wired into `npm test` alongside
 the existing smoke suite. Purely a test-time addition; nothing about request handling changes.
 
+## Closing the hold it claimed (`settle`, `releaseOnStatus`) — since 0.6.0
+
+With `requireAuthorization` on, every value-bearing call **claims** a hold at the issuer. The issuer
+treats a claimed hold as a commitment: it stays against the mandate's cap until settled (it does not
+lapse after 15 minutes), and only the party that claimed it — the holder of the **claim token** — can
+settle it below its amount or release it. That is deliberate: it is what stops an agent from having
+your upstream execute a $250 purchase and then capturing `$0` (or voiding) its own hold to get the
+budget back. This gateway is that party, so once the upstream answers it closes the hold:
+
+| Upstream result | What the gateway does | Budget |
+|---|---|---|
+| 2xx | `captureAuthorization` at the authorized amount (the body was bound to it) | spent |
+| a status in `releaseOnStatus` | `releaseAuthorization` — the upstream declined | returned |
+| any other status, or `forward()` throws | `markAuthorizationUnknown` — outcome ambiguous | stays committed |
+
+`releaseOnStatus` defaults to `[]` **on purpose**. Releasing returns the budget, so it is only right
+when a status *guarantees* the upstream did not execute; an upstream that runs the action and then
+fails its own response validation with a 4xx would otherwise let an agent recover the budget of
+something that happened. List the statuses your upstream honours that guarantee for
+(`releaseOnStatus: [400, 401, 403, 404, 422]`, or per route with `route.releaseOnStatus`). With the
+default, a rejected call keeps its budget until reconciled — it over-counts, it never under-counts.
+
+Everything here is best-effort and never changes the response the caller gets. It is a no-op with
+`settle: false`, with a guard older than `@metamynd/agentsafe-mcp-guard` 0.7.0 (no token to relay),
+or when the request made no claim (a value-less action, or `requireAuthorization` off).
+
+**0.6.0 — closes the claimed hold.** New `settle` (default `true`) and `releaseOnStatus` (default
+`[]`) options; raised the `agentsafe-mcp-guard` floor to `^0.7.0`, which relays the claim token. Before
+this the token was discarded, so a gateway could never settle below the hold or release one after an
+upstream failure, and (with the issuer fixed) every executed purchase simply stayed committed.
+
 ## Embed the core
 
 ```js

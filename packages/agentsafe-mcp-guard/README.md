@@ -159,6 +159,30 @@ signing requests close together could race that replacement window and fail with
 `DAEMON_UNREACHABLE` even though the daemon was healthy. `key-providers.mjs` now retries a
 connection that fails with `ENOENT` for up to 3 seconds before giving up. No API change.
 
+**0.7.0 — the claim token is relayed, and a Service can close the hold it claimed.** The issuer now
+treats a *claimed* hold as a commitment: it stays against the mandate's cap until it is settled (it no
+longer lapses with the 15-minute hold TTL), and once claimed it can be settled *below* its amount, or
+voided, only with the **claim token** returned by that hold's successful claim. Without that, an agent
+could wait for a Service to execute and then capture `$0` (or void) its own hold to get the budget back
+— 26 × $250 executed against a $5,000 cap that way. This package used to discard the token, so a Service
+could neither settle below the hold nor release one after an upstream failure. Now:
+
+- `verifyRequest()` / `guardIncomingTool()` return the token as `decision.claimToken` (and
+  `decision.authorizationId`) on a claimed permit. They are **non-enumerable**, so an echoed,
+  logged, spread or `JSON.stringify`-ed verdict does not carry the token to the calling agent —
+  the one party that must not have it. Keep it server-side.
+- New guard methods, all best-effort and non-throwing (they return `{ ok, reasonCode }`):
+  `captureAuthorization({ authorizationId, claimToken, amountCharged, bookingRef?, settlementTxHash? })`,
+  `releaseAuthorization({ authorizationId, claimToken, reason? })`, and
+  `markAuthorizationUnknown({ authorizationId, reason? })`.
+- `guardIncomingTool(action, handler, { settle: true })` settles a handler that returns (at the
+  authorized amount) and parks one that throws as **UNKNOWN** — it never *releases* on a throw, because a
+  throw does not prove nothing was executed. Off by default: an existing embed is unchanged.
+- **Release only what provably did not happen.** `releaseAuthorization` returns the budget. Use it when
+  the upstream cleanly refused; use `markAuthorizationUnknown` for a timeout, a 5xx or a dropped
+  connection, which keeps the spend committed and hands it to reconciliation. Failing to settle can only
+  over-count spend, never under-count it.
+
 ### Replay, cumulative spend, rate limits, breakers, spend anomalies (`requireAuthorization`)
 
 Re-evaluating policy per request (above) proves the request is well-formed and in-policy — it

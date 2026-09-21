@@ -129,10 +129,79 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         amount: body?.data?.amount,
         currency: body?.data?.currency,
         merchant: body?.data?.merchant,
+        // The settlement token the issuer hands ONLY the caller whose claim succeeded. Once a hold is
+        // claimed it can be settled below its amount, or voided, only with this token — so the Service
+        // that executes must keep it and present it (captureAuthorization / releaseAuthorization).
+        claimToken: body?.data?.claimToken,
       };
     } catch (err) {
       return { claimed: false, reasonCode: 'AUTHORIZATION_CLAIM_UNREACHABLE', error: String(err?.message ?? err) };
     }
+  }
+
+  /**
+   * Attach the claim to a PERMIT verdict as NON-ENUMERABLE properties. The verdict is routinely
+   * echoed onward (logged, put in a response, spread into another object), and the calling agent
+   * is exactly the party the claim token must be kept from: with it, the agent could void an
+   * executed hold or settle it for less. A non-enumerable property survives normal use
+   * (`decision.claimToken`) but not JSON.stringify or `{ ...decision }`.
+   */
+  function withClaim(verdict, authorizationId, claimToken) {
+    if (!claimToken) return verdict;
+    const out = { ...verdict };
+    Object.defineProperty(out, 'claimToken', { value: claimToken, enumerable: false });
+    Object.defineProperty(out, 'authorizationId', { value: authorizationId, enumerable: false });
+    return out;
+  }
+
+  /** One best-effort call to the issuer's settlement surface. Never throws. */
+  async function issuerPost(path, body) {
+    if (!base) return { ok: false, reasonCode: 'ISSUER_API_REQUIRED' };
+    try {
+      const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) return { ok: false, status: res.status, reasonCode: payload?.message ?? payload?.data?.reasonCode ?? `ISSUER_HTTP_${res.status}` };
+      // void answers 200 with success:false when the hold was not voidable (e.g. already settled)
+      if (payload?.success === false) return { ok: false, status: res.status, reasonCode: payload?.data?.reasonCode ?? payload?.message ?? 'NOT_APPLIED', data: payload?.data ?? null };
+      return { ok: true, status: res.status, data: payload?.data ?? null };
+    } catch (err) {
+      return { ok: false, reasonCode: 'ISSUER_UNREACHABLE', error: String(err?.message ?? err) };
+    }
+  }
+
+  /**
+   * Settle a claimed hold once the Service has actually executed. `claimToken` is the one the
+   * successful claim returned (`verdict.claimToken`); it is required to settle BELOW the authorized
+   * amount, and unnecessary at the full amount. Best-effort and non-throwing: a failure here never
+   * turns an executed call into an error, and a claimed hold stays committed to the mandate's cap
+   * either way, so failing to settle can only over-count spend, never under-count it.
+   */
+  async function captureAuthorization({ authorizationId, claimToken, amountCharged, bookingRef, settlementTxHash } = {}) {
+    if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
+    if (!Number.isFinite(Number(amountCharged))) return { ok: false, reasonCode: 'AMOUNT_CHARGED_REQUIRED' };
+    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/capture`, { amountCharged: Number(amountCharged), bookingRef, settlementTxHash, claimToken });
+  }
+
+  /**
+   * Release a claimed hold whose effect provably did NOT happen (the upstream cleanly rejected it),
+   * returning its budget to the mandate. Requires the claim token: the issuer refuses to void a
+   * claimed hold for anyone else, because the agent could otherwise wait for this Service to
+   * execute and then void its own hold. Do NOT call this for an ambiguous outcome (a timeout, a 5xx,
+   * a dropped connection) — use markAuthorizationUnknown so the spend stays committed.
+   */
+  async function releaseAuthorization({ authorizationId, claimToken, reason } = {}) {
+    if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
+    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/void`, { reason, claimToken });
+  }
+
+  /**
+   * Report that the outcome of an executed-or-not call is unknown (response lost, 5xx, timeout).
+   * The effect moves to UNKNOWN, which keeps the spend committed and hands it to reconciliation
+   * instead of guessing in either direction.
+   */
+  async function markAuthorizationUnknown({ authorizationId, reason } = {}) {
+    if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
+    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/unknown`, { reason });
   }
 
   async function loadBundle(agentDid) {
@@ -263,8 +332,10 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // stop REPLAY or CUMULATIVE SPEND past the mandate total — both are the stateful issuer
       // gate's job. Only claim on an actual PERMIT: escalate/block/suspend/quarantine execute
       // nothing, so there is nothing to protect and no reason to spend the hold's single use.
+      let claimToken;
       if (requireAuthorization && (final.decision === 'allow' || final.decision === 'observe')) {
         const claim = await claimAuthorization({ authorizationId: signed.authorizationId });
+        claimToken = claim.claimToken;
         if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
         // The claim alone only proves SOME real, unclaimed authorization exists — it must also
         // be FOR this agent and these exact values, or a cheap legitimate hold's id could be
@@ -288,7 +359,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         if (claim.currency !== undefined && claim.currency !== currency) return { decision: 'block', reasonCode: 'AUTHORIZATION_CURRENCY_MISMATCH' };
         if (claim.merchant !== undefined && claim.merchant !== merchant) return { decision: 'block', reasonCode: 'AUTHORIZATION_MERCHANT_MISMATCH' };
       }
-      return final;
+      // On a claimed permit the Service that executes needs the claim token to settle or release the
+      // hold afterwards (non-enumerable — see withClaim).
+      return withClaim(final, signed.authorizationId, claimToken);
     } catch (err) {
       return { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
     }
@@ -299,7 +372,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * agent's signed request must be passed as the first argument. Throws
    * GovernanceBlocked on any non-allow decision.
    */
-  function guardIncomingTool(action, handler) {
+  function guardIncomingTool(action, handler, { settle: settleClaim = false } = {}) {
     return async (signed, ...rest) => {
       // The WRAPPED TOOL's own `action` is authoritative — never `signed?.action` (the caller's
       // own claim). A Service that wraps more than one tool with ONE guard instance (the normal
@@ -357,6 +430,21 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // nothing for those floors to protect, so warning on it would just be noise.
       if (!requireAuthorization && Number(signed?.amount) > 0) {
         console.warn(`[mcp-guard] "${action}" (amount=${signed.amount}) permitted in trustless mode — rate-limit, circuit-breaker, replay, cumulative-spend, and spend-anomaly floors are stateful and were NOT re-verified against live issuer state. Set requireAuthorization:true for custodial/value-bearing surfaces.`);
+      }
+      // Opt-in settlement of a claimed hold (`requireAuthorization` + `{ settle: true }`): a handler
+      // that returns is settled at the authorized amount; one that throws is reported UNKNOWN, not
+      // released — a thrown error does not prove nothing was executed, and UNKNOWN keeps the spend
+      // committed until reconciliation decides. Off by default so existing embeds are unchanged.
+      if (settleClaim && decision.claimToken) {
+        let result;
+        try {
+          result = await handler(signed, ...rest);
+        } catch (err) {
+          await markAuthorizationUnknown({ authorizationId: decision.authorizationId, reason: 'HANDLER_THREW' });
+          throw err;
+        }
+        await captureAuthorization({ authorizationId: decision.authorizationId, claimToken: decision.claimToken, amountCharged: Number(signed?.amount) });
+        return result;
       }
       return handler(signed, ...rest);
     };
@@ -418,7 +506,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     return { settled: true, txHash: result.txHash, reasonCode: 'SETTLED' };
   }
 
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, serviceDid };
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, serviceDid };
 }
 
 /**

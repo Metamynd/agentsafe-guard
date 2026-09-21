@@ -102,7 +102,7 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.6.0 brings buildAuthMessage's `resource` field and buildLocalDecisionMessage into this
 // package's own bundled policy-core.mjs (alongside the guard's own 0.10.0) — no scaffolded
 // template code changes, but the floor must still cover the real current version.
-const MCP_GUARD_VERSION = '^0.6.0';
+const MCP_GUARD_VERSION = '^0.7.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -114,7 +114,7 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.5.0 adds the OPTIONAL Credential Vault `resolveCredential` hook on createHttpGateway (Module
 // G) — additive and backward-compatible (every existing consumer sees zero behavior change), but
 // the floor must still cover the real current version per this repo's own package-version check.
-const GATEWAY_VERSION = '^0.5.0';
+const GATEWAY_VERSION = '^0.6.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -1899,6 +1899,15 @@ own code, or a network attacker) might attempt:
   already checked it against the mandate's TOTAL budget when it was minted — not just this one
   request's amount. Many small legal-looking calls can't add up past the mandate cap this way,
   because each needed its own real authorization first.
+- **Settlement (\`@metamynd/agentsafe-http-gateway\` ≥ 0.6.0).** A claimed hold stays against the
+  mandate's cap until it is settled — it does NOT lapse after 15 minutes. So this gateway closes the
+  hold it claimed once the upstream answers: a 2xx is captured at the authorized amount, and anything
+  else (a rejection, a 5xx, a dropped connection) is parked as UNKNOWN so the spend stays committed.
+  A rejected call therefore keeps its budget until it is reconciled; if a given upstream status
+  guarantees nothing was executed, list it in \`releaseOnStatus\` on the route (e.g. \`[400, 422]\`) and
+  the gateway will release that hold. Only the gateway that claimed the hold can do either — the agent
+  cannot capture it lower or void it, which is what stopped it recovering the budget of a purchase it
+  had just had executed.
 - **Amount unknown.** \`amount-unknown\` (\`@metamynd/agentsafe-mcp-guard\` ≥ 0.3.0) blocks a
   platform tool by default when its raw bytes or a nested payload hide the amount from a naive
   spend cap — AND this agent's OWN starter SOP (see \`agent.metamynd.json\` /
