@@ -153,6 +153,26 @@ the guard — see "Passphrase-encrypted managed key" above. New export from `key
 backend's `encryptWithPassword`/`decryptWithPassword`, cross-verified against it). Fully
 additive: a config without `agentKeyEncrypted` is loaded exactly as before, no passphrase needed.
 
+**0.14.0 — sign the WHOLE payload, not just eight fields (MAGP §8.3.9).** The signed authorize message covers the
+agent, action, amount, currency, merchant and resource — not a payee, an account number or a passenger list. Pass
+`payload` to `authorize()` / `buildSignedRequest()` and the guard also signs a digest of it (RFC 8785 canonical JSON,
+`sha256:`), bound to that one authorization:
+
+```js
+await guard.authorize({ action: 'wire', amount: 250, currency: 'USD', merchant: 'skyward-air',
+  payload: { payee: { iban: 'NL91ABNA0417164300' }, reference: 'INV-1042' } });
+```
+
+The gate stores the digest with the hold, and the service that executes it (an `agentsafe-mcp-guard` with
+`bindPayload`, or an `agentsafe-http-gateway`, both 0.11.0) must present the digest of what it is about to run: a claim
+with a different payload is refused and the hold stays claimable. Pass the payload exactly as the service will receive
+it as JSON. A payload JSON cannot carry (`NaN`, a function, a lone surrogate) or a `keyProvider` that cannot sign a
+binding (the signer daemon, for now) **blocks** with `PAYLOAD_NOT_CANONICALIZABLE` / `PAYLOAD_BINDING_UNSUPPORTED` —
+it is never sent unbound. Off unless you pass `payload`; the wire body is otherwise unchanged. Also from `guardTool`: have `mapArgs`
+return `payload`. The gate echoes the digest it stored, and an agent that sent one **refuses a permit that does not echo
+it** (`PAYLOAD_BINDING_NOT_CONFIRMED`, releasing the hold) — so a proxy that strips the fields, or a backend that predates
+MAGP §8.3.9, is a loud failure, not a silently unbound request.
+
 **0.13.0 — a risk rule can no longer be skipped by staying silent about risk (D-03).** The rule layer
 now labels every context field with where it came from (`agent_asserted`, `agent_signed`,
 `gateway_derived`, `authoritative`, `attested`; MAGP §6.3) and judges `riskLevel` accordingly:

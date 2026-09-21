@@ -1,5 +1,5 @@
 /**
- * Canonical signed-message builder (spec §7.3).
+ * Canonical signed-message builder (spec §8.3).
  *
  * The authorize `signature` is an Ed25519 signature over the UTF-8 string formed
  * by joining these eight fields, in this exact order, with the `|` (U+007C)

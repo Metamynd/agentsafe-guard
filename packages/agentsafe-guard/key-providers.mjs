@@ -12,6 +12,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { buildAuthMessage, buildLocalDecisionMessage } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
+import { buildPayloadBindingMessage } from './payload-binding.mjs';
 
 /**
  * Today's default: the raw key lives in THIS process (see the design doc's "What this does not
@@ -36,6 +37,12 @@ export function createStaticKeyProvider(agentKeyHex) {
     },
     async signLocalDecision(fields) {
       return rawSign(buildLocalDecisionMessage(fields));
+    },
+    // Payload binding (spec 8.3.9): sign the digest of the COMPLETE payload, bound to this authorization. OPTIONAL like
+    // signLocalDecision; the guard refuses (fail closed) to send an unbound request when a binding was asked for and the
+    // provider cannot produce one.
+    async signPayloadBinding(fields) {
+      return rawSign(buildPayloadBindingMessage(fields));
     },
   };
 }
@@ -128,6 +135,12 @@ export function createDaemonKeyProvider({ socketPath }) {
     async signLocalDecision(fields) {
       const { signature } = await daemonRequest(socketPath, 'sign-local-decision', fields);
       return signature;
+    },
+    // The daemon builds every message it signs from structured fields and will not sign arbitrary bytes, so payload binding
+    // needs its own `sign-payload` operation there. Until that exists this refuses, LOUDLY and closed: a guard asked to bind
+    // a payload must never fall back to sending the request unbound.
+    async signPayloadBinding() {
+      throw Object.assign(new Error('the agentsafe-signer daemon does not support payload binding yet (sign-payload); use a static key provider, or omit `payload`'), { code: 'PAYLOAD_BINDING_UNSUPPORTED' });
     },
   };
 }

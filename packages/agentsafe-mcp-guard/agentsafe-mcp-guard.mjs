@@ -17,6 +17,7 @@ import { verifyDidSignature } from './magp-did.mjs';
 import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 import { verifyBundle } from './magp-policy.mjs';
 import { resolveKeyProvider } from './key-providers.mjs';
+import { PAYLOAD_DIGEST_HEADER, buildPayloadBindingMessage, claimDigestField, isPayloadDigest, payloadDigestOf, toWireJson } from './payload-binding.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -169,17 +170,24 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * EFFECT_TRANSITION_CONTENDED). A definite answer, including AUTHORIZATION_ALREADY_CLAIMED, is final and is
    * returned as it is.
    */
-  async function claimAuthorization({ authorizationId } = {}) {
+  async function claimAuthorization({ authorizationId, payloadDigest } = {}) {
     if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!base) throw new Error('issuerApi is required to claim an authorization');
+    if (payloadDigest !== undefined && !isPayloadDigest(payloadDigest)) return { claimed: false, reasonCode: 'PAYLOAD_DIGEST_INVALID' };
     const idempotencyKey = crypto.randomUUID().replace(/-/g, '');
     const attempts = 2;
     let lastError;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
         // Re-signed per attempt (a fresh nonce; the signature also covers the key, so it cannot be swapped or stripped).
-        const auth = await serviceAuthHeaders('claim', authorizationId, [idempotencyKey]);
-        const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, { method: 'POST', headers: { ...auth, 'idempotency-key': idempotencyKey } });
+        // `payloadDigest` — the digest of exactly what THIS Service is about to execute — is one more signed field and rides
+        // as a header: the issuer compares it with the digest the AGENT signed for this authorization and refuses the claim
+        // (leaving the hold unclaimed) on any difference. Payload binding, spec 8.3.9 / 8.7.11.
+        const auth = await serviceAuthHeaders('claim', authorizationId, [idempotencyKey, ...(payloadDigest ? [claimDigestField(payloadDigest)] : [])]);
+        const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, {
+          method: 'POST',
+          headers: { ...auth, 'idempotency-key': idempotencyKey, ...(payloadDigest ? { [PAYLOAD_DIGEST_HEADER]: payloadDigest } : {}) },
+        });
         const body = await res.json().catch(() => null);
         // Ambiguous, so worth one retry with the same key: a 5xx, or EFFECT_TRANSITION_CONTENDED — the issuer's
         // "an overlapping attempt of yours is mid-claim, ask again", which is not a refusal.
@@ -193,6 +201,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
           amount: body?.data?.amount,
           currency: body?.data?.currency,
           merchant: body?.data?.merchant,
+          // The digest the agent signed for this authorization (null = unbound); absent from an issuer that predates it.
+          payloadDigest: body?.data?.payloadDigest,
           // The settlement token the issuer hands ONLY the caller whose claim succeeded. Once a hold is
           // claimed it can be settled below its amount, or voided, only with this token — so the Service
           // that executes must keep it and present it (captureAuthorization / releaseAuthorization).
@@ -393,7 +403,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    *   but not lowered. Without it the rules see the agent's own claim, as before.
    * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
-  async function verifyRequest(signed = {}, { trustedContext } = {}) {
+  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding } = {}) {
     try {
       assertTrustedContext(trustedContext); // a broken deriver is a refused request (GUARD_ERROR), never a quiet downgrade
       const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature } = signed;
@@ -406,6 +416,28 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, resource, nonce, issuedAt });
       if (!verifyDidSignature(agentDid, message, signature)) {
         return { decision: 'block', reasonCode: 'SIGNATURE_INVALID' };
+      }
+      // 1b. Payload binding (spec 8.3.9). A digest with no valid signature over it binds nothing — refuse it. When THIS Service
+      // states the digest of what it is about to execute (`payloadDigest`), it must be the one the agent signed: a mismatch is
+      // refused here, before any claim, so it costs no round trip. (The ISSUER re-checks the same thing against the digest it
+      // stored at authorize time when the claim is made — this early check is only cheaper, never the authority.)
+      const signedDigest = signed.payloadDigest;
+      if (signedDigest !== undefined || signed.payloadSignature !== undefined) {
+        const bound = isPayloadDigest(signedDigest) && typeof signed.payloadSignature === 'string'
+          && verifyDidSignature(agentDid, buildPayloadBindingMessage({ agentDid, action, nonce, issuedAt, payloadDigest: signedDigest }), signed.payloadSignature);
+        if (!bound) return { decision: 'block', reasonCode: 'PAYLOAD_BINDING_INVALID' };
+      }
+      if (payloadDigest !== undefined) {
+        if (!isPayloadDigest(payloadDigest)) return { decision: 'block', reasonCode: 'PAYLOAD_DIGEST_INVALID' };
+        if (signedDigest === undefined) {
+          // The executor has a payload; the agent bound none. Refuse only when binding is REQUIRED — otherwise this is an
+          // unbound request, exactly as before payload binding existed (and it is not claimed with a digest: see below).
+          if (requirePayloadBinding) return { decision: 'block', reasonCode: 'PAYLOAD_BINDING_REQUIRED' };
+        } else if (signedDigest !== payloadDigest) {
+          return { decision: 'block', reasonCode: 'PAYLOAD_NOT_BOUND' };
+        }
+      } else if (requirePayloadBinding && signedDigest === undefined) {
+        return { decision: 'block', reasonCode: 'PAYLOAD_BINDING_REQUIRED' };
       }
       // 2. Freshness. (Single-use nonce consumption stays the gate's job by default — a Service
       //    re-check is verification, not a second authorization. requireAuthorization below is
@@ -460,9 +492,17 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // nothing, so there is nothing to protect and no reason to spend the hold's single use.
       let claimToken; let claimAuthenticated = false;
       if (requireAuthorization && (final.decision === 'allow' || final.decision === 'observe')) {
-        const claim = await claimAuthorization({ authorizationId: signed.authorizationId });
+        // The claim states the digest of what THIS Service is about to execute — only when the agent bound one (a digest for
+        // an unbound authorization is refused by the issuer: this Service would be asserting a binding that does not exist).
+        const claimDigest = payloadDigest !== undefined && signedDigest !== undefined ? payloadDigest : undefined;
+        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest });
         claimToken = claim.claimToken; claimAuthenticated = claim.counterpartyAuthenticated === true;
         if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
+        // The grant states the digest the hold is bound to (null = unbound), so it must be the one this claim stated. The issuer
+        // already refused a claim whose digest differed; this catches an issuer that did NOT compare — one that predates payload
+        // binding ignores the header and its grant carries no digest at all, which is "not enforced", never "fine". Only
+        // reachable when the agent bound a payload, a flow an issuer that predates binding cannot honour anyway.
+        if ((claim.payloadDigest ?? null) !== (claimDigest ?? null)) return { decision: 'block', reasonCode: 'PAYLOAD_DIGEST_MISMATCH' };
         // The claim alone only proves SOME real, unclaimed authorization exists — it must also
         // be FOR this agent and these exact values, or a cheap legitimate hold's id could be
         // presented to unlock a completely different, more expensive execution. Each check is
@@ -498,8 +538,38 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * agent's signed request must be passed as the first argument. Throws
    * GovernanceBlocked on any non-allow decision.
    */
-  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext } = {}) {
+  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, requirePayloadBinding = false } = {}) {
+    // `requirePayloadBinding` only checks that the AGENT bound something; the comparison with what this tool executes needs a
+    // digest of it. Without `bindPayload` there is nothing to compare, so the option would give assurance it does not provide.
+    if (requirePayloadBinding && !bindPayload) {
+      throw new Error(`guardIncomingTool("${action}"): requirePayloadBinding needs bindPayload — without a digest of what the tool executes there is nothing to compare the binding with`);
+    }
     return async (signed, ...rest) => {
+      // Payload binding (spec 8.3.9): the digest of what THIS call is about to execute. `bindPayload: true` digests the tool's
+      // single argument after the signed request and hands the handler that same JSON snapshot, so what is digested is what
+      // runs (a `toJSON()` or a later mutation cannot make them differ); a tool with any other shape passes a function that
+      // returns what to digest, and then owns making the handler execute exactly that. Computed BEFORE the request is verified
+      // so a payload JSON cannot carry refuses the call rather than skipping the check.
+      let executorDigest;
+      if (bindPayload) {
+        try {
+          let payload;
+          if (typeof bindPayload === 'function') {
+            payload = await bindPayload(signed, ...rest);
+          } else {
+            if (rest.length !== 1) throw new Error(`bindPayload: true digests exactly one argument after the signed request, got ${rest.length}; pass a function to say what to digest`);
+            payload = rest[0];
+          }
+          const wire = toWireJson(payload);
+          executorDigest = payloadDigestOf(wire);
+          if (typeof bindPayload !== 'function') rest = [wire];
+        } catch (err) {
+          const e = new Error(`MCP guard BLOCK "${action}": PAYLOAD_NOT_CANONICALIZABLE`);
+          e.name = 'GovernanceBlocked';
+          e.governance = { decision: 'block', reasonCode: 'PAYLOAD_NOT_CANONICALIZABLE', error: String(err?.message ?? err) };
+          throw e;
+        }
+      }
       // The WRAPPED TOOL's own `action` is authoritative — never `signed?.action` (the caller's
       // own claim). A Service that wraps more than one tool with ONE guard instance (the normal
       // MCP-server shape: many tools, one guard) previously let a genuinely-valid signature for
@@ -517,7 +587,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // Configured but yielding nothing usable (a function that returned undefined) is a broken deriver, not "no
       // trusted context": refuse rather than fall back to the agent's word. `undefined` option = not configured.
       if (trustedContext !== undefined) assertTrustedContext(derived === undefined ? null : derived, `"${action}"`);
-      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived });
+      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding });
       // allow/observe both PERMIT the tool call; observe is permit-but-flag (SAFR §11).
       if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`MCP guard ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);

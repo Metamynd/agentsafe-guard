@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, maxRisk, normalizeRiskLevel } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
+import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
 import { resolveKeyProvider, decryptAgentKeyWithPassword } from './key-providers.mjs';
@@ -182,6 +183,27 @@ export function createGuard(opts = {}) {
     return keyProvider.signEnvelope({ agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt });
   }
 
+  // Payload binding (spec §8.3.9): sign a digest of the COMPLETE payload the caller will execute, bound to THIS authorization
+  // (agent, action, nonce, issuedAt). The eight signed fields cover amount/merchant/resource only; everything else a tool takes
+  // (a payee, an account number) is otherwise unbound, and this is what binds it. `payload` is whatever the executing
+  // counterparty will receive — the JSON body a gateway forwards, or the arguments an MCP tool is called with — normalised to
+  // the JSON it would be on the wire. Fails CLOSED: if a binding was asked for and cannot be produced (a payload JSON cannot
+  // carry, or a key provider that cannot sign one), this throws — it never quietly sends the request unbound.
+  async function payloadBindingFor({ action, nonce, issuedAt, payload }) {
+    if (payload === undefined) return {};
+    let payloadDigest;
+    try {
+      payloadDigest = payloadDigestOf(toWireJson(payload));
+    } catch (err) {
+      throw Object.assign(new Error(`payload cannot be bound: ${err?.message ?? err}`), { code: 'PAYLOAD_NOT_CANONICALIZABLE' });
+    }
+    if (typeof keyProvider.signPayloadBinding !== 'function') {
+      throw Object.assign(new Error('this keyProvider cannot sign a payload binding (signPayloadBinding)'), { code: 'PAYLOAD_BINDING_UNSUPPORTED' });
+    }
+    const payloadSignature = await keyProvider.signPayloadBinding({ agentDid, action, nonce, issuedAt, payloadDigest });
+    return { payloadDigest, payloadSignature };
+  }
+
   // --- Enforcement mode (spec §9.2 + local-first plan) --------------------------------------
   // 'local' (DEFAULT): decide the rule layer LOCALLY against a cached signed bundle — a
   //   block/escalate needs no network; an allowed VALUE action is still sealed by the remote
@@ -214,7 +236,7 @@ export function createGuard(opts = {}) {
    * agent's authorization trustlessly against the agent's policy bundle (§9.3). Same shape
    * `authorize()` posts to the gate; a fresh nonce each call.
    */
-  async function buildSignedRequest({ action, amount, currency, merchant, resource, context = {}, trace, materiality }) {
+  async function buildSignedRequest({ action, amount, currency, merchant, resource, context = {}, trace, materiality, payload }) {
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
     // This object is presented to a COUNTERPARTY (spec §9.3) — but its own docstring also
@@ -243,11 +265,12 @@ export function createGuard(opts = {}) {
     // action fields don't include it yet either (only amount/currency/merchant) — adding it
     // to just one side would break Tier-1 envelope-hash verification for any resource-
     // declaring request. A coordinated backend+guard follow-up, not something to do half here.
-    const [signature, envelopeSignature] = await Promise.all([
+    const [signature, envelopeSignature, binding] = await Promise.all([
       keyProvider.signAuthorize({ agentDid, action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt }),
       envelopeSignatureFor({ action, amount: wireAmount, currency: wireCurrency, merchant, context, trace, materiality, nonce, issuedAt }),
+      payloadBindingFor({ action, nonce, issuedAt, payload }),
     ]);
-    return { agentDid, action, amount: wireAmount, currency: wireCurrency, merchant, resource, itinerary: context, trace, materiality, nonce, issuedAt, signature, envelopeSignature };
+    return { agentDid, action, amount: wireAmount, currency: wireCurrency, merchant, resource, itinerary: context, trace, materiality, nonce, issuedAt, signature, envelopeSignature, ...binding };
   }
 
   /**
@@ -255,7 +278,7 @@ export function createGuard(opts = {}) {
    * returns { decision:'allow'|'block'|'escalate', reasonCode, authorizationId, remaining }.
    * A network/gate failure returns a fail-CLOSED block so the agent can't proceed blind.
    */
-  async function authorize({ action, amount, currency, merchant, resource, context = {}, trace, materiality }) {
+  async function authorize({ action, amount, currency, merchant, resource, context = {}, trace, materiality, payload }) {
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
     try {
@@ -276,9 +299,10 @@ export function createGuard(opts = {}) {
       // see key-providers.mjs for why callers pass structured fields, not a pre-built string.
       // `resource` deliberately NOT passed to envelopeSignatureFor — see buildSignedRequest's
       // own comment on why (backend governance-envelope.ts doesn't include it yet either).
-      const [signature, envelopeSignature] = await Promise.all([
+      const [signature, envelopeSignature, binding] = await Promise.all([
         keyProvider.signAuthorize({ agentDid, action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt }),
         envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }),
+        payloadBindingFor({ action, nonce, issuedAt, payload }),
       ]);
       const res = await fetch(`${base}/policy/mandate/authorize`, {
         method: 'POST',
@@ -290,11 +314,27 @@ export function createGuard(opts = {}) {
           agentDid, action, amount, currency, merchant, resource, itinerary: context, trace, materiality, nonce, issuedAt,
           signature,
           envelopeSignature,
+          ...binding, // payloadDigest + payloadSignature, or nothing for an unbound request
         }),
       });
       const body = await res.json().catch(() => null);
-      return body?.data ?? { decision: 'block', reasonCode: `GATE_HTTP_${res.status}` };
+      const data = body?.data ?? { decision: 'block', reasonCode: `GATE_HTTP_${res.status}` };
+      // The gate ACKNOWLEDGES a binding by echoing the digest it stored. A permit or escalation that does not — a hop stripped
+      // the fields, or the backend predates payload binding and ignored them — was never bound, and this agent must not act as
+      // if it were: refuse, and release the hold it just got (best effort; an unclaimed hold also lapses on its own).
+      if (binding.payloadDigest && (data.decision === 'allow' || data.decision === 'observe' || data.decision === 'escalate') && data.payloadDigest !== binding.payloadDigest) {
+        if (data.authorizationId) {
+          fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(data.authorizationId)}/void`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+        }
+        return { decision: 'block', reasonCode: 'PAYLOAD_BINDING_NOT_CONFIRMED', authorizationId: null, error: 'the gate did not confirm the payload binding (an older backend, or the digest was stripped in transit)' };
+      }
+      return data;
     } catch (err) {
+      // A payload binding that was asked for and cannot be produced is its own answer — NOT a gate outage, and never a
+      // reason to send the request unbound. Fail closed with the real cause.
+      if (err?.code === 'PAYLOAD_NOT_CANONICALIZABLE' || err?.code === 'PAYLOAD_BINDING_UNSUPPORTED') {
+        return { decision: 'block', reasonCode: err.code, error: String(err.message) };
+      }
       // A daemon-backed keyProvider can fail before the gate is ever reached (the signer, not
       // the gate, was unreachable) — a distinct reasonCode so this doesn't read as a gate outage
       // it wasn't. Still fail-CLOSED either way, which is the property that actually matters.
