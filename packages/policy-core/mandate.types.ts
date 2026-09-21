@@ -55,6 +55,14 @@ export interface Permission {
   target: string; // the action, e.g. 'mm:flight-purchase'
   action?: string; // ODRL action verb, default 'execute'
   constraint?: Constraint[];
+  /**
+   * The mandate OWNER's risk classification of this action: a floor no agent claim can lower (spec §6.4.3).
+   * The rule layer judges `riskLevel` as the maximum of this and whatever the agent asserts, with
+   * `authoritative` provenance — so an agent that says "low" about a wire transfer the owner classed `high`
+   * is still judged `high`. Carried in the signed mandate, so the gate and every guard apply the same floor.
+   * Not an ODRL constraint and never evaluated by `evaluateMandate`: it changes what the RULES see.
+   */
+  riskTier?: 'low' | 'medium' | 'high' | 'critical';
 }
 
 export interface Prohibition {

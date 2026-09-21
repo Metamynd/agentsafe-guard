@@ -193,3 +193,41 @@ describe('delegationVerdict', () => {
     expect(narrows(p, child)).toBe(true);
   });
 });
+
+// The owner's risk tier is a floor under whatever risk an agent claims (spec §6.3.3), so a delegated child
+// mandate may keep or raise it, and may never drop or lower it: less scrutiny is a widening.
+describe('a delegated mandate cannot lower or drop the risk tier', () => {
+  const withTier = (tier?: unknown): Mandate => ({
+    target: 'flight-purchase',
+    permission: [{ target: 'flight-purchase', constraint: [cap(500)], ...(tier === undefined ? {} : { riskTier: tier as never }) }],
+  });
+  const verdict = (parentTier: unknown, childTier: unknown) => delegationVerdict(withTier(parentTier), withTier(childTier), 1);
+
+  it('keeping or raising the parent tier is fine', () => {
+    expect(verdict('high', 'high').ok).toBe(true);
+    expect(verdict('high', 'critical').ok).toBe(true);
+    expect(verdict('low', 'medium').ok).toBe(true);
+    expect(verdict(undefined, 'high').ok).toBe(true); // a parent with no floor: any (valid) child tier only adds scrutiny
+    expect(verdict(undefined, undefined).ok).toBe(true); // and no tiers anywhere is unchanged behaviour
+  });
+
+  it('DROPPING the tier is refused (CONSTRAINT_DROPPED riskTier)', () => {
+    expect(verdict('high', undefined)).toMatchObject({ ok: false, refusal: 'CONSTRAINT_DROPPED', detail: 'riskTier' });
+  });
+
+  it('LOWERING the tier is refused (CONSTRAINT_WIDENED riskTier)', () => {
+    expect(verdict('high', 'medium')).toMatchObject({ ok: false, refusal: 'CONSTRAINT_WIDENED', detail: 'riskTier' });
+    expect(verdict('critical', 'low')).toMatchObject({ ok: false, refusal: 'CONSTRAINT_WIDENED' });
+  });
+
+  it('a tier that is not a recognised level is refused, never read as "no floor" — even under a parent with none', () => {
+    for (const bad of ['HIGHH', 'banana', 7, null, '', {}]) {
+      expect(verdict('high', bad), JSON.stringify(bad)).toMatchObject({ ok: false, refusal: 'UNCOMPARABLE', detail: 'riskTier' });
+      expect(verdict(undefined, bad), JSON.stringify(bad)).toMatchObject({ ok: false, refusal: 'UNCOMPARABLE', detail: 'riskTier' });
+    }
+  });
+
+  it('case and whitespace are read tolerantly, like everywhere else', () => {
+    expect(verdict('HIGH', ' high ').ok).toBe(true);
+  });
+});

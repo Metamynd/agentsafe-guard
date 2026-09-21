@@ -162,9 +162,11 @@ console.log('\n  verify — a policy that REQUIRES request inputs (--context)\n'
 
 console.log('\n  verify — a risk rule at the "low" threshold vs the hard-coded baseline riskLevel\n');
 {
-  // verify's baseline sends riskLevel "low". A rule whose threshold IS "low" fires on that, so a
-  // healthy agent would read as broken. --context can override it: null = "no risk level", which
-  // never fires a risk rule.
+  // verify's baseline sends riskLevel "low". A rule whose threshold IS "low" ("escalate on ANY risk") fires on
+  // that, so a healthy agent reads as failing — which is the truth: that rule sends every action to a human.
+  // There used to be a way out: --context riskLevel=null meant "no risk level", which never fired a risk rule.
+  // That was D-03 by another name (hiding the field skipped the rule), so it is gone: a missing or null risk is
+  // now UNVERIFIABLE and escalates too (spec §6.4.3).
   const lowRisk = [{ id: 'sop', document: { molecules: [{ id: 'r', name: 'Any risk', combinator: 'all', atoms: [{ id: 'a', predicate: 'risk-at-or-above', config: { level: 'low' } }], decision: 'escalate', reasonCode: 'ANY_RISK' }] } }];
   const withRiskSops = async (opts = {}) => {
     stubFetch([]);
@@ -178,7 +180,9 @@ console.log('\n  verify — a risk rule at the "low" threshold vs the hard-coded
     return verify({ configPath: { apiBase: 'https://example.invalid/api/v1', agentDid: AGENT_DID, agentKey: AGENT_KEY, bundleUrl: 'https://example.invalid/bundle' }, log: () => {}, ...opts });
   };
   ok('bare baseline is escalated by the low-threshold rule', status(await withRiskSops(), 'baseline') === 'failed');
-  ok('context { riskLevel: null } clears it', status(await withRiskSops({ context: { riskLevel: null } }), 'baseline') === 'held');
+  const hidden = await withRiskSops({ context: { riskLevel: null } });
+  ok('hiding the risk (context { riskLevel: null }) no longer clears it — it escalates as unverifiable', status(hidden, 'baseline') === 'failed');
+  ok('...and a risk that is actually above the rule\'s threshold still fires with the rule\'s own reason', /ANY_RISK/.test(JSON.stringify((await withRiskSops()).checks)));
 }
 
 console.log('\n  verify — the CLI refuses a --context with no value\n');

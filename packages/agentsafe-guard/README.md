@@ -153,6 +153,25 @@ the guard — see "Passphrase-encrypted managed key" above. New export from `key
 backend's `encryptWithPassword`/`decryptWithPassword`, cross-verified against it). Fully
 additive: a config without `agentKeyEncrypted` is loaded exactly as before, no passphrase needed.
 
+**0.13.0 — a risk rule can no longer be skipped by staying silent about risk (D-03).** The rule layer
+now labels every context field with where it came from (`agent_asserted`, `agent_signed`,
+`gateway_derived`, `authoritative`, `attested`; MAGP §6.3) and judges `riskLevel` accordingly:
+
+- **A missing or unrecognised `riskLevel` escalates** (`CONTEXT_UNVERIFIABLE`) for any rule that uses the
+  risk atom, instead of reading as "not risky". `"HIGH"` and `" high "` are read as `high`. **If your requests
+  do not send a `riskLevel`, they will now escalate** — send one (`context: { riskLevel: 'low' }`), or have
+  your mandate's owner set a `riskTier` (below) so the risk does not depend on you.
+- **`riskTier` on a mandate permission** is the owner's classification of the action: a floor the agent's own
+  claim can never lower (the effective risk is the *maximum* of the tier and the claim — an agent may raise
+  its risk, never lower it). It travels in the signed mandate, so `evaluateLocally` and the issuer's gate agree.
+- **`requireProvenance`** on a rule (`{ riskLevel: 'authoritative' }`) makes it demand a trusted source: the
+  agent's own honest "low" is then not enough.
+- `evaluateLocally` builds its context the same way, and judges the SUPERVISED-mode high-risk escalation on
+  the effective risk.
+
+The claim itself is still the agent's word when no owner tier, gateway derivation or `requireProvenance`
+exists: this closes hiding and garbling risk, and gives owners the means to close understating it.
+
 ```yaml
 # .github/workflows/governance.yml
 name: Governance

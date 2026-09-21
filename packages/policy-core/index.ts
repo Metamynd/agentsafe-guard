@@ -25,6 +25,9 @@ export {
 // Standards / SOP rules engine
 export {
   moleculeFires,
+  moleculeUnverifiable,
+  requiredContextOf,
+  CONTEXT_UNVERIFIABLE,
   evaluateStandardRules,
   evaluateBoundStandards,
   validateMolecules,
@@ -67,6 +70,26 @@ export { buildAuthMessage, buildLegacyAuthMessageV1, type AuthMessageFields } fr
 export { buildLocalDecisionMessage, type LocalDecisionMessageFields } from './canonical.js';
 export { buildCheckpointAnchorMessage, type CheckpointAnchorMessageFields } from './checkpoint-anchor.js';
 export { applySignedLast } from './context.js';
+// Trusted context provenance (spec §6.4.3)
+export {
+  buildRuleContext,
+  provenanceOf,
+  meetsProvenance,
+  isProvenance,
+  normalizeRiskLevel,
+  maxRisk,
+  riskFloorFor,
+  contextFieldProblem,
+  PROVENANCE_KEY,
+  PROVENANCE_LEVELS,
+  PROVENANCE_RANK,
+  RISK_LEVELS,
+  ATOM_DEFAULT_REQUIRED_CONTEXT,
+  type ContextProvenance,
+  type ProvenanceMap,
+  type RiskLevel,
+  type RuleContextSources,
+} from './provenance.js';
 
 // Operating-mode autonomy ladder — request-time gate (edge-shared; Phase 2.5b)
 export {

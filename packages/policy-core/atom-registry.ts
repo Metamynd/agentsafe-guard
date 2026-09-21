@@ -1,4 +1,5 @@
 import type { EvaluationContext } from './types.js';
+import { normalizeRiskLevel } from './provenance.js';
 
 /**
  * Atom library — the code-defined predicates that DB policies compose by id.
@@ -43,7 +44,12 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
     !!c.dataSourceId && !(((cfg?.approved as string[]) ?? []).includes(String(c.dataSourceId))),
   'consent-missing': (c) => c.consent === false,
   'risk-at-or-above': (c, cfg) => {
-    const have = RISK_RANK[String(c.riskLevel)];
+    // Read tolerantly ("HIGH " is high). A value that is still not a risk level fires nothing HERE — the
+    // atom is a pure predicate — but the molecule that holds it does not pass silently: risk-at-or-above
+    // is in ATOM_DEFAULT_REQUIRED_CONTEXT, so a missing or unrecognised riskLevel ESCALATES at the rule
+    // layer (standards-rules.ts) rather than reading as "not risky".
+    const haveLevel = normalizeRiskLevel(c.riskLevel);
+    const have = haveLevel === null ? undefined : RISK_RANK[haveLevel];
     const need = RISK_RANK[String(cfg?.level ?? 'high')];
     return have !== undefined && need !== undefined && have >= need;
   },

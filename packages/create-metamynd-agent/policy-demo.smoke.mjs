@@ -233,11 +233,16 @@ await check('the runtime inputs each rule reads are listed (BR-008: a rule needs
 await check('the non-financial default SOP passes an ordinary request and reviews a high-risk one — no amount rule', async () => {
   const doc = harnessDefaultSopNeutral();
   assert.ok(!JSON.stringify(doc).includes('amount'), 'no amount atom in the default');
+  // D-03: an ordinary request STATES its risk. One that leaves it out is no longer waved through — a missing
+  // riskLevel is unverifiable and escalates (spec §6.4.3), exactly like a high one, so an agent cannot skip the
+  // review by staying silent.
   const results = await runCases(doc, [
-    { context: {}, expect: 'allow' },
+    { context: { riskLevel: 'low' }, expect: 'allow' },
     { context: { riskLevel: 'high' }, expect: 'escalate' },
+    { context: {}, expect: 'escalate' },
+    { context: { riskLevel: 'HIGH' }, expect: 'escalate' },
   ]);
-  assert.deepEqual(results.map((r) => r.got), ['allow', 'escalate']);
+  assert.deepEqual(results.map((r) => r.got), ['allow', 'escalate', 'escalate', 'escalate']);
 });
 
 await check('a non-financial mandate carries no spend constraint', () => {
