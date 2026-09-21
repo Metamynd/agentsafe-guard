@@ -18,6 +18,8 @@ import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 import { verifyBundle } from './magp-policy.mjs';
 import { resolveKeyProvider } from './key-providers.mjs';
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** Freshness window for signed requests and handshake nonces (spec §7.7). How far `issuedAt`
  *  may be BEHIND server time — network/processing delay. */
 const FRESHNESS_MS = 5 * 60 * 1000;
@@ -115,27 +117,109 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * entirely) could be presented to unlock a completely different one — the same confused-deputy
    * shape payload binding closes at the request layer, recurring one layer deeper.
    */
+  /**
+   * Headers that sign one settlement-surface call as THIS Service (`x-magp-service-*`), or `{}` when it
+   * cannot: no `serviceKey`/`keyProvider` that can sign arbitrary messages, or a `serviceDid` that is not
+   * self-certifying (only did:key and did:hedera embed the verification key, so the issuer needs no
+   * registry to check them). The signed message is domain-separated from every other MAGP signature and
+   * binds the action, the authorization id and the call's own values:
+   *
+   *   MAGP-SERVICE-v1 | action | authorizationId | ...fields | nonce | issuedAt   (each field "\" and "|" escaped)
+   *
+   * An authenticated claim records this Service's DID on the effect chain; from then on only this identity
+   * may settle the hold below its amount, void it, or mark it unknown, and no bearer token is issued.
+   */
+  async function serviceAuthHeaders(action, authorizationId, fields = []) {
+    if (!serviceDid || !/^did:(key|hedera):/.test(serviceDid)) return {};
+    if (!keyProvider || typeof keyProvider.signServiceMessage !== 'function') return {};
+    const escape = (v) => String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+    const nonce = crypto.randomUUID();
+    const issuedAt = new Date().toISOString();
+    const message = ['MAGP-SERVICE-v1', action, authorizationId, ...fields, nonce, issuedAt].map(escape).join('|');
+    const signature = await keyProvider.signServiceMessage(message);
+    return { 'x-magp-service-did': serviceDid, 'x-magp-service-nonce': nonce, 'x-magp-service-issued-at': issuedAt, 'x-magp-service-signature': signature };
+  }
+
+  /**
+   * Claim the authorization, retrying ONCE when the answer is lost.
+   *
+   * A claim whose response never arrives (dropped connection, a 5xx from a proxy in front of the issuer) is
+   * ambiguous: it may have landed. Without more, this Service could not tell "my claim landed" from "someone
+   * else claimed", would refuse, and the hold would sit claimed — committed to the cap — with nobody executing
+   * it. So every claim CALL carries a fresh unguessable `Idempotency-Key`, reused only for the retry of that
+   * same call: the issuer recognises the retry as this claimant's own and returns the original grant
+   * (`replayed: true`) instead of refusing. The key is per call and never persisted, so a restarted process, or a
+   * later request for the same authorization, gets no replay — a claim is still single-use.
+   *
+   * Only an AMBIGUOUS failure is retried (no response, a 5xx, or the issuer's retryable
+   * EFFECT_TRANSITION_CONTENDED). A definite answer, including AUTHORIZATION_ALREADY_CLAIMED, is final and is
+   * returned as it is.
+   */
   async function claimAuthorization({ authorizationId } = {}) {
     if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!base) throw new Error('issuerApi is required to claim an authorization');
+    const idempotencyKey = crypto.randomUUID().replace(/-/g, '');
+    const attempts = 2;
+    let lastError;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        // Re-signed per attempt (a fresh nonce; the signature also covers the key, so it cannot be swapped or stripped).
+        const auth = await serviceAuthHeaders('claim', authorizationId, [idempotencyKey]);
+        const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, { method: 'POST', headers: { ...auth, 'idempotency-key': idempotencyKey } });
+        const body = await res.json().catch(() => null);
+        // Ambiguous, so worth one retry with the same key: a 5xx, or EFFECT_TRANSITION_CONTENDED — the issuer's
+        // "an overlapping attempt of yours is mid-claim, ask again", which is not a refusal.
+        const ambiguous = res.status >= 500 || (res.status === 409 && body?.message === 'EFFECT_TRANSITION_CONTENDED');
+        if (ambiguous && attempt < attempts) { lastError = `HTTP ${res.status}`; await sleep(150); continue; }
+        if (!res.ok) return { claimed: false, reasonCode: body?.message ?? body?.data?.reasonCode ?? `AUTHORIZATION_CLAIM_HTTP_${res.status}` };
+        return {
+          claimed: true,
+          agentDid: body?.data?.agentDid,
+          action: body?.data?.action,
+          amount: body?.data?.amount,
+          currency: body?.data?.currency,
+          merchant: body?.data?.merchant,
+          // The settlement token the issuer hands ONLY the caller whose claim succeeded. Once a hold is
+          // claimed it can be settled below its amount, or voided, only with this token — so the Service
+          // that executes must keep it and present it (captureAuthorization / releaseAuthorization).
+          claimToken: body?.data?.claimToken,
+          // This claim was signed as this Service's own identity, so the issuer recorded it as the claimant.
+          counterpartyAuthenticated: 'x-magp-service-did' in auth,
+          // True when the issuer answered a RETRY with the grant of this call's own earlier attempt.
+          replayed: body?.data?.replayed === true,
+        };
+      } catch (err) {
+        lastError = String(err?.message ?? err);
+        if (attempt < attempts) { await sleep(150); continue; }
+      }
+    }
+    return { claimed: false, reasonCode: 'AUTHORIZATION_CLAIM_UNREACHABLE', error: lastError };
+  }
+
+  /**
+   * What became of an authorization? Public, keyed by the authorization id (no signature needed). Use it when a
+   * claim was refused with AUTHORIZATION_ALREADY_CLAIMED, or before deciding whether to retry anything:
+   *
+   *   `outcome`         not_started | expired | in_flight | settled | not_executed | unknown | reversing | reversed | reversal_failed
+   *   `nothingExecuted` nothing has executed SO FAR (not_started, expired, not_executed)
+   *   `retrySafe`       nothing can execute LATER either, so a fresh authorization cannot duplicate this one:
+   *                     true ONLY for expired and not_executed
+   *
+   * Retry only on `retrySafe`. `not_started` is nothingExecuted but NOT retrySafe: the hold can still be claimed
+   * until its window closes, so a request queued behind a slow gateway could run it too (void it first, then it
+   * reads not_executed). `unknown` and `in_flight` are neither — an ambiguous outcome must be reconciled, never
+   * retried blindly. Best-effort and non-throwing: `{ ok: false, reasonCode }` when the issuer cannot be asked.
+   */
+  async function lookupOutcome({ authorizationId } = {}) {
+    if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
+    if (!base) return { ok: false, reasonCode: 'ISSUER_API_REQUIRED' };
     try {
-      const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, { method: 'POST' });
+      const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect`);
       const body = await res.json().catch(() => null);
-      if (!res.ok) return { claimed: false, reasonCode: body?.message ?? body?.data?.reasonCode ?? `AUTHORIZATION_CLAIM_HTTP_${res.status}` };
-      return {
-        claimed: true,
-        agentDid: body?.data?.agentDid,
-        action: body?.data?.action,
-        amount: body?.data?.amount,
-        currency: body?.data?.currency,
-        merchant: body?.data?.merchant,
-        // The settlement token the issuer hands ONLY the caller whose claim succeeded. Once a hold is
-        // claimed it can be settled below its amount, or voided, only with this token — so the Service
-        // that executes must keep it and present it (captureAuthorization / releaseAuthorization).
-        claimToken: body?.data?.claimToken,
-      };
+      if (!res.ok || !body?.data) return { ok: false, status: res.status, reasonCode: body?.message ?? `OUTCOME_HTTP_${res.status}` };
+      return { ok: true, ...body.data };
     } catch (err) {
-      return { claimed: false, reasonCode: 'AUTHORIZATION_CLAIM_UNREACHABLE', error: String(err?.message ?? err) };
+      return { ok: false, reasonCode: 'ISSUER_UNREACHABLE', error: String(err?.message ?? err) };
     }
   }
 
@@ -146,19 +230,22 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * executed hold or settle it for less. A non-enumerable property survives normal use
    * (`decision.claimToken`) but not JSON.stringify or `{ ...decision }`.
    */
-  function withClaim(verdict, authorizationId, claimToken) {
-    if (!claimToken) return verdict;
+  function withClaim(verdict, authorizationId, claimToken, authenticated = false) {
+    if (!claimToken && !authenticated) return verdict;
     const out = { ...verdict };
-    Object.defineProperty(out, 'claimToken', { value: claimToken, enumerable: false });
+    if (claimToken) Object.defineProperty(out, 'claimToken', { value: claimToken, enumerable: false });
+    // `true` when the claim was signed as this Service's own identity: there is then NO token, and the
+    // settlement helpers below authenticate each call by signing it instead.
+    if (authenticated) Object.defineProperty(out, 'counterpartyAuthenticated', { value: true, enumerable: false });
     Object.defineProperty(out, 'authorizationId', { value: authorizationId, enumerable: false });
     return out;
   }
 
   /** One best-effort call to the issuer's settlement surface. Never throws. */
-  async function issuerPost(path, body) {
+  async function issuerPost(path, body, extraHeaders = {}) {
     if (!base) return { ok: false, reasonCode: 'ISSUER_API_REQUIRED' };
     try {
-      const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+      const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...extraHeaders }, body: JSON.stringify(body ?? {}) });
       const payload = await res.json().catch(() => null);
       if (!res.ok) return { ok: false, status: res.status, reasonCode: payload?.message ?? payload?.data?.reasonCode ?? `ISSUER_HTTP_${res.status}` };
       // void answers 200 with success:false when the hold was not voidable (e.g. already settled)
@@ -179,7 +266,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   async function captureAuthorization({ authorizationId, claimToken, amountCharged, bookingRef, settlementTxHash } = {}) {
     if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!Number.isFinite(Number(amountCharged))) return { ok: false, reasonCode: 'AMOUNT_CHARGED_REQUIRED' };
-    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/capture`, { amountCharged: Number(amountCharged), bookingRef, settlementTxHash, claimToken });
+    const amount = Number(amountCharged);
+    const auth = await serviceAuthHeaders('capture', authorizationId, [String(amount), bookingRef ?? '', settlementTxHash ?? '']);
+    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/capture`, { amountCharged: amount, bookingRef, settlementTxHash, claimToken }, auth);
   }
 
   /**
@@ -191,7 +280,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    */
   async function releaseAuthorization({ authorizationId, claimToken, reason } = {}) {
     if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
-    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/void`, { reason, claimToken });
+    const auth = await serviceAuthHeaders('void', authorizationId, [reason ?? '']);
+    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/void`, { reason, claimToken }, auth);
   }
 
   /**
@@ -201,7 +291,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    */
   async function markAuthorizationUnknown({ authorizationId, reason } = {}) {
     if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
-    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/unknown`, { reason });
+    const auth = await serviceAuthHeaders('unknown', authorizationId, [reason ?? '']);
+    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/unknown`, { reason }, auth);
   }
 
   async function loadBundle(agentDid) {
@@ -332,10 +423,10 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // stop REPLAY or CUMULATIVE SPEND past the mandate total — both are the stateful issuer
       // gate's job. Only claim on an actual PERMIT: escalate/block/suspend/quarantine execute
       // nothing, so there is nothing to protect and no reason to spend the hold's single use.
-      let claimToken;
+      let claimToken; let claimAuthenticated = false;
       if (requireAuthorization && (final.decision === 'allow' || final.decision === 'observe')) {
         const claim = await claimAuthorization({ authorizationId: signed.authorizationId });
-        claimToken = claim.claimToken;
+        claimToken = claim.claimToken; claimAuthenticated = claim.counterpartyAuthenticated === true;
         if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
         // The claim alone only proves SOME real, unclaimed authorization exists — it must also
         // be FOR this agent and these exact values, or a cheap legitimate hold's id could be
@@ -361,7 +452,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       }
       // On a claimed permit the Service that executes needs the claim token to settle or release the
       // hold afterwards (non-enumerable — see withClaim).
-      return withClaim(final, signed.authorizationId, claimToken);
+      return withClaim(final, signed.authorizationId, claimToken, claimAuthenticated);
     } catch (err) {
       return { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
     }
@@ -435,7 +526,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // that returns is settled at the authorized amount; one that throws is reported UNKNOWN, not
       // released — a thrown error does not prove nothing was executed, and UNKNOWN keeps the spend
       // committed until reconciliation decides. Off by default so existing embeds are unchanged.
-      if (settleClaim && decision.claimToken) {
+      if (settleClaim && (decision.claimToken || decision.counterpartyAuthenticated)) {
         let result;
         try {
           result = await handler(signed, ...rest);
@@ -506,7 +597,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     return { settled: true, txHash: result.txHash, reasonCode: 'SETTLED' };
   }
 
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, serviceDid };
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, serviceDid };
 }
 
 /**

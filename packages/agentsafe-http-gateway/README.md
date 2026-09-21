@@ -253,6 +253,25 @@ Everything here is best-effort and never changes the response the caller gets. I
 `settle: false`, with a guard older than `@metamynd/agentsafe-mcp-guard` 0.7.0 (no token to relay),
 or when the request made no claim (a value-less action, or `requireAuthorization` off).
 
+**0.9.0 — the upstream gets the authorization as its `Idempotency-Key`.** One authorization is one
+execution, so the gateway now sends `Idempotency-Key: <authorizationId>` on the forwarded request. An
+upstream that de-duplicates on that header makes the effect exactly-once even if the gateway is ever asked
+to run the same call twice (a crash between execute and settle, an operator replay). Any `Idempotency-Key`
+the *agent* sent is **never forwarded**, whatever its casing and whether or not a hold was claimed (an
+upstream that de-dupes on it could otherwise be made to replay a cached response, or skip a real execution,
+with a key the agent chose): it is replaced by the authorization id when a hold was claimed, and removed
+when none was. It survives `resolveCredential`. Raised the `agentsafe-mcp-guard` floor to `^0.9.0`,
+which retries a claim whose response was lost (with an idempotency key, so a retry cannot claim twice)
+and refuses a second claim with the stable code `AUTHORIZATION_ALREADY_CLAIMED`; a refused caller can ask
+what became of the authorization with `guard.lookupOutcome`. See MAGP §8.7.7–8.7.8.
+
+**0.8.0 — the gateway can close its hold by identity, not just by token.** Give the guard a
+`serviceDid` + `serviceKey` (see `@metamynd/agentsafe-mcp-guard` 0.8.0) and the claim and the
+capture/release/unknown calls are signed; the issuer records `svc:<did>` as the claimer and no claim
+token exists to leak. `settle` works the same either way. Raised the `agentsafe-mcp-guard` floor to
+`^0.8.0`. An issuer running with `MANDATE_REQUIRE_COUNTERPARTY_AUTH=true` refuses an unsigned claim, so a
+gateway that must work there needs the identity configured.
+
 **0.6.0 — closes the claimed hold.** New `settle` (default `true`) and `releaseOnStatus` (default
 `[]`) options; raised the `agentsafe-mcp-guard` floor to `^0.7.0`, which relays the claim token. Before
 this the token was discarded, so a gateway could never settle below the hold or release one after an

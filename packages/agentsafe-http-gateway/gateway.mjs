@@ -192,6 +192,14 @@ function isNonScalar(v) {
   return v !== null && typeof v === 'object';
 }
 
+/** A copy of `headers` with every spelling of `name` removed, then `name` set to `value` when there is one. */
+function withHeader(headers, name, value) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers ?? {})) if (k.toLowerCase() !== name) out[k] = v;
+  if (value) out[name] = value;
+  return out;
+}
+
 /**
  * Build the governed request handler.
  *   guard   — anything with `verifyRequest(signed) => { decision, reasonCode, ... }` (an MCP guard).
@@ -271,7 +279,10 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
    * claim (a value-less action, or `requireAuthorization` off) — there is no token then.
    */
   async function closeHold(decision, request, route, status) {
-    if (!settle || !decision?.claimToken || !decision?.authorizationId) return;
+    // Two ways to be the party that may close this hold: the issuer handed this Service a claim token
+    // (anonymous claim), or the claim was signed as this Service's own identity (`counterpartyAuthenticated`,
+    // agentsafe-mcp-guard >= 0.8.0) — in which case there is no token and every call below is signed instead.
+    if (!settle || !decision?.authorizationId || !(decision.claimToken || decision.counterpartyAuthenticated)) return;
     const claim = { authorizationId: decision.authorizationId, claimToken: decision.claimToken };
     try {
       if (status >= 200 && status < 300) {
@@ -387,14 +398,21 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       return { status: 403, body: { decision: decision?.decision ?? 'block', reasonCode: decision?.reasonCode ?? 'BLOCKED' }, governance: decision };
     }
 
+    // The authorization is the effect's natural idempotency key: one authorization is one execution. Hand it
+    // to the upstream as `Idempotency-Key` so an upstream that dedupes on it makes the effect exactly-once
+    // even if this gateway is ever asked to run the same call twice (a crash between execute and settle, an
+    // operator replay). An `Idempotency-Key` the AGENT sent is NEVER forwarded, whatever its casing and whether or
+    // not a hold was claimed: an upstream that de-dupes on it could otherwise be made to replay a cached response
+    // (or skip a real execution) with a key the agent chose. It is replaced by the authorization id when a hold
+    // was claimed, and simply removed when none was (there is nothing to key on).
+    let forwardReq = { ...req, headers: withHeader(req.headers, 'idempotency-key', decision?.authorizationId) };
     // Trusted Execution Gateway hook (Module G): resolve an upstream credential the agent
     // never sees, and inject it into a CLONE of the outbound headers — never the original req.
-    let forwardReq = req;
     if (typeof resolveCredential === 'function') {
       try {
         const cred = await resolveCredential({ request, route, decision });
         if (cred && cred.header && cred.value) {
-          forwardReq = { ...req, headers: { ...(req.headers ?? {}), [cred.header]: cred.value } };
+          forwardReq = { ...forwardReq, headers: { ...(forwardReq.headers ?? {}), [cred.header]: cred.value } };
         }
       } catch (err) {
         console.warn('[gateway] resolveCredential failed (forwarding without an injected credential):', err?.message ?? err);
