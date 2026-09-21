@@ -10,10 +10,18 @@ const SIGNED = { agentDid: 'did:x', amount: 250, currency: 'USD', merchant: 'sky
 // valueFields set explicitly (matching the default anyway) so these tests exercise the
 // binder itself, not the separate "no explicit binding decision" deprecation warning —
 // that gets its own dedicated test below.
+// `allowedFields: null` is the explicit opt-out of the default body allowlist (0.7.0): most tests below
+// are about VALUE binding and send bodies with extra keys (riskLevel, extra...), so they opt out. The
+// default itself is pinned by the `mkDefault` tests further down.
 const mk = (opts = {}, routeExtra = {}) => createHttpGateway({
   guard, forward, denyByDefault: true,
-  routes: [{ method: 'POST', path: '/book-flight', action: 'flight-purchase', valueFields: ['amount', 'merchant'], ...routeExtra }],
+  routes: [{ method: 'POST', path: '/book-flight', action: 'flight-purchase', valueFields: ['amount', 'merchant'], allowedFields: null, ...routeExtra }],
   ...opts,
+});
+/** A route that says nothing about allowedFields — what an operator gets by default. */
+const mkDefault = (routeExtra = {}) => createHttpGateway({
+  guard, forward, denyByDefault: true,
+  routes: [{ method: 'POST', path: '/book-flight', action: 'flight-purchase', valueFields: ['amount', 'merchant'], ...routeExtra }],
 });
 const call = (gw, body, signed = SIGNED, path = '/book-flight') => {
   guardCalls = 0; forwarded = null;
@@ -212,15 +220,15 @@ test('retest #2: correct currency decoy + amount renamed to `total` is UNBINDABL
   const r = await call(mk(), { currency: 'USD', total: 5000 });
   assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
 });
-test('retest #3: correct-looking top-level amount + an extra field the tool also reads is NOT something this generic binder can see BY DEFAULT', async () => {
-  // Documented limitation of the DEFAULT (non-strict) binder, not a bug it can fix generically:
+test('retest #3: an extra field the tool also reads is only forwarded when the route EXPLICITLY opts out (allowedFields: null)', async () => {
+  // The opt-out path (allowedFields: null) — the default now refuses this, see the mkDefault tests:
   // amount/merchant both check out clean here, so binding correctly ALLOWS the call — the risk
   // is an upstream that ALSO honors an arbitrary extra key (`surcharge`) the binder has no way
   // to know is meaningful. W4/route.allowedFields (below) is the opt-in mitigation.
   const r = await call(mk(), { amount: 250, merchant: 'skyward-air', extra: { surcharge: 4750 } });
   assert.equal(r.status, 200, 'amount/merchant genuinely match what was signed');
 });
-test('strict mode (route.allowedFields) refuses the SAME additive extra key retest #3 forwards by default', async () => {
+test('strict mode (route.allowedFields) refuses the SAME additive extra key retest #3 forwards when opted out', async () => {
   const r = await call(mk({}, { allowedFields: ['amount', 'currency', 'merchant'] }), { amount: 250, merchant: 'skyward-air', extra: { surcharge: 4750 } });
   assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
 });
@@ -281,7 +289,7 @@ test('a route with an action but no explicit valueFields/bind warns at construct
   const realWarn = console.warn;
   console.warn = (msg) => warnings.push(msg);
   try {
-    createHttpGateway({ guard, forward, routes: [{ method: 'POST', path: '/undeclared', action: 'flight-purchase' }] });
+    createHttpGateway({ guard, forward, routes: [{ method: 'POST', path: '/undeclared', action: 'flight-purchase', allowedFields: null }] });
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /POST \/undeclared/);
     assert.match(warnings[0], /action: "flight-purchase"/);
@@ -293,7 +301,7 @@ test('a route with an explicit valueFields (even matching the default) does not 
   const realWarn = console.warn;
   console.warn = (msg) => warnings.push(msg);
   try {
-    createHttpGateway({ guard, forward, routes: [{ method: 'POST', path: '/declared', action: 'flight-purchase', valueFields: ['amount', 'merchant'] }] });
+    createHttpGateway({ guard, forward, routes: [{ method: 'POST', path: '/declared', action: 'flight-purchase', valueFields: ['amount', 'merchant'], allowedFields: ['amount', 'merchant'] }] });
     assert.equal(warnings.length, 0);
   } finally { console.warn = realWarn; }
 });
@@ -314,6 +322,43 @@ test('a route with no action at all (not governed) does not warn', () => {
     createHttpGateway({ guard, forward, routes: [{ method: 'GET', path: '/health' }] });
     assert.equal(warnings.length, 0);
   } finally { console.warn = realWarn; }
+});
+
+// --- the DEFAULT body allowlist (0.7.0): an unknown top-level key is refused unless declared ---
+test('DEFAULT: an additive key the signature does not cover (surcharge) is refused, not forwarded', async () => {
+  const r = await call(mkDefault(), { amount: 250, merchant: 'skyward-air', surcharge: 4750 });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE'); assert.equal(forwarded, null);
+});
+test('DEFAULT: a body of exactly the governed fields is forwarded', async () => {
+  const r = await call(mkDefault(), { amount: 250, currency: 'USD', merchant: 'skyward-air' });
+  assert.equal(r.status, 200); assert.ok(forwarded);
+});
+test('DEFAULT: riskLevel in the body is refused (it is not signed; it travels in the signed context, not the tool body)', async () => {
+  const r = await call(mkDefault(), { amount: 250, merchant: 'skyward-air', riskLevel: 'low' });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
+});
+test('DEFAULT: a decimal-equal numeric-string amount is a type mismatch, not a match', async () => {
+  const r = await call(mkDefault(), { amount: '250', merchant: 'skyward-air' });
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
+});
+test('DEFAULT: an array body is refused', async () => {
+  const r = await call(mkDefault(), [{ amount: 250, merchant: 'skyward-air' }]);
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE');
+});
+test('a route widens the allowlist by naming the fields its tool reads', async () => {
+  const gw = mkDefault({ allowedFields: ['amount', 'currency', 'merchant', 'passenger'] });
+  assert.equal((await call(gw, { amount: 250, merchant: 'skyward-air', passenger: 'A. Traveller' })).status, 200);
+  assert.equal((await call(gw, { amount: 250, merchant: 'skyward-air', surcharge: 1 })).status, 403);
+});
+test('a value-less route with allowedFields: [] refuses ANY body key and accepts an empty body', async () => {
+  const gw = mkDefault({ valueFields: [], allowedFields: [] });
+  assert.equal((await call(gw, {})).status, 200);
+  assert.equal((await call(gw, { anything: 1 })).status, 403);
+});
+test('the operator is warned at startup when a governed route relies on the default allowlist', async () => {
+  const seen = []; const real = console.warn; console.warn = (m) => seen.push(String(m));
+  try { mkDefault(); mk(); } finally { console.warn = real; }
+  assert.equal(seen.filter((m) => /declares no allowedFields/.test(m)).length, 1, 'once, for the route that declares nothing — not the one that opted out');
 });
 
 let pass = 0, fail = 0;

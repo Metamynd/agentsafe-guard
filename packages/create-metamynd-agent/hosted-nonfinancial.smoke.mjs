@@ -203,11 +203,20 @@ try {
       const guard = await createGuardFromConfig(join(p.outDir, 'agent.metamynd.json'));
       const send = async (context, action = SCOPE) => {
         const signed = await guard.buildSignedRequest({ action, context });
-        return fetch(`http://127.0.0.1:${port}/perform`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: JSON.stringify(context) });
+        // The context travels in the SIGNED request, exactly as the generated agent sends it; the body is empty
+        // because the neutral tool reads nothing from it (allowedFields: []).
+        return fetch(`http://127.0.0.1:${port}/perform`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: '{}' });
       };
       const compliant = { consent: true, piiPresent: false, prompt: 'hello', evidenceTypes: ['kyc'] };
       assert.equal((await send(compliant)).status, 200, 'a signed, compliant request runs the tool');
       assert.equal((await send({ ...compliant, consent: false })).status, 403, 'a signed request that DECLARES no consent is refused');
+      // An unsigned key smuggled into the tool body is refused outright: nothing signed covers it, and this tool reads none.
+      {
+        const signed = await guard.buildSignedRequest({ action: SCOPE, context: compliant });
+        const smuggled = await fetch(`http://127.0.0.1:${port}/perform`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: JSON.stringify({ recipient: 'someone-else' }) });
+        assert.equal(smuggled.status, 403, 'an extra body key is refused by default');
+        assert.equal((await smuggled.json()).reasonCode, 'PAYLOAD_UNBINDABLE');
+      }
       // ...but the inputs are unsigned, so a signing agent can simply not send the field (README: "Rule
       // inputs are not signed"). If this ever starts failing, the gateway began enforcing something the
       // README does not yet say — update the README, do not delete the test.

@@ -1,13 +1,13 @@
 {
   "name": "create-metamynd-agent",
-  "version": "0.10.11",
+  "version": "0.10.12",
   "description": "Scaffold a MetaMynd/AgentSafe-governed AI agent in one command — logs in, provisions the agent (identity + mandate + SOP + Standards) in a single call, writes agent.metamynd.json plus a runnable agent + separate tool-gateway process that closes direct-call, confused-deputy, replay, and cumulative-spend bypasses. --harness scaffolds a free, local, zero-network governance harness instead.",
   "type": "module",
   "bin": {
     "create-metamynd-agent": "index.mjs"
   },
   "scripts": {
-    "test": "node harness-gateway.smoke.mjs && node policy-demo.smoke.mjs && node hosted-nonfinancial.smoke.mjs && node modes-nonfinancial.smoke.mjs && node byok-daemon.smoke.mjs"
+    "test": "node harness-gateway.smoke.mjs && node harness-gateway-bind.smoke.mjs && node policy-demo.smoke.mjs && node hosted-nonfinancial.smoke.mjs && node modes-nonfinancial.smoke.mjs && node byok-daemon.smoke.mjs"
   },
   "files": [
     "index.mjs",

@@ -30,7 +30,14 @@ function pick(arr) { return arr[randInt(0, arr.length - 1)]; }
 const guard = { verifyRequest: async () => ({ decision: 'allow', reasonCode: 'AUTHORIZED' }) };
 let forwarded = null;
 const forward = async (req) => { forwarded = req; return { status: 200, body: { ran: true } }; };
+// `allowedFields: null` — the explicit opt-out: these properties are about VALUE binding and feed the gateway
+// bodies padded with random extra keys. The default allowlist is fuzzed separately below (defaultGw).
 const gw = createHttpGateway({
+  guard, forward, denyByDefault: true,
+  routes: [{ method: 'POST', path: '/book-flight', action: 'flight-purchase', valueFields: ['amount', 'merchant'], allowedFields: null }],
+});
+// A route that says nothing about allowedFields: what an operator gets by default.
+const defaultGw = createHttpGateway({
   guard, forward, denyByDefault: true,
   routes: [{ method: 'POST', path: '/book-flight', action: 'flight-purchase', valueFields: ['amount', 'merchant'] }],
 });
@@ -214,6 +221,20 @@ async function fuzzNonCanonicalAmountStrings() {
   }
 }
 
+async function fuzzDefaultAllowlist() {
+  for (let i = 0; i < N; i++) {
+    const amount = randInt(1, 100000);
+    const merchant = pick(['skyward-air', 'acme']);
+    const extraKey = pick(['surcharge', 'feeOverride', 'discount', 'note', 'riskLevel', 'items', 'total']);
+    const body = { amount, currency: 'USD', merchant, [extraKey]: randomScalar() };
+    const { res } = await call(defaultGw, body, amount, merchant);
+    record('the DEFAULT allowlist must reject any key beyond amount/currency/merchant', res.status !== 200, { body, status: res.status });
+    const cleanBody = { amount, currency: 'USD', merchant };
+    const { res: cleanRes } = await call(defaultGw, cleanBody, amount, merchant);
+    record('the DEFAULT allowlist must still forward exactly the governed fields', cleanRes.status === 200, { cleanBody, status: cleanRes.status });
+  }
+}
+
 async function fuzzAllowedFieldsStrictMode() {
   for (let i = 0; i < N; i++) {
     const amount = randInt(1, 100000);
@@ -232,7 +253,7 @@ async function fuzzAllowedFieldsStrictMode() {
 const suites = [
   fuzzHiddenAmount, fuzzHiddenMerchant, fuzzHiddenBoth, fuzzZeroAndSmallAmounts,
   fuzzHonestPathNeverFalselyBlocked, fuzzCanonicalAmountStrings, fuzzNonCanonicalAmountStrings,
-  fuzzAllowedFieldsStrictMode,
+  fuzzAllowedFieldsStrictMode, fuzzDefaultAllowlist,
 ];
 
 for (const suite of suites) await suite();
