@@ -103,13 +103,94 @@ const guard = createGuard({ api: 'http://unused.local/api/v1', agentDid, agentKe
   } finally { globalThis.fetch = realFetch; }
 }
 
-// --- the daemon provider refuses loudly until the signer daemon supports it ---
+// --- the daemon provider: an unreachable signer is its own failure; a signer that PREDATES sign-payload is "unsupported" and
+//     fails closed (never an unbound send). The real-daemon round trip lives in daemon-keyprovider.smoke.mjs (monorepo-only). ---
 {
+  const net = await import('node:net');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const fs = await import('node:fs');
   const { createDaemonKeyProvider } = await import('./key-providers.mjs');
-  const daemon = createDaemonKeyProvider({ socketPath: '/nonexistent.sock' });
+
   let code = null;
-  try { await daemon.signPayloadBinding({}); } catch (e) { code = e.code; }
-  check(code === 'PAYLOAD_BINDING_UNSUPPORTED', 'the daemon key provider refuses payload binding with PAYLOAD_BINDING_UNSUPPORTED');
+  try { await createDaemonKeyProvider({ socketPath: path.join(os.tmpdir(), 'no-such-signer.sock') }).signPayloadBinding({}); } catch (e) { code = e.code; }
+  check(code === 'DAEMON_UNREACHABLE', 'an unreachable signer daemon is DAEMON_UNREACHABLE (not "unsupported")');
+
+  // A minimal stand-in for an OLD daemon: it answers every op with DAEMON_UNKNOWN_OPERATION. The socket name follows the same
+  // platform translation the real daemon and client use.
+  const logical = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'old-signer-')), 'signer.sock');
+  const listenOn = process.platform === 'win32'
+    ? `\\\\.\\pipe\\agentsafe-signer-${(await import('node:crypto')).createHash('sha256').update(path.resolve(logical)).digest('hex').slice(0, 32)}`
+    : logical;
+  const server = net.createServer((sock) => {
+    let buf = '';
+    sock.on('data', (c) => {
+      buf += c.toString('utf8');
+      if (!buf.includes('\n')) return;
+      const req = JSON.parse(buf.slice(0, buf.indexOf('\n')));
+      // An OLD daemon still signs everything it knew about; it just has no `sign-payload`.
+      const reply = req.op === 'sign-payload'
+        ? { ok: false, error: { code: 'DAEMON_UNKNOWN_OPERATION', message: `unknown operation ${req.op}` } }
+        : { ok: true, result: { signature: 'ab'.repeat(64), envelopeSignature: 'ab'.repeat(64) } };
+      sock.end(JSON.stringify({ protocolVersion: 1, requestId: req.requestId, ...reply }) + '\n');
+    });
+  });
+  await new Promise((r) => server.listen(listenOn, r));
+  try {
+    const old = createDaemonKeyProvider({ socketPath: logical });
+    let unsupported = null;
+    try { await old.signPayloadBinding({ agentDid, action: 'a', nonce: 'n', issuedAt: 't', payloadDigest: 'sha256:' + '0'.repeat(64) }); } catch (e) { unsupported = e; }
+    check(unsupported?.code === 'PAYLOAD_BINDING_UNSUPPORTED' && /upgrade/.test(unsupported.message), 'a daemon that predates sign-payload is reported as PAYLOAD_BINDING_UNSUPPORTED, naming the fix');
+
+    const realFetch = globalThis.fetch; let sent = false;
+    globalThis.fetch = async () => { sent = true; return { status: 200, json: async () => ({ data: { decision: 'allow' } }) }; };
+    try {
+      const g = createGuard({ api: 'http://unused.local/api/v1', agentDid, keyProvider: old });
+      const r = await g.authorize({ ...base, payload: PAYLOAD });
+      check(r.decision === 'block' && r.reasonCode === 'PAYLOAD_BINDING_UNSUPPORTED' && !sent, 'authorize() with payload against an old daemon blocks PAYLOAD_BINDING_UNSUPPORTED and sends nothing');
+    } finally { globalThis.fetch = realFetch; }
+  } finally { server.close(); }
+}
+
+// --- bindPayload(): the late binding of a hold that already exists (a reviewer's MODIFY minted it with no digest) ---
+{
+  const { buildPayloadRebindMessage } = await import('./payload-binding.mjs');
+  const AUTH_ID = '7f3c1d2e-9a4b-4c5d-8e6f-0a1b2c3d4e5f';
+  const realFetch = globalThis.fetch;
+  let call = null; let answer = null;
+  globalThis.fetch = async (url, opts) => { call = { url: String(url), body: JSON.parse(opts.body) }; return answer(call); };
+  try {
+    answer = (c) => ({ ok: true, status: 200, json: async () => ({ data: { authorizationId: AUTH_ID, payloadDigest: c.body.payloadDigest } }) });
+    const r = await guard.bindPayload({ authorizationId: AUTH_ID, action: base.action, payload: PAYLOAD });
+    check(r.bound === true && r.payloadDigest === payloadDigestOf(PAYLOAD), 'bindPayload() binds and reports the digest');
+    check(call.url.endsWith(`/policy/mandate/authorize/${AUTH_ID}/payload-binding`), '...to the hold it names');
+    const b = call.body;
+    check(verifies(buildPayloadRebindMessage({ agentDid, action: b.action, authorizationId: AUTH_ID, nonce: b.nonce, issuedAt: b.issuedAt, payloadDigest: b.payloadDigest }), b.payloadSignature), 'the signature verifies over the REBIND message, which names the authorization id');
+    check(!verifies(buildPayloadBindingMessage({ agentDid, action: b.action, nonce: b.nonce, issuedAt: b.issuedAt, payloadDigest: b.payloadDigest }), b.payloadSignature), 'and NOT over the authorize-time binding message (its own domain)');
+    check(!verifies(buildPayloadRebindMessage({ agentDid, action: b.action, authorizationId: '00000000-0000-4000-8000-000000000000', nonce: b.nonce, issuedAt: b.issuedAt, payloadDigest: b.payloadDigest }), b.payloadSignature), 'nor for another authorization id (cannot be lifted onto another hold)');
+
+    answer = (c) => ({ ok: true, status: 200, json: async () => ({ data: { authorizationId: AUTH_ID, payloadDigest: c.body.payloadDigest, alreadyBound: true } }) });
+    check((await guard.bindPayload({ authorizationId: AUTH_ID, action: base.action, payload: PAYLOAD })).alreadyBound === true, 'an idempotent retry is reported as alreadyBound');
+
+    answer = () => ({ ok: false, status: 409, json: async () => ({ message: 'PAYLOAD_ALREADY_BOUND', data: { reasonCode: 'PAYLOAD_ALREADY_BOUND' } }) });
+    const refused = await guard.bindPayload({ authorizationId: AUTH_ID, action: base.action, payload: PAYLOAD });
+    check(refused.bound === false && refused.reasonCode === 'PAYLOAD_ALREADY_BOUND', 'a gate refusal is bound:false with its reason code, never a throw');
+
+    answer = () => ({ ok: true, status: 200, json: async () => ({ data: { decision: 'allow' } }) });
+    check((await guard.bindPayload({ authorizationId: AUTH_ID, action: base.action, payload: PAYLOAD })).reasonCode === 'PAYLOAD_BINDING_NOT_CONFIRMED', 'a 200 that does not echo our digest (an issuer that predates late binding) is NOT bound');
+
+    call = null;
+    check((await guard.bindPayload({ authorizationId: AUTH_ID, action: base.action, payload: { a: '\ud800' } })).reasonCode === 'PAYLOAD_NOT_CANONICALIZABLE' && call === null, 'a payload JSON cannot carry is refused locally and sends nothing');
+    check((await guard.bindPayload({ action: base.action, payload: PAYLOAD })).reasonCode === 'MALFORMED_REQUEST' && call === null, 'a missing authorizationId is refused locally');
+
+    const inner = (await import('./key-providers.mjs')).createStaticKeyProvider(agentKey);
+    const { signPayloadBinding: _omit, ...without } = inner;
+    const g = createGuard({ api: 'http://unused.local/api/v1', agentDid, keyProvider: without });
+    check((await g.bindPayload({ authorizationId: AUTH_ID, action: base.action, payload: PAYLOAD })).reasonCode === 'PAYLOAD_BINDING_UNSUPPORTED' && call === null, 'a provider that cannot sign a binding is PAYLOAD_BINDING_UNSUPPORTED and sends nothing');
+
+    globalThis.fetch = async () => { throw new Error('connect ECONNREFUSED'); };
+    check((await guard.bindPayload({ authorizationId: AUTH_ID, action: base.action, payload: PAYLOAD })).reasonCode === 'GATE_UNREACHABLE', 'an unreachable gate is GATE_UNREACHABLE');
+  } finally { globalThis.fetch = realFetch; }
 }
 
 console.log(failed ? `\nFAIL — ${failed} check(s) failed` : '\nPASS');

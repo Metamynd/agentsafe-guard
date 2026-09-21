@@ -12,7 +12,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { buildAuthMessage, buildLocalDecisionMessage } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
-import { buildPayloadBindingMessage } from './payload-binding.mjs';
+import { buildPayloadBindingMessage, buildPayloadRebindMessage } from './payload-binding.mjs';
 
 /**
  * Today's default: the raw key lives in THIS process (see the design doc's "What this does not
@@ -40,9 +40,9 @@ export function createStaticKeyProvider(agentKeyHex) {
     },
     // Payload binding (spec 8.3.9): sign the digest of the COMPLETE payload, bound to this authorization. OPTIONAL like
     // signLocalDecision; the guard refuses (fail closed) to send an unbound request when a binding was asked for and the
-    // provider cannot produce one.
+    // provider cannot produce one. With an `authorizationId` it signs the LATE binding of a hold that already exists (8.3.11).
     async signPayloadBinding(fields) {
-      return rawSign(buildPayloadBindingMessage(fields));
+      return rawSign(fields.authorizationId === undefined ? buildPayloadBindingMessage(fields) : buildPayloadRebindMessage(fields));
     },
   };
 }
@@ -137,10 +137,19 @@ export function createDaemonKeyProvider({ socketPath }) {
       return signature;
     },
     // The daemon builds every message it signs from structured fields and will not sign arbitrary bytes, so payload binding
-    // needs its own `sign-payload` operation there. Until that exists this refuses, LOUDLY and closed: a guard asked to bind
-    // a payload must never fall back to sending the request unbound.
-    async signPayloadBinding() {
-      throw Object.assign(new Error('the agentsafe-signer daemon does not support payload binding yet (sign-payload); use a static key provider, or omit `payload`'), { code: 'PAYLOAD_BINDING_UNSUPPORTED' });
+    // is its own operation there (`sign-payload`, signer 0.15.0). A daemon that predates it answers DAEMON_UNKNOWN_OPERATION:
+    // that is reported as what it means — this signer cannot bind a payload — and a guard asked to bind must then FAIL CLOSED,
+    // never fall back to sending the request unbound.
+    async signPayloadBinding(fields) {
+      try {
+        const { signature } = await daemonRequest(socketPath, 'sign-payload', fields);
+        return signature;
+      } catch (err) {
+        if (err?.code === 'DAEMON_UNKNOWN_OPERATION') {
+          throw Object.assign(new Error('the agentsafe-signer daemon predates payload binding (sign-payload, signer 0.15.0); upgrade it, or omit `payload`'), { code: 'PAYLOAD_BINDING_UNSUPPORTED' });
+        }
+        throw err;
+      }
     },
   };
 }

@@ -53,7 +53,7 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // requires request inputs blocks a bare baseline request).
 // 0.12.4 makes `verify` probe in the currency the mandate's caps name (it assumed USD), which a scaffolded
 // non-USD agent's `npm test` needs.
-const GUARD_VERSION = '^0.14.0';
+const GUARD_VERSION = '^0.15.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -987,18 +987,23 @@ const GATEWAY = process.env.GATEWAY_URL || 'http://localhost:${gatewayPort}';
 // --- the gateway atomically claim single-use execution, closing replay + cumulative spend, not
 // --- just re-checking policy. See ./gateway/README.md.
 async function bookFlightViaGateway(args, decision) {
+  // The COMPLETE body the tool receives. It is signed as a payload (MAGP 8.3.9): the eight signed fields cover amount and
+  // merchant, not anything else a real tool takes (a payee, a passenger list). The digest covers ALL of it, and the gateway
+  // refuses to run the tool on a body that is not exactly this one.
+  const payload = { amount: args.amount, merchant: args.merchant, currency: args.currency ?? '${currency}' };
   const signed = await guard.buildSignedRequest({
     action: '${scope}',
     amount: args.amount,
     currency: args.currency ?? '${currency}',
     merchant: args.merchant,
     context: { tool: 'book-flight', riskLevel: args.riskLevel ?? 'low' },
+    payload,
   });
   signed.authorizationId = decision?.authorizationId;
   const res = await fetch(GATEWAY + '/book-flight', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) },
-    body: JSON.stringify({ amount: args.amount, merchant: args.merchant, currency: args.currency ?? '${currency}' }),
+    body: JSON.stringify(payload),
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -1020,6 +1025,9 @@ const gatedBookFlight = guard.guardTool(
     currency: a.currency ?? '${currency}',
     merchant: a.merchant,
     context: { tool: 'book-flight', riskLevel: a.riskLevel ?? 'low' },
+    // The authorization is bound to the SAME body bookFlightViaGateway() sends, so the gate records what this agent
+    // signed and the gateway can prove it is running exactly that. Keep the two in step if you add a field.
+    payload: { amount: a.amount, merchant: a.merchant, currency: a.currency ?? '${currency}' },
   }),
 );
 
@@ -1608,7 +1616,7 @@ function exampleReadme(slug, scope, withGateway, gatewayPort, daemonKey = false)
   const configFileLine = daemonKey
     ? `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
   **Holds no secret key.** Signing goes through your already-running agentsafe-signer daemon
-  (\`daemonSocketPath\`) instead — see \`docs/integration/INSTALL-AGENTSAFE-SIGNER.md\`.`
+  (\`daemonSocketPath\`) instead — see \`docs/integration/INSTALL-AGENTSAFE-SIGNER.md\`.${withGateway ? ' Payload binding is on by default and signs through the daemon too, which needs agentsafe-signer 0.15.0 or later.' : ''}`
     : `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
   **Contains the agent's secret key — never commit it.** It is already in \`.gitignore\`.`;
   const gatewaySection = withGateway
@@ -1762,6 +1770,11 @@ const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerA
 const gateway = createHttpGateway({
   guard,
   routes,
+  // Payload binding (MAGP 8.3.9): the agent signs a digest of the WHOLE body, this gateway digests the body it is about to
+  // run, and the issuer refuses the claim unless the two are the digest the agent signed at authorize time. allowedFields
+  // above lists which keys may appear; this makes the VALUES of every one of them (a payee, a passenger list) the agent's too.
+  // A request whose authorization bound no payload is refused (PAYLOAD_BINDING_REQUIRED) rather than run unbound.
+  requirePayloadBinding: true,
   forward: async (req) => {
     let args = {};
     try { args = JSON.parse(req.rawBody?.toString('utf8') || '{}'); } catch { /* empty body */ }
@@ -2292,6 +2305,10 @@ const gateway = createHttpGateway({
   guard,
   routes: ROUTES,
   denyByDefault: true,
+  // Payload binding (MAGP 8.3.9): the agent signs a digest of the WHOLE body and this gateway refuses to run a tool on a
+  // body that is not exactly that one — the values of every allowed field, not only amount and merchant. A request that
+  // bound no payload is refused (PAYLOAD_BINDING_REQUIRED) instead of run unbound.
+  requirePayloadBinding: true,
   // Reached ONLY after the guard allowed the request AND the body was bound to what was signed.
   forward: async (req) => {
     const route = matchRoute(ROUTES, req.method, req.path);
@@ -2751,8 +2768,11 @@ const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://localhost:${gatewayPo
 // issuer): it builds and signs the same canonical message a real gate would verify, entirely
 // offline, using this agent's own did:key — the gateway verifies that signature for itself.
 async function callGateway(path, action, args) {
-  const signed = await guard.buildSignedRequest({ action, amount: args.amount, currency: args.currency ?? '${currency}', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel ?? 'low' } });
-  const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: JSON.stringify({ amount: args.amount, merchant: args.merchant, currency: args.currency ?? '${currency}' }) });
+  // The COMPLETE body the tool receives, signed as a payload (MAGP 8.3.9): the eight signed fields cover amount and merchant
+  // only, and this gateway refuses to run the tool on a body that is not exactly the one signed here.
+  const payload = { amount: args.amount, merchant: args.merchant, currency: args.currency ?? '${currency}' };
+  const signed = await guard.buildSignedRequest({ action, amount: args.amount, currency: args.currency ?? '${currency}', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel ?? 'low' }, payload });
+  const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: JSON.stringify(payload) });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
@@ -2953,7 +2973,9 @@ ${withGateway ? `const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://loca
 // file to call directly. buildSignedRequest() is pure (no network, no issuer): it signs the request
 // offline with this agent's own did:key, and the gateway verifies that signature for itself.
 async function callGateway(path, action, args) {
-  const signed = await guard.buildSignedRequest({ action, merchant: MERCHANT, context: args });
+  // The body is empty on purpose (this tool reads nothing from it), and it is signed as the payload so the gateway can
+  // require binding on every route: a body with anything in it is not the one signed (MAGP 8.3.9).
+  const signed = await guard.buildSignedRequest({ action, merchant: MERCHANT, context: args, payload: {} });
   const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: '{}' });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -3689,6 +3711,6 @@ async function main() {
 export {
   buildPolicyCases, resolveFinancial, policyMolecules, ruleToMolecule,
   generateAgentKeypair, harnessAgentDid, harnessMandate, harnessRulesFile, harnessDefaultSopNeutral,
-  scaffoldProject, exampleIndexNeutral, exampleReadmeNeutral, gatewayServerFileNeutral, gatewayReadmeNeutral,
+  scaffoldProject, defaultNeutralDemo, exampleIndexNeutral, exampleReadmeNeutral, gatewayServerFileNeutral, gatewayReadmeNeutral,
 };
 if (!process.env.CREATE_METAMYND_AGENT_NO_MAIN) main().catch((e) => fail(e?.stack || e?.message || String(e)));

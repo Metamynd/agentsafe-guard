@@ -170,6 +170,15 @@ the whole protocol.
 Named precisely, not left implicit:
 
 - **Direct call.** `bookFlight()` doesn't exist in the agent's process.
+- **Payload binding is ON by default (0.11.0, MAGP §8.3.9).** The generated agent signs the COMPLETE body it sends as a payload, the
+  authorization it gets from the gate is bound to that same body, and the generated gateway sets `requirePayloadBinding: true`: it
+  digests the body it is about to run and the issuer refuses the claim unless that is the digest the agent signed. The eight
+  signed fields only ever covered amount and merchant; this covers the value of every field the route allows (a payee, a passenger
+  list you add). A request that bound no payload is refused (`PAYLOAD_BINDING_REQUIRED`) rather than run unbound. If you add a body
+  field, add it to `allowedFields` **and** to the `payload` the agent signs (both sit next to each other in the generated files).
+  A scaffold that signs through the signer daemon (`--byok --daemon-socket`) needs `@metamynd/agentsafe-signer` 0.15.0 or later. The
+  hosted non-financial scaffold reads nothing from its body, so there is nothing for it to bind, and a scaffold with no gateway
+  (`--no-gateway`, or `--sandbox`'s in-process demo) has no separate executor to hold to the digest, so it stays as it was.
 - **Confused deputy (payload).** Signing a cheap request while executing an expensive one (a
   different amount/merchant in the body than what was signed) is refused before the tool runs —
   payload binding (`@metamynd/agentsafe-http-gateway` ≥ 0.4.0). The default binder requires
