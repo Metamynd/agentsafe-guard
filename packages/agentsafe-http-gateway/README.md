@@ -253,6 +253,12 @@ Everything here is best-effort and never changes the response the caller gets. I
 `settle: false`, with a guard older than `@metamynd/agentsafe-mcp-guard` 0.7.0 (no token to relay),
 or when the request made no claim (a value-less action, or `requireAuthorization` off).
 
+**0.11.3 — the default value binder reads the body the way the payload digest does.** The `amount` / `merchant` / `currency`
+comparison used a last-wins `JSON.parse`, so a body with a duplicate key (`{"amount":9000,…,"amount":250}`) could show this gateway
+the signed value while a first-wins upstream read the other one. It now uses the same strict reader as the digest (duplicate keys,
+integers beyond 2^53, decimals a double cannot hold, invalid UTF-8 and a BOM are refused): such a body is `PAYLOAD_UNBINDABLE`
+wherever a value field is required. A body that was unambiguous before is unaffected.
+
 **0.11.0 — payload binding: the body you forward is the body the agent signed (MAGP §8.3.9, §8.7.11).** When the agent signed a
 payload digest (`agentsafe-guard` 0.14.0 `payload:`, Python `payload=`), the gateway digests the JSON body it is about to
 forward — the same bytes — and the claim it makes states that digest; the issuer refuses a body that is not the one signed and the
@@ -291,6 +297,15 @@ when none was. It survives `resolveCredential`. Raised the `agentsafe-mcp-guard`
 which retries a claim whose response was lost (with an idempotency key, so a retry cannot claim twice)
 and refuses a second claim with the stable code `AUTHORIZATION_ALREADY_CLAIMED`; a refused caller can ask
 what became of the authorization with `guard.lookupOutcome`. See MAGP §8.7.7–8.7.8.
+
+**A claim refused with `COUNTERPARTY_NOT_REGISTERED` (or `COUNTERPARTY_AUTH_REQUIRED`).** The owner of the mandate has a registry of the
+services that may claim their holds, and this gateway is not on it — or it did not identify itself. Nothing was executed and the hold is
+still claimable by a trusted service. Fix it on the owner's side, not in code: sign in as the mandate's owner, open **Trusted
+Counterparties** in the dashboard (`/dashboard/counterparties`) and register this service's `serviceDid` (`did:key:…` or
+`did:hedera:…`; the key must be inside the identifier), optionally scoped to the merchants it acts for. Until an owner registers
+anyone the registry is open and no service is refused; registering the first one switches it on for that owner. Other codes from the
+same check: `COUNTERPARTY_NOT_ALLOWED_FOR_MERCHANT` (the entry is scoped and this hold's merchant is not in scope) and
+`COUNTERPARTY_MISMATCH` (a settlement call was signed by someone other than the service that claimed the hold).
 
 **0.8.0 — the gateway can close its hold by identity, not just by token.** Give the guard a
 `serviceDid` + `serviceKey` (see `@metamynd/agentsafe-mcp-guard` 0.8.0) and the claim and the

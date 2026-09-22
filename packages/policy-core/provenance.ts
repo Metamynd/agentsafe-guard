@@ -115,6 +115,24 @@ export function riskFloorFor(
   return floor;
 }
 
+/**
+ * Does the owner require this action's payload to be bound (`permission[].requirePayloadBinding`)? True if ANY grant of the
+ * target says so — the strict reading, like the highest-tier-wins rule above. Only a literal `true` counts: a hand-authored
+ * document with `"yes"` or `1` in it is not silently read as either answer by anything that could throw on it.
+ */
+export function requiresPayloadBindingFor(
+  mandate: { target?: string; permission?: { target?: string; requirePayloadBinding?: unknown }[] } | null | undefined,
+  target: string,
+): boolean {
+  if (!mandate) return false;
+  for (const p of mandate.permission ?? []) {
+    if (!p || typeof p !== 'object') continue;
+    if ((p.target ?? mandate.target) !== target) continue;
+    if (p.requirePayloadBinding === true) return true;
+  }
+  return false;
+}
+
 // ─── field shapes ────────────────────────────────────────────────────────────────────────────────────
 
 type FieldKind = 'risk' | 'boolean' | 'number' | 'string' | 'string[]';

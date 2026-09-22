@@ -98,6 +98,10 @@ function decideClaimPayload(stored, presented) {
 function claimDigestField(payloadDigest) {
   return `payload=${payloadDigest}`;
 }
+function claimEvidenceRefs(idempotencyRef, payloadDigest) {
+  const refs = [...idempotencyRef ? [idempotencyRef] : [], ...payloadDigest ? [`payload:${payloadDigest}`] : []];
+  return refs.length ? refs : null;
+}
 export {
   MAX_CANONICAL_PAYLOAD_BYTES,
   PAYLOAD_BINDING_PREFIX,
@@ -109,6 +113,7 @@ export {
   buildPayloadRebindMessage,
   canonicalPayload,
   claimDigestField,
+  claimEvidenceRefs,
   decideClaimPayload,
   isPayloadDigest,
   payloadDigestOf,

@@ -8,6 +8,7 @@ import {
   meetsProvenance,
   normalizeRiskLevel,
   provenanceOf,
+  requiresPayloadBindingFor,
   riskFloorFor,
 } from './provenance.js';
 import { evaluateStandardRules, moleculeUnverifiable, validateMolecules, type Molecule } from './standards-rules.js';
@@ -313,5 +314,25 @@ describe('requireProvenance — a rule can demand a trusted source, per field', 
   it('an existing document (no requireProvenance) is untouched unless it uses the risk atom', () => {
     const plain: Molecule = { id: 'p', combinator: 'all', atoms: [{ id: 'a', predicate: 'jurisdiction-not-allowed', config: { allowed: ['MY'] } }], decision: 'block', reasonCode: 'J' };
     expect(evaluateStandardRules([plain], ctxOf({}))).toMatchObject({ decision: 'allow' }); // absent jurisdiction still passes here, as documented
+  });
+});
+
+describe('requiresPayloadBindingFor', () => {
+  it('is true only for a literal `true` on a permission for the target', () => {
+    const mandate = { target: 'wire', permission: [{ target: 'wire', requirePayloadBinding: true }, { target: 'other' }] };
+    expect(requiresPayloadBindingFor(mandate, 'wire')).toBe(true);
+    expect(requiresPayloadBindingFor(mandate, 'other')).toBe(false);
+    expect(requiresPayloadBindingFor(mandate, 'missing')).toBe(false);
+  });
+
+  it('any grant of the target requiring it is enough (the strict reading)', () => {
+    expect(requiresPayloadBindingFor({ permission: [{ target: 'wire' }, { target: 'wire', requirePayloadBinding: true }] }, 'wire')).toBe(true);
+  });
+
+  it('never throws on a hand-authored document, and never reads a non-boolean as required', () => {
+    expect(requiresPayloadBindingFor(null, 'wire')).toBe(false);
+    expect(requiresPayloadBindingFor(undefined, 'wire')).toBe(false);
+    expect(requiresPayloadBindingFor({ permission: [null as never, 'x' as never, {}] }, 'wire')).toBe(false);
+    for (const v of ['true', 'yes', 1, {}, [], null]) expect(requiresPayloadBindingFor({ permission: [{ target: 'wire', requirePayloadBinding: v }] }, 'wire')).toBe(false);
   });
 });

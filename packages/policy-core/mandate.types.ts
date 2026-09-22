@@ -63,6 +63,14 @@ export interface Permission {
    * Not an ODRL constraint and never evaluated by `evaluateMandate`: it changes what the RULES see.
    */
   riskTier?: 'low' | 'medium' | 'high' | 'critical';
+  /**
+   * The mandate OWNER requires the agent to bind the payload it executes (spec §8.3.9): the gate refuses an authorization
+   * that carries no signed payload digest (`PAYLOAD_BINDING_REQUIRED`), and refuses to let a hold with no digest — one a
+   * reviewer's MODIFY produced, say — be claimed until the agent has bound one (§8.3.11). Without it, binding is the agent's
+   * (or the executor's) choice, and an agent or a hop that strips the two fields simply leaves the hold unbound.
+   * Not an ODRL constraint and never evaluated by `evaluateMandate`. A delegated child may not drop it.
+   */
+  requirePayloadBinding?: boolean;
 }
 
 export interface Prohibition {

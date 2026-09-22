@@ -43,6 +43,15 @@ function riskFloorFor(mandate, target) {
   }
   return floor;
 }
+function requiresPayloadBindingFor(mandate, target) {
+  if (!mandate) return false;
+  for (const p of mandate.permission ?? []) {
+    if (!p || typeof p !== "object") continue;
+    if ((p.target ?? mandate.target) !== target) continue;
+    if (p.requirePayloadBinding === true) return true;
+  }
+  return false;
+}
 var FIELD_KINDS = {
   riskLevel: "risk",
   consent: "boolean",
@@ -791,6 +800,7 @@ export {
   remainingBudget,
   requiredContextFor,
   requiredContextOf,
+  requiresPayloadBindingFor,
   riskFloorFor,
   sumEventField,
   validateMolecules

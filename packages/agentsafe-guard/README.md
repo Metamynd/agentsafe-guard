@@ -153,6 +153,11 @@ the guard — see "Passphrase-encrypted managed key" above. New export from `key
 backend's `encryptWithPassword`/`decryptWithPassword`, cross-verified against it). Fully
 additive: a config without `agentKeyEncrypted` is loaded exactly as before, no passphrase needed.
 
+**0.15.1 — the mandate can require payload binding (MAGP §8.3.9).** A mandate issued with `requirePayloadBinding: true` makes the gate refuse
+an authorization for that action that carries no signed payload digest (`PAYLOAD_BINDING_REQUIRED`) and refuse to grant a claim on a hold that
+has none — so the guarantee no longer depends on the agent or every executor opting in. `authorize({ …, payload })` is all a caller does; nothing
+changes without the flag. The bundled `policy-core` gains the `requiresPayloadBindingFor` helper. See `docs/integration/payload-binding.md`.
+
 **0.15.0 — payload binding through the signer daemon, and after a reviewer's MODIFY (MAGP §8.3.9, §8.3.11).**
 Two gaps in 0.14.0 are closed:
 

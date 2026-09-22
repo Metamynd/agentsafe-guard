@@ -60,7 +60,7 @@ const bookFlight = guard.guardIncomingTool('flight-purchase', rawBookFlight);
 ```
 
 `verifyRequest`:
-1. rebuilds the canonical message (§7.3) and verifies the Ed25519 signature via **key-in-DID**;
+1. rebuilds the canonical message (§8.3) and verifies the Ed25519 signature via **key-in-DID**;
 2. checks freshness (single-use nonce stays the gate's job **unless `requireAuthorization` is
    set** — see below, that's the exception);
 3. fetches the agent's policy bundle from the issuer (`GET /policy/bundle/:did`, over TLS);
@@ -217,6 +217,15 @@ this closes hiding and garbling; those three close understating.
   (`@metamynd/agentsafe-http-gateway` 0.9.0 does this for you.) Needs an issuer that understands
   `Idempotency-Key` (MAGP §8.7.7); an older issuer ignores it and behaves as before.
 
+**A claim refused with `COUNTERPARTY_NOT_REGISTERED` (or `COUNTERPARTY_AUTH_REQUIRED`).** The owner of the mandate has a registry of the
+services that may claim their holds, and this Service is not on it — or it did not identify itself. Nothing was executed and the hold is
+still claimable by a trusted service. Fix it on the owner's side, not in code: sign in as the mandate's owner, open **Trusted
+Counterparties** in the dashboard (`/dashboard/counterparties`) and register this service's `serviceDid` (`did:key:…` or
+`did:hedera:…`; the key must be inside the identifier), optionally scoped to the merchants it acts for. Until an owner registers
+anyone the registry is open and no service is refused; registering the first one switches it on for that owner. Other codes from the
+same check: `COUNTERPARTY_NOT_ALLOWED_FOR_MERCHANT` (the entry is scoped and this hold's merchant is not in scope) and
+`COUNTERPARTY_MISMATCH` (a settlement call was signed by someone other than the service that claimed the hold).
+
 **0.8.0 — a Service can prove who it is.** A claim token is a bearer secret: it proves "I made the claim",
 not who you are. Give the guard a signing identity and it signs the claim and every settlement call
 (capture / release / mark-unknown) instead:
@@ -252,6 +261,9 @@ could neither settle below the hold nor release one after an upstream failure. N
   `captureAuthorization({ authorizationId, claimToken, amountCharged, bookingRef?, settlementTxHash? })`,
   `releaseAuthorization({ authorizationId, claimToken, reason? })`, and
   `markAuthorizationUnknown({ authorizationId, reason? })`.
+  **0.11.4** — a successful call also spreads the issuer's response onto the top level of the returned object (same
+  convention `lookupOutcome` already used): `result.settlementEvidence`, `result.amountCharged`, `result.authorizedAmount`
+  are readable directly, not only via `result.data` (which is unchanged and still there).
 - `guardIncomingTool(action, handler, { settle: true })` settles a handler that returns (at the
   authorized amount) and parks one that throws as **UNKNOWN** — it never *releases* on a throw, because a
   throw does not prove nothing was executed. Off by default: an existing embed is unchanged.

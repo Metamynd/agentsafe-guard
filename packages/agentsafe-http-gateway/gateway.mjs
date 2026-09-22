@@ -251,9 +251,14 @@ export function defaultBindPayload(req, signed, route) {
   if (raw == null) return whenUnconfirmed;
   let parsed = raw;
   if (typeof raw === 'string' || raw instanceof Uint8Array) {
-    const text = typeof raw === 'string' ? raw : Buffer.from(raw).toString('utf8');
-    if (!text.trim()) return whenUnconfirmed;
-    try { parsed = JSON.parse(text); } catch { return whenUnconfirmed; } // genuinely not JSON
+    // The SAME strict reader the payload digest uses (parseStrictJson, fatal UTF-8): a body with a duplicate key, a number a
+    // double cannot hold, or invalid UTF-8 has no single meaning, so amount/merchant cannot be shown to be what the upstream
+    // will read — it is refused (UNBINDABLE where a value field is required), never resolved last-wins.
+    try {
+      const text = typeof raw === 'string' ? raw : UTF8.decode(raw);
+      if (!text.trim()) return whenUnconfirmed;
+      parsed = parseStrictJson(text);
+    } catch { return whenUnconfirmed; } // not JSON, or ambiguous
   }
   if (!parsed || typeof parsed !== 'object') return whenUnconfirmed; // a JSON scalar/null
 
