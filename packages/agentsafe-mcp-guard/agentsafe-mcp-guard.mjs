@@ -265,7 +265,12 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     return out;
   }
 
-  /** One best-effort call to the issuer's settlement surface. Never throws. */
+  /**
+   * One best-effort call to the issuer's settlement surface. Never throws. On success the response's `data` (e.g.
+   * capture's `settlementEvidence`/`amountCharged`/`authorizedAmount`) is both kept at `.data` (unchanged, for any
+   * existing caller) AND spread onto the top level — same convention `lookupOutcome` already used — so a caller can
+   * read `result.settlementEvidence` directly instead of reaching into `.data` for it.
+   */
   async function issuerPost(path, body, extraHeaders = {}) {
     if (!base) return { ok: false, reasonCode: 'ISSUER_API_REQUIRED' };
     try {
@@ -274,7 +279,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       if (!res.ok) return { ok: false, status: res.status, reasonCode: payload?.message ?? payload?.data?.reasonCode ?? `ISSUER_HTTP_${res.status}` };
       // void answers 200 with success:false when the hold was not voidable (e.g. already settled)
       if (payload?.success === false) return { ok: false, status: res.status, reasonCode: payload?.data?.reasonCode ?? payload?.message ?? 'NOT_APPLIED', data: payload?.data ?? null };
-      return { ok: true, status: res.status, data: payload?.data ?? null };
+      const data = payload?.data ?? null;
+      return { ok: true, status: res.status, ...(data && typeof data === 'object' ? data : {}), data };
     } catch (err) {
       return { ok: false, reasonCode: 'ISSUER_UNREACHABLE', error: String(err?.message ?? err) };
     }

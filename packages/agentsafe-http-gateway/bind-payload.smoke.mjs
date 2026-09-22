@@ -360,6 +360,21 @@ test('the operator is warned at startup when a governed route relies on the defa
   try { mkDefault(); mk(); } finally { console.warn = real; }
   assert.equal(seen.filter((m) => /declares no allowedFields/.test(m)).length, 1, 'once, for the route that declares nothing — not the one that opted out');
 });
+test('a body with a duplicate key is refused, not read last-wins (the amount check reads what the upstream will read)', async () => {
+  // A last-wins parser sees amount 250 (matches the signature); a first-wins upstream would read 9000.
+  const r = await call(mk(), '{"amount":9000,"merchant":"skyward-air","amount":250}');
+  assert.equal(r.status, 403); assert.equal(r.body.reasonCode, 'PAYLOAD_UNBINDABLE'); assert.equal(forwarded, null); assert.equal(guardCalls, 0);
+});
+test('an amount a double cannot hold exactly, or invalid UTF-8, is refused by the value binder too', async () => {
+  assert.equal((await call(mk(), '{"amount":250.0000000000000001,"merchant":"skyward-air"}')).body.reasonCode, 'PAYLOAD_UNBINDABLE');
+  guardCalls = 0; forwarded = null;
+  const bad = await mk()({ method: 'POST', path: '/book-flight', headers: { 'x-magp-request': JSON.stringify(SIGNED) }, rawBody: Buffer.concat([Buffer.from('{"amount":250,"merchant":"skyward-air","note":"'), Buffer.from([0xff]), Buffer.from('"}')]) });
+  assert.equal(bad.body.reasonCode, 'PAYLOAD_UNBINDABLE'); assert.equal(forwarded, null);
+});
+test('an honest body is unaffected by the strict reader', async () => {
+  const r = await call(mk(), '{"amount":250,"merchant":"skyward-air","nested":{"a":[1,2,{"b":null}]},"s":"café"}');
+  assert.equal(r.status, 200); assert.ok(forwarded);
+});
 
 let pass = 0, fail = 0;
 for (const [name, fn] of t) {

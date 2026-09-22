@@ -79,6 +79,7 @@ export {
   normalizeRiskLevel,
   maxRisk,
   riskFloorFor,
+  requiresPayloadBindingFor,
   contextFieldProblem,
   PROVENANCE_KEY,
   PROVENANCE_LEVELS,

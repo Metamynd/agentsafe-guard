@@ -10,9 +10,9 @@ default, a second `gateway/` process** built on
 The agent's own `guardTool()` call is a fast, local, client-side check; the gateway is the real
 enforcement boundary — see [Separate tool gateway](#separate-tool-gateway-default) below.
 
-> **Prerequisite:** an agent is always owned by a **KYB-verified owner** — a person/org with a
-> MetaMynd account. If that's you and you're verified, you're ready. Verify once in the dashboard if
-> not; it's the only gate.
+> **Prerequisite:** an agent is always owned by a person/org with a **MetaMynd account**. Verification
+> is *reported*, not required, to get started: an unverified owner works on Testnet within the
+> free-tier limits, and verifying once in the dashboard (KYC/KYB) is what unlocks mainnet.
 
 ## Free local harness (no account, no network, `--harness`)
 

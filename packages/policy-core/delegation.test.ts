@@ -231,3 +231,33 @@ describe('a delegated mandate cannot lower or drop the risk tier', () => {
     expect(verdict('HIGH', ' high ').ok).toBe(true);
   });
 });
+
+// A payload-binding requirement removes freedom from the agent (it cannot execute without a signed digest), so a delegated child
+// mandate may keep or add it and may never drop it.
+describe('a delegated mandate cannot drop a payload-binding requirement', () => {
+  const withBinding = (v?: unknown): Mandate => ({
+    target: 'flight-purchase',
+    permission: [{ target: 'flight-purchase', constraint: [cap(500)], ...(v === undefined ? {} : { requirePayloadBinding: v as never }) }],
+  });
+  const verdict = (parent: unknown, child: unknown) => delegationVerdict(withBinding(parent), withBinding(child), 1);
+
+  it('keeping it, or adding it under a parent without one, is fine', () => {
+    expect(verdict(true, true).ok).toBe(true);
+    expect(verdict(undefined, true).ok).toBe(true);
+    expect(verdict(false, true).ok).toBe(true);
+    expect(verdict(undefined, undefined).ok).toBe(true);
+    expect(verdict(false, false).ok).toBe(true);
+  });
+
+  it('DROPPING it, or setting it false, is refused (CONSTRAINT_DROPPED requirePayloadBinding)', () => {
+    expect(verdict(true, undefined)).toMatchObject({ ok: false, refusal: 'CONSTRAINT_DROPPED', detail: 'requirePayloadBinding' });
+    expect(verdict(true, false)).toMatchObject({ ok: false, refusal: 'CONSTRAINT_DROPPED', detail: 'requirePayloadBinding' });
+  });
+
+  it('anything that is not a boolean is refused, never read as "not required"', () => {
+    for (const bad of ['yes', 1, null, {}, 'true']) {
+      expect(verdict(undefined, bad), JSON.stringify(bad)).toMatchObject({ ok: false, refusal: 'UNCOMPARABLE', detail: 'requirePayloadBinding' });
+      expect(verdict(true, bad), JSON.stringify(bad)).toMatchObject({ ok: false, refusal: 'UNCOMPARABLE' });
+    }
+  });
+});

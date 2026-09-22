@@ -184,6 +184,14 @@ function permissionNarrows(parent: Permission, child: Permission): DelegationVer
     if (!childTier) return no('CONSTRAINT_DROPPED', 'riskTier');
     if (maxRisk(parentTier, childTier) !== childTier) return no('CONSTRAINT_WIDENED', 'riskTier');
   }
+
+  // A payload-binding requirement is authority-reducing for the agent (it can do less without a signed digest), so a child may
+  // not drop it. Anything other than a boolean is refused rather than read as "not required".
+  const childBinding = (child as { requirePayloadBinding?: unknown }).requirePayloadBinding;
+  if (childBinding !== undefined && typeof childBinding !== 'boolean') return no('UNCOMPARABLE', 'requirePayloadBinding');
+  if ((parent as { requirePayloadBinding?: unknown }).requirePayloadBinding === true && childBinding !== true) {
+    return no('CONSTRAINT_DROPPED', 'requirePayloadBinding');
+  }
   return ok();
 }
 

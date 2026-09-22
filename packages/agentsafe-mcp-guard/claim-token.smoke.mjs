@@ -116,6 +116,19 @@ test('captureAuthorization presents the token and the amount, and reports ok', a
   } finally { m.restore(); }
 });
 
+test('captureAuthorization surfaces settlementEvidence at the top level, not only nested under .data', async () => {
+  const m = mockIssuer(router({ capture: ok({ captured: true, amountCharged: 200, authorizedAmount: 250, settlementEvidence: 'counterparty_attested', settlementTxHash: null }) }));
+  try {
+    const r = await mk().captureAuthorization({ authorizationId: 'auth-1', claimToken: TOKEN, amountCharged: 200 });
+    assert.equal(r.ok, true);
+    assert.equal(r.settlementEvidence, 'counterparty_attested');
+    assert.equal(r.amountCharged, 200);
+    assert.equal(r.authorizedAmount, 250);
+    // .data is unchanged, for any existing caller that reaches into it.
+    assert.equal(r.data.settlementEvidence, 'counterparty_attested');
+  } finally { m.restore(); }
+});
+
 test('releaseAuthorization presents the token to void a claimed hold', async () => {
   const m = mockIssuer(router());
   try {
