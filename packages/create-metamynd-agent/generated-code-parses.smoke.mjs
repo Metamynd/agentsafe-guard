@@ -49,7 +49,7 @@ function assertParses(dir) {
 }
 
 const quiet = (fn) => { const log = console.log; console.log = () => {}; try { return fn(); } finally { console.log = log; } };
-const config = { apiBase: 'http://127.0.0.1:1', agentDid: 'did:key:zStub', agentKey: 'aa', identityId: 'stub', keyVerified: true, mandate: { scope: 'flight-purchase' } };
+const config = { apiBase: 'http://127.0.0.1:1', agentDid: 'did:key:zStub', agentKey: 'aa', identityId: 'stub', keyVerified: true, mandate: { scope: 'flight-purchase' }, issuer: { policyKey: 'ab'.repeat(32), bbsKey: null } };
 
 // --- the hosted scaffolds (agent, and gateway when there is one) ---
 for (const [label, extra] of [
@@ -100,6 +100,37 @@ check('hosted financial agent: one `body`, and the signed payload is the body it
     assert.ok(decls.length <= 1, `\`const body\` is declared ${decls.length} times`);
     assert.match(agent, /payload,\r?\n\s*\}\);/, 'the request handed to the gateway signs `payload`');
     assert.match(agent, /body: JSON\.stringify\(payload\)/, 'and sends exactly that');
+  } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+});
+
+// --- the policy bundle is pinned to the issuer's OWN signing key, not trusted unverified (MITM finding) ---
+for (const [label, extra] of [
+  ['hosted financial gateway', {}],
+  ['hosted non-financial gateway', { neutral: true }],
+]) {
+  check(`${label}: policyPublicKey is baked in from the provisioning response`, () => {
+    const out = mkdtempSync(join(tmpdir(), 'metamynd-parse-'));
+    try {
+      quiet(() => mod.scaffoldProject({
+        outDir: out, config, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false,
+        withGateway: true, ...(extra.neutral ? { demo: mod.defaultNeutralDemo() } : {}),
+      }));
+      const server = readFileSync(join(out, 'gateway', 'server.mjs'), 'utf8');
+      assert.match(server, new RegExp(`policyPublicKey: '${config.issuer.policyKey}'`), 'the bundle is pinned to the real issuer key, baked in at scaffold time');
+    } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+  });
+}
+
+check('a config predating issuer.policyKey (an older saved agent.metamynd.json) still scaffolds — no pinning, not a crash', () => {
+  const out = mkdtempSync(join(tmpdir(), 'metamynd-parse-'));
+  try {
+    const { issuer: _drop, ...oldConfig } = config;
+    quiet(() => mod.scaffoldProject({ outDir: out, config: oldConfig, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: true }));
+    const server = readFileSync(join(out, 'gateway', 'server.mjs'), 'utf8');
+    const guardCall = server.match(/const guard = createMcpGuard\(\{[^}]*\}\);/)?.[0] ?? '';
+    assert.ok(guardCall, 'the gateway still scaffolds a guard');
+    assert.doesNotMatch(guardCall, /policyPublicKey:/, 'omitted from the actual call, not baked in as undefined/null (the explanatory comment still mentions the option by name)');
+    assertParses(out);
   } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 

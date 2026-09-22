@@ -1338,7 +1338,7 @@ console.log('');
  * allowed value-less request would be refused AUTHORIZATION_REQUIRED. The README states what that
  * leaves open (replay) rather than implying the financial scaffold's guarantees.
  */
-function gatewayServerFileNeutral(scope, port, apiBase) {
+function gatewayServerFileNeutral(scope, port, apiBase, policyKey) {
   return `#!/usr/bin/env node
 // gateway/server.mjs — the enforcement boundary for this agent's tool(s).
 //
@@ -1377,7 +1377,12 @@ const routes = [{ method: 'POST', path: '/perform', action: '${scope}', valueFie
 // would be refused AUTHORIZATION_REQUIRED. What that leaves open (a signed request is reusable for
 // the guard's 5-minute freshness window; the issuer's stateful rate/circuit-breaker floors; and the
 // rule inputs, which are not covered by the signature) is spelled out in README.md.
-const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API, requireAuthorization: false });
+// policyPublicKey pins the bundle to MetaMynd's OWN signing key (from your provisioning response,
+// baked in here — never fetched at runtime, so a compromised network can't swap it out alongside a
+// forged bundle). Without it, verifyBundle() never runs at all: an attacker who can intercept the
+// fetch to \`\${MAGP_API}/policy/bundle/...\` — a MITM, a compromised DNS/proxy — can hand this gateway
+// a bundle with a higher cap or no rules, and it would be trusted the same as the real one.
+const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API, requireAuthorization: false${policyKey ? `, policyPublicKey: '${policyKey}'` : ''} });
 
 const gateway = createHttpGateway({
   guard,
@@ -1458,7 +1463,10 @@ This is narrower than it sounds, so read it before relying on it.
 **Closed:** no tool call without a validly signed request from THIS agent for an action in its
 mandate. The agent's Ed25519 signature is checked against its DID, the action must be granted, and a
 suspended or quarantined agent is refused. Code that skips the agent's own guard and cannot sign as
-the agent gets nothing, and there is no local function to call directly.
+the agent gets nothing, and there is no local function to call directly. The policy bundle itself is
+pinned to MetaMynd's own signing key (\`policyPublicKey\`, baked in from your provisioning response) —
+a party that can intercept the bundle fetch (a MITM, a compromised DNS/proxy) cannot hand this gateway
+a forged bundle with a higher cap or no rules; \`server.mjs\` refuses an unsigned or tampered one outright.
 
 **NOT closed — be precise about this:**
 
@@ -1722,7 +1730,7 @@ function gitignore() {
 // in the AgentSafe repo for the full pattern (mutual handshake, x402 payment, capability
 // binding) this is a minimal slice of.
 
-function gatewayServerFile(scope, port, apiBase) {
+function gatewayServerFile(scope, port, apiBase, policyKey) {
   return `#!/usr/bin/env node
 // gateway/server.mjs — the REAL enforcement boundary for this agent's tool(s).
 //
@@ -1765,7 +1773,13 @@ const routes = [{ method: 'POST', path: '/book-flight', action: '${scope}', valu
 // requireAuthorization: true is what closes replay and cumulative spend, not just per-request
 // policy — it requires the agent's authorizationId (from a REAL guard.authorize() call) to
 // atomically claim single-use execution against the issuer before this gateway runs the tool.
-const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API, requireAuthorization: true });
+//
+// policyPublicKey pins the bundle to MetaMynd's OWN signing key (from your provisioning response,
+// baked in here — never fetched at runtime, so a compromised network can't swap it out alongside a
+// forged bundle). Without it, verifyBundle() never runs at all: an attacker who can intercept the
+// fetch to \`\${MAGP_API}/policy/bundle/...\` — a MITM, a compromised DNS/proxy — can hand this gateway
+// a bundle with a higher cap or no rules, and it would be trusted the same as the real one.
+const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API, requireAuthorization: true${policyKey ? `, policyPublicKey: '${policyKey}'` : ''} });
 
 const gateway = createHttpGateway({
   guard,
@@ -1900,6 +1914,10 @@ Four independent checks, each closing a different bypass an agent (or anything a
 own code, or a network attacker) might attempt:
 
 - **Direct call.** \`bookFlight()\` doesn't exist in the agent's process. There's nothing to call.
+- **Forged policy bundle.** \`server.mjs\` bakes in \`policyPublicKey\` (from your provisioning
+  response) and refuses an unsigned or tampered bundle outright — a party that can intercept the
+  fetch (a MITM, a compromised DNS/proxy) cannot hand this gateway a bundle with a higher cap or
+  no rules and have it trusted the same as the real one.
 - **Confused deputy (payload).** The gateway re-verifies the signed request against this agent's
   own policy AND binds it to the actual request body (payload binding,
   \`@metamynd/agentsafe-http-gateway\` ≥ 0.4.5) — signing a cheap request while executing an
@@ -2034,9 +2052,15 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
 
   if (withGateway) {
     const apiBase = config.apiBase ?? config.api ?? DEFAULT_API;
+    // The key that signs every policy bundle (magp.policy-signer.ts) — present on every provisioning
+    // response that talks to a real backend (full account, sandbox, delegated-claim). Baked into the
+    // generated gateway so it pins the bundle rather than trusting whatever the fetch returns; absent
+    // only for a config predating this field (an older scaffold's saved agent.metamynd.json), where
+    // the generated gateway is unchanged from before rather than baking in nothing and crashing.
+    const policyKey = config.issuer?.policyKey ?? null;
     const gwDir = join(outDir, 'gateway');
     if (!existsSync(gwDir)) mkdirSync(gwDir, { recursive: true });
-    writeFileSafe(gwDir, 'server.mjs', neutral ? gatewayServerFileNeutral(scope, gatewayPort, apiBase) : gatewayServerFile(scope, gatewayPort, apiBase), force);
+    writeFileSafe(gwDir, 'server.mjs', neutral ? gatewayServerFileNeutral(scope, gatewayPort, apiBase, policyKey) : gatewayServerFile(scope, gatewayPort, apiBase, policyKey), force);
     writeFileSafe(gwDir, 'package.json', gatewayPackageJson(slug), force);
     writeFileSafe(gwDir, '.env.example', neutral ? gatewayEnvExampleNeutral() : gatewayEnvExample(), force);
     writeFileSafe(gwDir, '.gitignore', gatewayGitignore(), force);
