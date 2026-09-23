@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metamynd-client"
+version = "0.5.1"
+description = "MetaMynd/AgentSafe authorize-gate client for Python — the supported reference implementation of MAGP §8.3"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "MetaMynd" }]
+requires-python = ">=3.9"
+dependencies = ["cryptography"]
+keywords = ["metamynd", "agentsafe", "governance", "ai-agents", "magp", "authorization"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+[project.urls]
+Homepage = "https://metamynd.ai/developers/python"
+Documentation = "https://metamynd.ai/developers/spec"
+Source = "https://github.com/Metamynd/agentsafe-guard"
+Issues = "https://github.com/Metamynd/agentsafe-guard/issues"
+
+[tool.setuptools]
+py-modules = ["metamynd_client"]
+package-dir = { "" = "src" }
