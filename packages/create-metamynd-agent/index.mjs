@@ -795,6 +795,30 @@ async function apiPost(base, path, body, token) {
   return json;
 }
 
+/**
+ * POST /policy/counterparties for the gateway's own DID — best-effort, unlike apiPost above: a
+ * hosted financial gateway works fine on testnet with no registration at all (open by default), so
+ * a failure here (network blip, an older backend without the endpoint) should not abort scaffolding
+ * the way a failed agent provisioning does. Always sends confirmEnforcementChange: true — this CLI
+ * IS the confirmation (the caller is reading this exact terminal output live, the same way a
+ * dashboard registration shows its own dialog before setting the flag); see the printed message
+ * either way.
+ */
+async function registerGatewayCounterparty(base, token, did, label) {
+  try {
+    const res = await fetch(`${base}/policy/counterparties`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ did, label, confirmEnforcementChange: true }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || json?.success === false) return { ok: false, message: json?.message ?? `HTTP ${res.status}` };
+    return { ok: true, message: json?.message ?? 'registered' };
+  } catch (e) {
+    return { ok: false, message: String(e?.message ?? e) };
+  }
+}
+
 // ---------- scaffolding ----------
 /**
  * The --no-gateway / --sandbox variant: the tool is a local function in the SAME process as
@@ -1739,6 +1763,7 @@ function gatewayServerFile(scope, port, apiBase, policyKey) {
 // published policy bundle — it does not trust the agent's own guard.guardTool() check. A
 // compromised or dishonest agent calling its own local function gets nothing here, because
 // there is no local function: the tool only runs in this process.
+import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import { createMcpGuard } from '${MCP_GUARD_PKG}';
 import { createHttpGateway } from '${GATEWAY_PKG}';
@@ -1767,8 +1792,13 @@ async function bookFlight(args) {
 // signed context, not the tool body.
 const routes = [{ method: 'POST', path: '/book-flight', action: '${scope}', valueFields: ['amount', 'merchant'], allowedFields: ['amount', 'currency', 'merchant'] }];
 
-// No serviceKey: this minimal gateway only calls verifyRequest() (re-check a signed request),
-// not the mutual-handshake methods, which are the only thing that needs it.
+// This gateway's OWN identity — separate from the agent's on purpose (an agent must not be able to
+// release or lower-settle a hold it authorized itself; only the SERVICE that claimed it may). Real
+// and registered as a trusted counterparty when \`npx create-metamynd-agent\` provisioned it (see
+// README.md); a real serviceKey is what lets serviceAuthHeaders() sign an AUTHENTICATED claim
+// (MAGP-SERVICE-v1) instead of relying on the bearer claimToken alone — required for a MAINNET
+// hold (MAGP §8.7.10), and strictly better than an anonymous claim on testnet too.
+const identity = JSON.parse(readFileSync(new URL('./service.metamynd.json', import.meta.url)));
 //
 // requireAuthorization: true is what closes replay and cumulative spend, not just per-request
 // policy — it requires the agent's authorizationId (from a REAL guard.authorize() call) to
@@ -1779,7 +1809,7 @@ const routes = [{ method: 'POST', path: '/book-flight', action: '${scope}', valu
 // forged bundle). Without it, verifyBundle() never runs at all: an attacker who can intercept the
 // fetch to \`\${MAGP_API}/policy/bundle/...\` — a MITM, a compromised DNS/proxy — can hand this gateway
 // a bundle with a higher cap or no rules, and it would be trusted the same as the real one.
-const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API, requireAuthorization: true${policyKey ? `, policyPublicKey: '${policyKey}'` : ''} });
+const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: true${policyKey ? `, policyPublicKey: '${policyKey}'` : ''} });
 
 const gateway = createHttpGateway({
   guard,
@@ -1855,7 +1885,7 @@ function gatewayEnvExample() {
 }
 
 function gatewayGitignore() {
-  return `node_modules/\n.env\n`;
+  return `node_modules/\n.env\nservice.metamynd.json\n`;
 }
 
 function gatewayReadme(slug, scope, port) {
@@ -1906,6 +1936,10 @@ add another protected route here rather than adding a local function back in \`i
 - \`server.mjs\` — the gateway: one protected route (\`POST /book-flight\`, action \`${scope}\`),
   \`@metamynd/agentsafe-mcp-guard\`'s \`verifyRequest()\` re-checking every request, and the real
   \`bookFlight()\`.
+- \`service.metamynd.json\` — this gateway's OWN identity (\`serviceDid\`/\`serviceKey\`), gitignored
+  like \`agent.metamynd.json\` one directory up. \`npx create-metamynd-agent\` generated it and
+  registered its DID as a trusted counterparty (see "Who may claim this agent's holds" below); a
+  clone needs its own, the same way it needs its own \`agent.metamynd.json\`.
 - \`.env.example\` — where real tool credentials go (copy to \`.env\`, fill in, never commit).
 
 ## What this closes, precisely
@@ -1949,6 +1983,25 @@ own code, or a network attacker) might attempt:
   the gateway will release that hold. Only the gateway that claimed the hold can do either — the agent
   cannot capture it lower or void it, which is what stopped it recovering the budget of a purchase it
   had just had executed.
+
+### Who may claim this agent's holds
+
+This gateway claims with its own real identity (\`service.metamynd.json\`, above) — not the agent's,
+on purpose: an agent must never be able to release or lower-settle a hold it authorized itself. On
+provisioning, \`npx create-metamynd-agent\` registered that DID as a trusted counterparty for you
+(\`POST /policy/counterparties\`). A **MAINNET** hold is *always* registered-only, regardless of your
+registry (MAGP §8.7.10) — a testnet hold stays open unless you have registered anything at all.
+Manage the registry at \`/dashboard/counterparties\`, or:
+
+\`\`\`bash
+curl -X POST $MAGP_API/policy/counterparties \\
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+  -d '{ "did": "'"$(node -e "console.log(JSON.parse(require('fs').readFileSync('./service.metamynd.json')).serviceDid)")"'", "confirmEnforcementChange": true }'
+\`\`\`
+
+\`confirmEnforcementChange: true\` is required only for your account's FIRST-EVER registration —
+it switches EVERY one of your holds (not just this agent's) from open to registered-only, so the
+API refuses a first registration without it.
 - **Amount unknown.** \`amount-unknown\` (\`@metamynd/agentsafe-mcp-guard\` ≥ 0.3.0) blocks a
   platform tool by default when its raw bytes or a nested payload hide the amount from a naive
   spend cap — AND this agent's OWN starter SOP (see \`agent.metamynd.json\` /
@@ -2012,7 +2065,7 @@ function assertScaffoldTarget(outDir, force) {
  */
 // `demo` (from buildPolicyCases) selects the NON-financial project; without it this is the historical
 // payment scaffold. `merchant` defaults to a payment demo's merchant only in that financial branch.
-function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'USD', merchant, sandbox, withGateway, gatewayPort = DEFAULT_GATEWAY_PORT, force = false, demo = null }) {
+function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'USD', merchant, sandbox, withGateway, gatewayPort = DEFAULT_GATEWAY_PORT, force = false, demo = null, gatewayIdentity = null }) {
   const neutral = !!demo;
   assertScaffoldTarget(outDir, force);
   console.log(`\n  ${c.b('Scaffolding')} ${c.dim(outDir)}`);
@@ -2060,6 +2113,17 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
     const policyKey = config.issuer?.policyKey ?? null;
     const gwDir = join(outDir, 'gateway');
     if (!existsSync(gwDir)) mkdirSync(gwDir, { recursive: true });
+    if (!neutral) {
+      // The gateway's OWN identity — the one that claims and settles this agent's holds (MAGP §8.7.6/
+      // §8.7.10), separate from the agent's own DID on purpose (an agent must not be able to release or
+      // lower-settle a hold it authorized itself). `gatewayIdentity` is real and registered when the
+      // caller generated + registered one (main()'s hosted-financial path); a caller that didn't
+      // (an older code path, or a direct scaffoldProject() call in a test) falls back to the historical
+      // non-cryptographic placeholder — same shape as before this field existed, still parses and runs,
+      // just unable to claim a MAINNET hold or sign an authenticated claim on any network.
+      const identity = gatewayIdentity ?? { did: `did:local:${scope}-gateway`, keyHex: null };
+      writeFileSafe(gwDir, 'service.metamynd.json', JSON.stringify({ serviceDid: identity.did, serviceKey: identity.keyHex }, null, 2) + '\n', force, 0o600);
+    }
     writeFileSafe(gwDir, 'server.mjs', neutral ? gatewayServerFileNeutral(scope, gatewayPort, apiBase, policyKey) : gatewayServerFile(scope, gatewayPort, apiBase, policyKey), force);
     writeFileSafe(gwDir, 'package.json', gatewayPackageJson(slug), force);
     writeFileSafe(gwDir, '.env.example', neutral ? gatewayEnvExampleNeutral() : gatewayEnvExample(), force);
@@ -3673,6 +3737,15 @@ async function main() {
   }
   const body = {
     name, scope,
+    // Explicit, not left to the backend's own eligibility-based default (mainnet for a KYB-verified
+    // owner, testnet otherwise) — an owner who happens to be verified would otherwise silently get a
+    // REAL mainnet agent from a plain `npx create-metamynd-agent` with no signal that anything
+    // changed. The generated financial gateway CAN now satisfy mainnet's registry enforcement (a
+    // real, registered did:key — see the gateway identity step below), but this CLI has no flag to
+    // opt into mainnet yet; that is a separate decision (exposing it safely — KYB status, spend
+    // caps — is more than a network toggle) from giving the gateway a real identity, which is what
+    // this fixes. docs/design/release-blockers-open-items.md, "Registry default".
+    network: 'testnet',
     ...(financial ? { currency, maxAmount, perTxnMax } : {}),
     merchants,
     ...(publicKey ? { publicKey } : {}),
@@ -3719,6 +3792,27 @@ async function main() {
     console.log(c.dim(`      POST ${base}/agent-identity/${config.identityId}/verify-key  { "signature": "<hex>" }  (owner token)`));
   }
 
+  // 3c. The gateway's OWN identity — a real did:key, separate from the agent's own (an agent must
+  // never be able to release or lower-settle a hold it authorized itself; only the SERVICE that
+  // claimed it may). Only the financial, with-gateway shape ever claims a hold at all; the
+  // non-financial gateway never calls claimAuthorization() (requireAuthorization is off there), so
+  // it has no counterparty identity to register.
+  let gatewayIdentity = null;
+  if (financial && !args['no-gateway']) {
+    const gwKeypair = generateAgentKeypair();
+    const gatewayDid = buildDidKey(rawPublicKeyFromSpkiHex(gwKeypair.publicKeyHex));
+    gatewayIdentity = { did: gatewayDid, keyHex: gwKeypair.privateKeyHex };
+    console.log(c.dim(`\n  → registering the gateway's identity as a trusted counterparty (so it can claim this agent's holds) …`));
+    const reg = await registerGatewayCounterparty(base, token, gatewayDid, `${scope}-gateway`);
+    if (reg.ok) {
+      console.log(`  ${c.green('✓')} gateway DID ${c.b(gatewayDid)} — ${reg.message}`);
+    } else {
+      console.log(`  ${c.yellow('!')} could not register the gateway as a trusted counterparty: ${reg.message}`);
+      console.log(c.dim(`     it still works on testnet (open by default with no registry entries); a MAINNET hold cannot be`));
+      console.log(c.dim(`     claimed until it is registered — POST ${base}/policy/counterparties { "did": "${gatewayDid}", "confirmEnforcementChange": true }`));
+    }
+  }
+
   // 4. Scaffold + next steps
   // The demo comes from the rules actually provisioned: the caller's own, else the backend's default
   // for a non-financial agent (the same amount-free review harnessDefaultSopNeutral describes).
@@ -3727,7 +3821,7 @@ async function main() {
     console.log(`  ${c.green('✓')} derived ${demo.cases.length} demo case(s) from your rules`);
     for (const n of demo.notDemonstrated) console.log(`  ${c.yellow('!')} not staged in the demo: ${n.rule} ${c.dim('— ' + n.why + '; still enforced')}`);
   }
-  scaffoldProject({ demo, outDir, config, slug, scope, perTxnMax, currency, merchant: financial ? merchants[0] || 'demo-merchant' : merchants[0], sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force });
+  scaffoldProject({ demo, outDir, config, slug, scope, perTxnMax, currency, merchant: financial ? merchants[0] || 'demo-merchant' : merchants[0], sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force, gatewayIdentity });
 }
 
 // Exported so the smoke tests can exercise the generators directly. Importing this file must not
