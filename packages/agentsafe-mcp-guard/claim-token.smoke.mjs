@@ -144,6 +144,15 @@ test('markAuthorizationUnknown parks the effect without releasing it', async () 
     const r = await mk().markAuthorizationUnknown({ authorizationId: 'auth-1', reason: 'HTTP_502' });
     assert.equal(r.ok, true);
     assert.equal(m.calls[0].path, '/policy/mandate/authorize/auth-1/effect/unknown');
+    assert.equal(m.calls[0].body.claimToken, undefined, 'no token given, none sent');
+  } finally { m.restore(); }
+});
+
+test('markAuthorizationUnknown relays an anonymous claim\'s token: the issuer now requires the claimer to prove itself', async () => {
+  const m = mockIssuer(router());
+  try {
+    await mk().markAuthorizationUnknown({ authorizationId: 'auth-1', reason: 'HTTP_502', claimToken: TOKEN });
+    assert.equal(m.calls[0].body.claimToken, TOKEN);
   } finally { m.restore(); }
 });
 

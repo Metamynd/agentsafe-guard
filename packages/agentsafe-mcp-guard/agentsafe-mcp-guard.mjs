@@ -335,10 +335,12 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * The effect moves to UNKNOWN, which keeps the spend committed and hands it to reconciliation
    * instead of guessing in either direction.
    */
-  async function markAuthorizationUnknown({ authorizationId, reason } = {}) {
+  // `claimToken`: an ANONYMOUS claim's token (from the claim), which the issuer now requires to prove this Service is the
+  // claimer — it is no longer enough to know the authorization id. A signed claim needs none: the call is signed instead.
+  async function markAuthorizationUnknown({ authorizationId, reason, claimToken } = {}) {
     if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     const auth = await serviceAuthHeaders('unknown', authorizationId, [reason ?? '']);
-    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/unknown`, { reason }, auth);
+    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/unknown`, { reason, ...(claimToken ? { claimToken } : {}) }, auth);
   }
 
   async function loadBundle(agentDid) {
@@ -668,7 +670,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         try {
           result = await handler(signed, ...rest);
         } catch (err) {
-          await markAuthorizationUnknown({ authorizationId: decision.authorizationId, reason: 'HANDLER_THREW' });
+          await markAuthorizationUnknown({ authorizationId: decision.authorizationId, reason: 'HANDLER_THREW', claimToken: decision.claimToken });
           throw err;
         }
         await captureAuthorization({ authorizationId: decision.authorizationId, claimToken: decision.claimToken, amountCharged: Number(signed?.amount) });
