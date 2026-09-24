@@ -214,13 +214,33 @@ export function evaluateMandate(mandate: Mandate, req: MandateRequest): MandateR
     if (!failing) return { decision: 'allow', reasonCode: 'AUTHORIZED' };
   }
 
-  // None granted — report the first failing constraint of the first permission.
-  const firstFail = (perms[0].constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
+  // None granted — report a failing constraint of the first permission.
+  const failing = (perms[0].constraint ?? []).filter((c) => !constraintSatisfied(c, req, true));
+  const firstFail = failing[0];
+  const reported = reportedFailure(failing) ?? firstFail;
   return {
     decision: firstFail?.onFail ?? 'block',
-    reasonCode: reasonFor(firstFail, req),
-    matched: { kind: 'permission', target: perms[0].target, constraint: firstFail },
+    reasonCode: reasonFor(reported, req),
+    matched: { kind: 'permission', target: perms[0].target, constraint: reported },
   };
+}
+
+/**
+ * Which of several failing constraints to NAME. Same reasoning as isAuthorityFailure above, one level down: a
+ * categorical constraint (a merchant, route or counterparty that is not allowed at ANY amount) is why the request
+ * failed, even when a budget constraint that happens to come first in the document also fails. A tester's run showed
+ * it: with the budget used up, a request to a merchant the mandate never allowed came back SPEND_LIMIT_EXCEEDED —
+ * which tells the reader that more budget would have let it through. It would not.
+ *
+ * Reason only, never the verdict: the decision stays the first failing constraint's `onFail`, and a categorical
+ * constraint is only preferred when its own `onFail` is that same decision, so no request's outcome can change.
+ * Returns undefined (keep document order) when there is no such constraint.
+ */
+function reportedFailure(failing: Constraint[]): Constraint | undefined {
+  const first = failing[0];
+  if (!first || !AMOUNT_OPERANDS.has(first.leftOperand)) return undefined;
+  const decision = first.onFail ?? 'block';
+  return failing.find((c) => !AMOUNT_OPERANDS.has(c.leftOperand) && (c.onFail ?? 'block') === decision);
 }
 
 // ---------------------------------------------------------------------------

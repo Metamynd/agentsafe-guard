@@ -40,9 +40,16 @@ guard already verifies); the gateway forwards only on `allow`/`observe`.
 AGENTSAFE_UPSTREAM=https://api.example.com \
 MAGP_API=https://metamynd.ai/api/v1 \
 SERVICE_DID=did:hedera:testnet:... SERVICE_KEY=<hex> \
+AGENTSAFE_POLICY_PUBLIC_KEY=<hex from GET /magp/policy/pubkey> \
 AGENTSAFE_ROUTES=agentsafe-routes.json \
 node server.mjs   # listens on PORT (default 4000)
 ```
+
+`AGENTSAFE_POLICY_PUBLIC_KEY` pins MetaMynd's policy-signing key, so a policy bundle rewritten in flight is refused
+(`POLICY_BUNDLE_SIGNATURE_INVALID`). Fetch it once, out of band, not on every start. Without it, and with `MAGP_API`
+on plain `http://`, value-bearing calls are refused (`POLICY_BUNDLE_UNVERIFIED`, agentsafe-mcp-guard 0.12.0): nothing
+authenticates that bundle. `AGENTSAFE_ALLOW_UNVERIFIED_BUNDLE=true` restores the old behaviour, for local development
+only.
 
 `denyByDefault: true` (in `createHttpGateway`) switches to an **allow-list** posture — an unmatched
 route is blocked (`ROUTE_NOT_ALLOWED`) instead of forwarded. `server.mjs` defaults this **off**

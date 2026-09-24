@@ -272,6 +272,24 @@ could neither settle below the hold nor release one after an upstream failure. N
   connection, which keeps the spend committed and hands it to reconciliation. Failing to settle can only
   over-count spend, never under-count it.
 
+### Pin the policy key (`policyPublicKey`)
+
+The bundle is what `verifyRequest` enforces, so whoever can change it in flight can change the rules. Pin MetaMynd's
+policy-signing key — fetch `GET /magp/policy/pubkey` once, out of band, and bake it into your config — and the guard
+verifies every bundle's signature and freshness, refusing a tampered, unsigned or stale one for a value-bearing call
+(`POLICY_BUNDLE_SIGNATURE_INVALID`, `POLICY_BUNDLE_UNSIGNED`, `POLICY_BUNDLE_STALE`). `create-metamynd-agent`'s gateways
+pin it for you.
+
+```js
+const guard = createMcpGuard({ serviceDid, issuerApi: 'https://metamynd.ai/api/v1', policyPublicKey: '<hex from /magp/policy/pubkey>' });
+```
+
+**Since 0.12.0** a guard with no pinned key says so at startup, and one that fetches its bundle over plain `http://`
+refuses value-bearing calls (`POLICY_BUNDLE_UNVERIFIED`): nothing authenticates that bundle, and an independent tester
+used exactly that path to drop the spend cap and run a $5,000 over-cap purchase. Over `https://` it warns and carries
+on (TLS authenticates the issuer). For local development only, `allowUnverifiedBundle: true` restores the old
+behaviour. A custom `fetchBundle` is your own source and is not affected.
+
 ### Replay, cumulative spend, rate limits, breakers, spend anomalies (`requireAuthorization`)
 
 Re-evaluating policy per request (above) proves the request is well-formed and in-policy — it

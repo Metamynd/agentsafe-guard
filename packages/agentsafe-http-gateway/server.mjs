@@ -159,6 +159,10 @@ async function main() {
     serviceKey: process.env.SERVICE_KEY,
     issuerApi: MAGP_API,
     requireAuthorization: REQUIRE_AUTHORIZATION,
+    // MetaMynd's policy-signing key (GET /magp/policy/pubkey, fetched once out of band). With it the guard refuses a
+    // rewritten policy bundle; without it over plain http a value-bearing call is refused (POLICY_BUNDLE_UNVERIFIED).
+    policyPublicKey: process.env.AGENTSAFE_POLICY_PUBLIC_KEY || undefined,
+    allowUnverifiedBundle: process.env.AGENTSAFE_ALLOW_UNVERIFIED_BUNDLE === 'true',
   });
   const routes = loadRoutes();
   if (!DENY_BY_DEFAULT) {

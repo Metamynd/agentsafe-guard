@@ -103,6 +103,28 @@ try {
     assert.equal(fin.toolRuns(), before + 1);
   });
 
+  // Tester rerun 2026-09-24: the same signed bytes were accepted twice. The gateway now remembers each nonce.
+  await check('a byte-identical replay of an honest request is refused (REPLAY_DETECTED) and the tool runs once', async () => {
+    const before = fin.toolRuns();
+    const body = { amount: 250, currency: 'USD', merchant: 'skyward-air' };
+    const header = await fin.signBound(good, body);
+    const first = await fin.post('/book-flight', { header, body });
+    assert.equal(first.status, 200);
+    const replay = await fin.post('/book-flight', { header, body });
+    assert.equal(replay.status, 403); assert.equal(replay.body.reasonCode, 'REPLAY_DETECTED');
+    assert.equal(fin.toolRuns(), before + 1, 'the tool must have run exactly once');
+  });
+
+  await check('ten simultaneous copies of one signed request run the tool exactly once', async () => {
+    const before = fin.toolRuns();
+    const body = { amount: 250, currency: 'USD', merchant: 'skyward-air' };
+    const header = await fin.signBound(good, body);
+    const results = await Promise.all(Array.from({ length: 10 }, () => fin.post('/book-flight', { header, body })));
+    assert.equal(results.filter((r) => r.status === 200).length, 1);
+    assert.equal(results.filter((r) => r.body?.reasonCode === 'REPLAY_DETECTED').length, 9);
+    assert.equal(fin.toolRuns(), before + 1);
+  });
+
   // The scaffold turns payload binding ON (requirePayloadBinding): a default install is no longer unbound.
   await check('payload binding is on by default: a request that binds no payload is refused and the tool never runs', async () => {
     const src = readFileSync(join(fin.outDir, 'harness-gateway', 'harness-gateway.mjs'), 'utf8');
