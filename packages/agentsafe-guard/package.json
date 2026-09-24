@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/agentsafe-guard",
-  "version": "0.15.2",
+  "version": "0.15.3",
   "description": "Zero-dependency runtime governance for any Node AI agent \u2014 gate tool calls through MetaMynd/AgentSafe (allow / block / escalate) against the agent's mandate, enforced Standards, and SOPs. Ed25519-signed, deterministic, fail-closed.",
   "type": "module",
   "main": "./agentsafe-guard.mjs",
@@ -27,7 +27,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node demo.mjs && node local-eval.smoke.mjs && node execution-adapter.smoke.mjs && node verify.smoke.mjs && node context-signature.smoke.mjs && node payload-binding.smoke.mjs && node local-decision-report.smoke.mjs && node resource-constraint.smoke.mjs && node passphrase-key.smoke.mjs && node missing-config.smoke.mjs",
+    "test": "node demo.mjs && node local-eval.smoke.mjs && node execution-adapter.smoke.mjs && node verify.smoke.mjs && node context-signature.smoke.mjs && node payload-binding.smoke.mjs && node local-decision-report.smoke.mjs && node resource-constraint.smoke.mjs && node passphrase-key.smoke.mjs && node missing-config.smoke.mjs && node verify-on-chain.smoke.mjs",
     "demo": "node demo.mjs"
   },
   "engines": {
