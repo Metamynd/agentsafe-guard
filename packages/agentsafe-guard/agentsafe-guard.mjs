@@ -605,7 +605,10 @@ export function createGuard(opts = {}) {
     // a bundle we can't prove is current — this defeats a stale/rolled-back or forged bundle).
     if (verifyOnChain) {
       const anchor = await _currentAnchor();
-      const sig = b?.proof?.signature;
+      // The issuer re-issues a compiled bundle at serve time (fresh issuedAt, re-signed — so maxStaleness bounds the age
+      // of THIS copy, not of the compile) and carries the anchored compile signature as `compiledSignature`. An issuer
+      // that predates that serves the compiled bundle itself, whose own signature is the anchored one.
+      const sig = b?.compiledSignature ?? b?.proof?.signature;
       if (!anchor?.sigDigest || !sig || _sha256(sig) !== anchor.sigDigest) return authorize(input);
     }
     const { mandateFound, anyMandates, ...bundleForAction } = _bundleFor(b, action);
