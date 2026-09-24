@@ -173,6 +173,45 @@ describe('evaluateMandate — scope', () => {
   });
 });
 
+describe('evaluateMandate — which failing constraint is NAMED (reason precedence)', () => {
+  it('a merchant the mandate never allows is named even when the budget ALSO fails (tester rerun 2026-09-24)', () => {
+    // cumulativeSpend comes first in the document and fails too; before, this said SPEND_LIMIT_EXCEEDED — as if more
+    // budget would have let a disallowed merchant through.
+    const r = evaluateMandate(flightMandate, req({ 'mm:payAmount': 100, 'mm:cumulativeSpend': 5000, 'mm:merchant': 'sabre' }));
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('MERCHANT_NOT_ALLOWED');
+    expect(r.matched?.constraint?.leftOperand).toBe('mm:merchant');
+  });
+
+  it('only the budget failing is still SPEND_LIMIT_EXCEEDED', () => {
+    const r = evaluateMandate(flightMandate, req({ 'mm:payAmount': 100, 'mm:cumulativeSpend': 5000, 'mm:merchant': 'amadeus' }));
+    expect(r.reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+  });
+
+  it('never changes the DECISION: a categorical constraint with a different onFail is not preferred', () => {
+    const mixed: Mandate = {
+      permission: [
+        {
+          target: 'mm:flight-purchase',
+          constraint: [
+            { leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 500, onFail: 'escalate' },
+            { leftOperand: 'mm:merchant', operator: 'isAnyOf', rightOperand: ['amadeus'] }, // onFail block
+          ],
+        },
+      ],
+    };
+    const r = evaluateMandate(mixed, req({ 'mm:payAmount': 750, 'mm:merchant': 'sabre' }));
+    expect(r.decision).toBe('escalate'); // unchanged from document order
+    expect(r.reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+  });
+
+  it('a missing amount alongside a bad merchant names the merchant (the amount could not help either)', () => {
+    const r = evaluateMandate(flightMandate, req({ 'mm:cumulativeSpend': 0, 'mm:merchant': 'sabre' }));
+    expect(r.decision).toBe('block');
+    expect(r.reasonCode).toBe('MERCHANT_NOT_ALLOWED');
+  });
+});
+
 describe('evaluateMandate — validity window', () => {
   it('blocks before validFrom', () => {
     const r = evaluateMandate(

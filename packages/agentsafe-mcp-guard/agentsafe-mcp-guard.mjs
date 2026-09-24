@@ -53,7 +53,12 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  * @param {string} [cfg.policyPublicKey] MetaMynd's Ed25519 policy-signing key (hex, from
  *   GET /magp/policy/pubkey). When set, the guard VERIFIES the bundle signature + freshness (Phase F,
  *   §5.3.2/§5.3.3) and fails closed for value-bearing actions on an unsigned/tampered/stale bundle —
- *   so per-request enforcement needs no live MetaMynd. Omit for the legacy hash-addressed + TLS mode.
+ *   so per-request enforcement needs no live MetaMynd. Omit for the legacy hash-addressed + TLS mode —
+ *   which is only as trustworthy as the transport: over plain http:// nothing authenticates the bundle,
+ *   so a value-bearing action is refused (POLICY_BUNDLE_UNVERIFIED) unless `allowUnverifiedBundle` is set.
+ * @param {boolean} [cfg.allowUnverifiedBundle] accept a value-bearing action on a bundle fetched over plain
+ *   http:// with no `policyPublicKey` pinned. Off by default: a proxy on that path can rewrite the rules (an
+ *   independent tester raised an over-cap $5,000 purchase that way). For local development only.
  * @param {boolean} [cfg.requireAuthorization] when true, a PERMIT verdict (allow/observe) is only
  *   actually granted if `signed.authorizationId` atomically claims single-use execution against the
  *   stateful issuer gate (see claimAuthorization below) — this is what closes REPLAY and CUMULATIVE
@@ -75,9 +80,20 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   integrator's un-capability-aware callers must keep working); set true on any Service where
  *   capability binding is meant to be mandatory, not opt-in.
  */
-export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
+  // With no policyPublicKey, nothing but the transport vouches for the policy bundle. Over plain http:// nothing does:
+  // a proxy on the path can drop the spend cap and the guard would enforce the forged rules. A custom fetchBundle is the
+  // integrator's own source, so it is left to them.
+  const bundleUnauthenticated = !policyPublicKey && typeof fetchBundle !== 'function' && !!base && !/^https:\/\//i.test(base);
+  if (!policyPublicKey) {
+    console.warn(
+      bundleUnauthenticated
+        ? `[mcp-guard] no policyPublicKey and the issuer is not https (${base}): nothing authenticates the policy bundle. Value-bearing actions are refused (POLICY_BUNDLE_UNVERIFIED)${allowUnverifiedBundle ? ' — except allowUnverifiedBundle is set, so they are NOT' : ''}. Pin policyPublicKey (GET /magp/policy/pubkey, out of band).`
+        : '[mcp-guard] no policyPublicKey: the policy bundle is trusted on the strength of TLS alone. Pin policyPublicKey (GET /magp/policy/pubkey, out of band) so a rewritten bundle is refused.',
+    );
+  }
   // keyProvider seam (docs/design/agent-key-custody-local-signer-daemon-plan.md): null when
   // neither `serviceKey` nor `keyProvider` is configured — handshakeChallenge throws its own
   // clear error only if actually called, matching the original lazy-throw behavior exactly.
@@ -485,6 +501,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       if (policyPublicKey) {
         const v = verifyBundle(bundle, { publicKey: policyPublicKey, valueBearing: Number(amount) > 0 });
         if (!v.ok) return { decision: 'block', reasonCode: v.reasonCode };
+      } else if (bundleUnauthenticated && !allowUnverifiedBundle && Number(amount) > 0) {
+        // Nothing authenticates these rules (no pinned key, no TLS): moving value on them is exactly the D-08 attack.
+        return { decision: 'block', reasonCode: 'POLICY_BUNDLE_UNVERIFIED' };
       }
       const verdict = verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} }, trustedContext);
       // Mode ESCALATE floor lifts an otherwise-PERMIT (allow or observe) to human review

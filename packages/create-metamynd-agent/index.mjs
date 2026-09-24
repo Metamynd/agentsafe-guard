@@ -102,7 +102,7 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.6.0 brings buildAuthMessage's `resource` field and buildLocalDecisionMessage into this
 // package's own bundled policy-core.mjs (alongside the guard's own 0.10.0) — no scaffolded
 // template code changes, but the floor must still cover the real current version.
-const MCP_GUARD_VERSION = '^0.11.0';
+const MCP_GUARD_VERSION = '^0.12.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -205,7 +205,7 @@ ${c.b('Options')}
   --gateway            --harness only: ALSO scaffold a second local process (still zero
                        network, zero account) that independently re-verifies every request
                        against the same rules file, using the real @metamynd/agentsafe-mcp-guard.
-                       Off by default. Does not close nonce replay/cumulative spend — see the
+                       Off by default. Refuses a replayed request; does not track cumulative spend — see the
                        generated README#--gateway for exactly what it does and does not.
   --gateway-port <n>   The gateway process's port, hosted flow or --harness --gateway (default 4401)
   --port <n>           --harness only: the local dashboard's port (default 4400)
@@ -2319,12 +2319,14 @@ function harnessRulesFile(mandate, sopDocument) {
 // that skips its own guardToolLocal() call, or calls bookFlight() directly, gets nothing —
 // the tool only runs in the gateway process now.
 //
+// Replay of the SAME signed request is refused too (REPLAY_DETECTED): the gateway remembers each nonce for as long as
+// the guard would accept it, in memory (a restart forgets them). An independent tester's rerun (2026-09-24) found the
+// same bytes accepted twice before this.
+//
 // What this does NOT close (be precise, this is a local demo, not the hosted platform):
-// nonce replay and cumulative-spend across many calls. Those need a STATEFUL authority — the
-// hosted gate's `requireAuthorization` claims a real, single-use authorizationId against a
-// database. A local harness has no such database (that is the whole point of --harness), so
-// this gateway does per-request re-evaluation only, same as the hosted gateway's baseline
-// before `requireAuthorization` is added. The README says so.
+// cumulative spend across many DIFFERENT calls. That needs a STATEFUL authority — the hosted gate's
+// `requireAuthorization` claims a real, single-use authorizationId against a database and holds the budget there. A
+// local harness has no such database (that is the whole point of --harness). The README says so.
 
 function harnessGatewayServerFile(scope, gatewayPort, agentDid, neutral = false) {
   return `#!/usr/bin/env node
@@ -2415,9 +2417,35 @@ function readBody(req) {
   });
 }
 
+// Replay: every signed request carries a fresh nonce, and the guard refuses one more than 5 minutes old. So a nonce
+// only has to be remembered for that long to refuse the SAME signed request twice. Checked and recorded in one
+// synchronous step, before anything awaits, so two simultaneous copies cannot both get through. In memory: restarting
+// this process forgets it (a replay inside the 5-minute window after a restart is not caught). Cumulative spend across
+// many DIFFERENT requests is still not tracked here — that needs the hosted gate.
+const NONCE_TTL_MS = 6 * 60 * 1000;
+const seenNonces = new Map(); // agentDid|nonce -> expiry
+function firstUseOfNonce(headers) {
+  let signed;
+  try { signed = JSON.parse(headers['x-magp-request'] ?? 'null'); } catch { return true; } // malformed: the guard refuses it
+  if (!signed || typeof signed.nonce !== 'string') return true; // no nonce: the guard refuses it
+  const now = Date.now();
+  if (seenNonces.size > 10000) for (const [k, exp] of seenNonces) if (exp <= now) seenNonces.delete(k);
+  const key = String(signed.agentDid) + '|' + signed.nonce;
+  const exp = seenNonces.get(key);
+  if (exp !== undefined && exp > now) return false;
+  seenNonces.set(key, now + NONCE_TTL_MS);
+  return true;
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const rawBody = await readBody(req);
+    if (!firstUseOfNonce(req.headers)) {
+      console.log('[harness-gateway] BLOCK ' + req.url + ' — REPLAY_DETECTED (this exact signed request already came through)');
+      res.writeHead(403, { 'content-type': 'application/json', 'x-agentsafe-decision': 'block' });
+      res.end(JSON.stringify({ decision: 'block', reasonCode: 'REPLAY_DETECTED' }));
+      return;
+    }
     const result = await gateway({ method: req.method, path: req.url, headers: req.headers, rawBody });
     const headers = { 'content-type': 'application/json' };
     const decision = result.governance?.decision;
@@ -2978,9 +3006,9 @@ console.log(bold('  Checked twice, by two processes.') + ' bookFlight() lives in
 console.log(dim('  not here. It independently re-verified every attempt above against the SAME'));
 console.log(dim('  ./metamynd-rules.json, over a signed request, before running your tool.'));
 console.log('');
-console.log(dim('  What --gateway does NOT close: nonce replay and cumulative spend across many'));
-console.log(dim('  calls. Those need a STATEFUL authority (the hosted gate\\'s requireAuthorization'));
-console.log(dim('  claims a real, single-use id against a database) - a local harness has none.'));
+console.log(dim('  It also refuses a replay of the same signed request. What --gateway does NOT close:'));
+console.log(dim('  cumulative spend across many different calls. That needs a STATEFUL authority (the'));
+console.log(dim('  hosted gate holds the budget in a database) - a local harness has none.'));
 console.log(dim('  See README.md#--gateway for exactly what this does and does not prove.'));
 console.log('');
 console.log('  Edit ./metamynd-rules.json (or the dashboard) and run again - the outcome');
@@ -3175,9 +3203,8 @@ console.log(dim('  ./metamynd-rules.json, over a signed request, before running 
 console.log(dim('  It enforces scope and identity firmly; the rule inputs above are NOT signed, so an'));
 console.log(dim('  agent that can sign could omit or forge one and its rule would not fire.'));
 console.log('');
-console.log(dim('  What --gateway does NOT close: nonce replay across many calls. That needs a STATEFUL'));
-console.log(dim('  authority (the hosted gate claims a real, single-use id against a database) - a local'));
-console.log(dim('  harness has none. See README.md#--gateway for exactly what this does and does not prove.'));
+console.log(dim('  It also refuses a replay of the same signed request (remembered in memory, so a restart'));
+console.log(dim('  forgets). See README.md#--gateway for exactly what this does and does not prove.'));
 console.log('');
 console.log('  Edit ./metamynd-rules.json (or the dashboard) and run again - the outcome');
 console.log(dim('  changes, in BOTH processes, from the one file. That is the point.'));` : `
@@ -3296,13 +3323,19 @@ not cover. An agent that can sign could omit a field or send a different one, an
 it would not fire. The gateway enforces scope and identity firmly; an input-dependent rule is only as
 strong as whatever supplies its input.` : ''}
 
-**NOT closed:** nonce replay and cumulative spend across many calls. Those need a STATEFUL
-authority — the hosted gate's \`requireAuthorization\` atomically claims a real, single-use
-\`authorizationId\` against a database before a Service executes anything (see
-\`@metamynd/agentsafe-mcp-guard\`'s own README). A local harness has no database; that is the
-whole point of \`--harness\`. \`harness-gateway.mjs\` re-checks POLICY per request, which is
-real and worth having, but replaying the exact same signed request twice is NOT refused here
-the way it would be against the hosted gate.
+**Also closed — replaying the same signed request.** \`harness-gateway.mjs\` remembers every nonce for as long as
+the guard would accept the request (about 5 minutes) and refuses the second copy (\`REPLAY_DETECTED\`). The memory is
+in-process: restarting the gateway forgets it.
+
+${demo ? `**NOT closed:** anything that depends on history across many DIFFERENT calls (rate limits, circuit breakers,
+patterns). That needs a STATEFUL authority — the hosted gate's \`requireAuthorization\` atomically claims a real,
+single-use \`authorizationId\` against a database (see \`@metamynd/agentsafe-mcp-guard\`'s own README). A local
+harness has no database; that is the whole point of \`--harness\`. \`harness-gateway.mjs\` re-checks POLICY per
+request, which is real and worth having, but it does not remember what earlier calls did.` : `**NOT closed:** cumulative spend across many DIFFERENT calls. That needs a STATEFUL authority — the hosted gate's
+\`requireAuthorization\` atomically claims a real, single-use \`authorizationId\` against a database and holds the
+budget there (see \`@metamynd/agentsafe-mcp-guard\`'s own README). A local harness has no database; that is the
+whole point of \`--harness\`. \`harness-gateway.mjs\` re-checks POLICY per request, so each call is held to the
+per-transaction cap, but many calls under the cap are not added up here the way the hosted gate adds them up.`}
 
 Also not closed by \`--gateway\` alone: cross-party trust (nobody but you can verify this agent's
 identity or its decisions), evidence anyone but you can audit, a dashboard reachable when this

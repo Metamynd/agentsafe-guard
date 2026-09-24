@@ -643,15 +643,23 @@ function evaluateMandate(mandate, req) {
     };
   }
   for (const p of perms) {
-    const failing = (p.constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
-    if (!failing) return { decision: "allow", reasonCode: "AUTHORIZED" };
+    const failing2 = (p.constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
+    if (!failing2) return { decision: "allow", reasonCode: "AUTHORIZED" };
   }
-  const firstFail = (perms[0].constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
+  const failing = (perms[0].constraint ?? []).filter((c) => !constraintSatisfied(c, req, true));
+  const firstFail = failing[0];
+  const reported = reportedFailure(failing) ?? firstFail;
   return {
     decision: firstFail?.onFail ?? "block",
-    reasonCode: reasonFor(firstFail, req),
-    matched: { kind: "permission", target: perms[0].target, constraint: firstFail }
+    reasonCode: reasonFor(reported, req),
+    matched: { kind: "permission", target: perms[0].target, constraint: reported }
   };
+}
+function reportedFailure(failing) {
+  const first = failing[0];
+  if (!first || !AMOUNT_OPERANDS.has(first.leftOperand)) return void 0;
+  const decision = first.onFail ?? "block";
+  return failing.find((c) => !AMOUNT_OPERANDS.has(c.leftOperand) && (c.onFail ?? "block") === decision);
 }
 function remainingBudget(b) {
   return Math.max(0, b.cap - b.spent - b.held);
