@@ -440,7 +440,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       } else if (status !== undefined && (route.releaseOnStatus ?? releaseOnStatus).includes(status)) {
         if (typeof guard.releaseAuthorization === 'function') await guard.releaseAuthorization({ ...claim, reason: `UPSTREAM_HTTP_${status}` });
       } else if (typeof guard.markAuthorizationUnknown === 'function') {
-        await guard.markAuthorizationUnknown({ authorizationId: claim.authorizationId, reason: status === undefined ? 'UPSTREAM_ERROR' : `UPSTREAM_HTTP_${status}` });
+        await guard.markAuthorizationUnknown({ ...claim, reason: status === undefined ? 'UPSTREAM_ERROR' : `UPSTREAM_HTTP_${status}` });
       }
     } catch (err) {
       console.warn('[gateway] could not close the claimed hold (it stays committed to the cap):', err?.message ?? err);

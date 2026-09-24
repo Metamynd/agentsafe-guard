@@ -216,6 +216,12 @@ ${c.b('Options')}
 ${c.b('Environment')}
   METAMYND_API, METAMYND_EMAIL, METAMYND_PASSWORD  — fallbacks for the flags above
 
+${c.b('Network')}
+  Every hosted agent this CLI provisions is a ${c.b('Testnet')} agent, whatever your verification status —
+  there is deliberately no mainnet flag. To launch a ${c.b('Mainnet')} agent, use the Launchpad in the
+  dashboard (https://metamynd.ai/dashboard/launchpad): its Mainnet option is available once your
+  owner verification (KYC/KYB) is complete.
+
 ${c.b('What it does')}
   1. Logs in as a KYB-verified owner       → owner access token
   2. POST /onboarding/agent (one call)      → identity + mandate + SOP + Standards
