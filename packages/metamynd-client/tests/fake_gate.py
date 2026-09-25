@@ -87,6 +87,7 @@ class FakeGate:
         self.holds: Dict[str, Dict[str, Any]] = {}
         self.escalations: Dict[str, Dict[str, Any]] = {}
         self.paths: List[str] = []  # every POST path received, as sent
+        self.bodies: List[Dict[str, Any]] = []  # every POST body received, in the same order
         self.delay = 0.0  # seconds the gate takes to answer an authorize
         self.html_200 = False  # answer every POST with a non-JSON 200, like a CDN error page
         self._server: Optional[ThreadingHTTPServer] = None
@@ -112,6 +113,7 @@ class FakeGate:
             def do_POST(self) -> None:  # noqa: N802
                 gate.paths.append(self.path)
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                gate.bodies.append(body)
                 if gate.delay and self.path == "/policy/mandate/authorize":
                     time.sleep(gate.delay)  # a slow gate, so a caller can be cancelled while the hold is being made
                 if gate.html_200:

@@ -65,6 +65,14 @@ class GateFailures(_Base):
             self.client.authorize("flight-purchase", 100, merchant="skyward-air", context={"riskLevel": "low"})
         self.assertIn("treat as block", str(blocked.exception))
 
+    def test_capture_sends_pay_to_only_when_given(self) -> None:
+        # A settlement below the authorization needs the account paid (the owner's payee directory, MAGP 8.7.14).
+        self.client.capture("00000000-0000-4000-8000-000000000001", 200, pay_to="0.0.5005")
+        self.assertEqual(self.gate.bodies[-1].get("payTo"), "0.0.5005")
+        self.assertEqual(self.gate.bodies[-1].get("amountCharged"), 200)
+        self.client.capture("00000000-0000-4000-8000-000000000001", 250)
+        self.assertNotIn("payTo", self.gate.bodies[-1])
+
     def test_an_authorization_id_cannot_climb_out_of_its_path_segment(self) -> None:
         self.client.void("a/../../x")
         self.assertTrue(self.gate.paths, "the fake records request paths")

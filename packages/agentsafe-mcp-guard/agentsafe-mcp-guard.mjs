@@ -309,12 +309,17 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * turns an executed call into an error, and a claimed hold stays committed to the mandate's cap
    * either way, so failing to settle can only over-count spend, never under-count it.
    */
-  async function captureAuthorization({ authorizationId, claimToken, amountCharged, bookingRef, settlementTxHash } = {}) {
+  // `payTo`: the account this Service paid (a Hedera account id or an EVM address). Needed when settling BELOW the
+  // authorized amount: the issuer checks it against the owner's merchant payee directory (MAGP §8.7.14, refused
+  // PAYEE_NOT_REGISTERED otherwise) and the settlement observer only counts a credit to it. Not a signed field (adding one
+  // would change the capture message every published signer computes); the issuer reads it only after this call has
+  // proven it is the claimer.
+  async function captureAuthorization({ authorizationId, claimToken, amountCharged, bookingRef, settlementTxHash, payTo } = {}) {
     if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!Number.isFinite(Number(amountCharged))) return { ok: false, reasonCode: 'AMOUNT_CHARGED_REQUIRED' };
     const amount = Number(amountCharged);
     const auth = await serviceAuthHeaders('capture', authorizationId, [String(amount), bookingRef ?? '', settlementTxHash ?? '']);
-    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/capture`, { amountCharged: amount, bookingRef, settlementTxHash, claimToken }, auth);
+    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/capture`, { amountCharged: amount, bookingRef, settlementTxHash, claimToken, ...(payTo ? { payTo: String(payTo) } : {}) }, auth);
   }
 
   /**
