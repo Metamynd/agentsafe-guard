@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metamynd-client"
-version = "0.5.1"
+version = "0.5.2"
 description = "MetaMynd/AgentSafe authorize-gate client for Python — the supported reference implementation of MAGP §8.3"
 readme = "README.md"
 license = "MIT"

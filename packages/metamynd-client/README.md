@@ -189,6 +189,11 @@ below the authorized amount or release it — the gate refuses the agent's attem
 with the reason), on purpose: otherwise an agent could wait for a purchase to happen and then take
 its budget back. An agent can `capture` at the full amount, and `void` a hold nobody has claimed.
 
+**Settling below the authorization (0.5.2).** A service that charged less passes `pay_to`, the account it paid
+(a Hedera account id or an EVM address): `client.capture(auth_id, 120, pay_to="0.0.5005")`. If the owner lists
+that merchant's accounts (MAGP 8.7.14), a lowered capture without a listed `pay_to` is refused
+(`PAYEE_NOT_REGISTERED`), and the settlement observer only counts a credit to the account named.
+
 **What was authorized, what was settled, and how far to trust it.** `Outcome` reports `authorized_amount`
 (kept after settlement — `None` means unknown, not zero), `settled_amount`, and `settlement_evidence`:
 `unattested` (the full authorization, counted for a caller that is not the claiming service),

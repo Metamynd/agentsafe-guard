@@ -258,12 +258,18 @@ could neither settle below the hold nor release one after an upstream failure. N
   logged, spread or `JSON.stringify`-ed verdict does not carry the token to the calling agent —
   the one party that must not have it. Keep it server-side.
 - New guard methods, all best-effort and non-throwing (they return `{ ok, reasonCode }`):
-  `captureAuthorization({ authorizationId, claimToken, amountCharged, bookingRef?, settlementTxHash? })`,
+  `captureAuthorization({ authorizationId, claimToken, amountCharged, bookingRef?, settlementTxHash?, payTo? })`,
   `releaseAuthorization({ authorizationId, claimToken, reason? })`, and
   `markAuthorizationUnknown({ authorizationId, reason? })`.
   **0.11.4** — a successful call also spreads the issuer's response onto the top level of the returned object (same
   convention `lookupOutcome` already used): `result.settlementEvidence`, `result.amountCharged`, `result.authorizedAmount`
   are readable directly, not only via `result.data` (which is unchanged and still there).
+  **0.12.2** — `payTo` (a Hedera account id or an EVM address): the account this service paid. Pass it whenever you
+  settle **below** the authorized amount. If the owner lists that merchant's accounts (dashboard → Trusted
+  Counterparties → Merchant payee accounts, MAGP §8.7.14) a lowered capture without a listed `payTo` is refused
+  `PAYEE_NOT_REGISTERED`, and the settlement observer only counts a credit to the account you name. Since backend
+  v1.68.2 a refused release (the owner forced the hold into reconciliation, or a claim landed first) is an HTTP 409;
+  the returned `{ ok: false, reasonCode }` is the same as before.
 - `guardIncomingTool(action, handler, { settle: true })` settles a handler that returns (at the
   authorized amount) and parks one that throws as **UNKNOWN** — it never *releases* on a throw, because a
   throw does not prove nothing was executed. Off by default: an existing embed is unchanged.

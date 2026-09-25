@@ -156,6 +156,27 @@ test('markAuthorizationUnknown relays an anonymous claim\'s token: the issuer no
   } finally { m.restore(); }
 });
 
+test('captureAuthorization sends payTo when given (a lowered settlement needs it for the payee directory, MAGP 8.7.14), and nothing otherwise', async () => {
+  const m = mockIssuer(router());
+  try {
+    await mk().captureAuthorization({ authorizationId: 'auth-1', claimToken: TOKEN, amountCharged: 200, payTo: '0.0.5005' });
+    assert.equal(m.calls[0].body.payTo, '0.0.5005');
+    assert.equal(m.calls[0].body.amountCharged, 200);
+    await mk().captureAuthorization({ authorizationId: 'auth-1', claimToken: TOKEN, amountCharged: 250 });
+    assert.equal('payTo' in m.calls[1].body, false, 'no payTo key when none was given');
+  } finally { m.restore(); }
+});
+
+test('a void the issuer REFUSES with 409 (hold under reconciliation) reads as not applied, with the bare reason code', async () => {
+  const m = mockIssuer(router({ void: { status: 409, body: { success: false, message: 'HOLD_UNDER_RECONCILIATION', data: { voided: false, reasonCode: 'HOLD_UNDER_RECONCILIATION' } } } }));
+  try {
+    const r = await mk().releaseAuthorization({ authorizationId: 'auth-1', claimToken: TOKEN, reason: 'x' });
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 409);
+    assert.equal(r.reasonCode, 'HOLD_UNDER_RECONCILIATION');
+  } finally { m.restore(); }
+});
+
 test('the settlement helpers never throw: refusals, void-not-applied, and an unreachable issuer are reported', async () => {
   let m = mockIssuer(router({ capture: { status: 400, body: { success: false, message: 'amountCharged (0) is below the claimed hold (250)' } }, void: { status: 200, body: { success: false, message: 'Not voided (NOT_HELD)', data: { voided: false, reasonCode: 'NOT_HELD' } } } }));
   try {

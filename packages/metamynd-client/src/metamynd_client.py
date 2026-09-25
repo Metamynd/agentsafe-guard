@@ -132,7 +132,7 @@ __all__ = [
     "GovernanceBlocked",
 ]
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1087,6 +1087,7 @@ class MetaMyndClient:
         amount_charged: Number,
         booking_ref: Optional[str] = None,
         settlement_tx_hash: Optional[str] = None,
+        pay_to: Optional[str] = None,
     ) -> SettlementResult:
         """Report what was actually charged, committing the hold.
 
@@ -1094,12 +1095,19 @@ class MetaMyndClient:
         an agent's capture at the FULL authorized amount, and refuses a LOWER amount once a
         service has claimed the hold (it would let an agent take its budget back after the
         purchase happened). A refusal comes back as `ok=False` with the gate's `message`.
+
+        `pay_to` is the account the service paid (a Hedera account id or an EVM address). A
+        settlement BELOW the authorization needs it when the owner lists the merchant's accounts
+        (MAGP 8.7.14, refused `PAYEE_NOT_REGISTERED` otherwise), and the settlement observer only
+        counts a credit to that account.
         """
         body: dict[str, Any] = {"amountCharged": amount_charged}
         if booking_ref:
             body["bookingRef"] = booking_ref
         if settlement_tx_hash:
             body["settlementTxHash"] = settlement_tx_hash
+        if pay_to:
+            body["payTo"] = pay_to
         return self._settlement(f"/policy/mandate/authorize/{urllib.parse.quote(authorization_id, safe='')}/capture", body)
 
     def void(self, authorization_id: str, reason: Optional[str] = None) -> SettlementResult:
