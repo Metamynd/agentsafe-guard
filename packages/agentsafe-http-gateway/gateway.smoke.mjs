@@ -129,6 +129,14 @@ async function main() {
     await call(gw);
     ok(seen[0].args === 1, 'a route with no trustedContext calls the guard exactly as before (one argument) — no behaviour change for existing routes');
 
+    // route.x402: a route whose upstream is paid by x402 marks its claims x402-bound; only literal true does.
+    const x402Seen = [];
+    const x402Spy = { verifyRequest: async (r, opts) => { x402Seen.push(opts); return { decision: 'allow', reasonCode: 'OK' }; } };
+    await call(createHttpGateway({ guard: x402Spy, routes: wireRoute({ x402: true }), forward }));
+    await call(createHttpGateway({ guard: x402Spy, routes: wireRoute({ x402: 'yes' }), forward }));
+    ok(x402Seen[0]?.x402 === true, 'route.x402: true reaches the guard as verifyRequest(…, { x402: true })');
+    ok(x402Seen[1] === undefined, 'route.x402 other than literal true passes nothing (the guard is called exactly as before)');
+
     // an AGENT cannot supply it: nothing in the request the agent controls is read as trusted context
     seen.length = 0;
     gw = createHttpGateway({ guard: spyGuard, routes: wireRoute({}), forward });

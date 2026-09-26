@@ -102,7 +102,11 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.6.0 brings buildAuthMessage's `resource` field and buildLocalDecisionMessage into this
 // package's own bundled policy-core.mjs (alongside the guard's own 0.10.0) — no scaffolded
 // template code changes, but the floor must still cover the real current version.
-const MCP_GUARD_VERSION = '^0.12.0';
+// 0.13.0: a daemon-held service key (keyProvider: 'daemon') now signs claims and settlements as the gateway's
+// DID instead of claiming anonymously — refused on every mainnet hold before. No template change.
+// 0.14.0: the claim can declare an x402 payment (x402: true) so the issuer observes lowered settlements. No template
+// change (the scaffolded gateways don't pay by x402), but the floor must cover the real current version.
+const MCP_GUARD_VERSION = '^0.14.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -114,7 +118,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.5.0 adds the OPTIONAL Credential Vault `resolveCredential` hook on createHttpGateway (Module
 // G) — additive and backward-compatible (every existing consumer sees zero behavior change), but
 // the floor must still cover the real current version per this repo's own package-version check.
-const GATEWAY_VERSION = '^0.11.0';
+// 0.12.0: per-route `x402: true` declares an x402 payment on the claim. No template change.
+const GATEWAY_VERSION = '^0.12.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 

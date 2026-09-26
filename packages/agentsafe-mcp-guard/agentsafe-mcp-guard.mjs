@@ -160,16 +160,31 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * An authenticated claim records this Service's DID on the effect chain; from then on only this identity
    * may settle the hold below its amount, void it, or mark it unknown, and no bearer token is issued.
    */
+  //
+  // A keyProvider signs either the built message (`signServiceMessage`, a key held in this process) or the structured
+  // call (`signServiceCall`, the agentsafe-signer daemon >= 0.16.0, which rebuilds the message itself and never signs
+  // bytes handed to it). A provider that CAN sign but fails (daemon down, identity mismatch) throws SERVICE_SIGNING_FAILED
+  // rather than quietly sending the call anonymously: for a mainnet hold, or an owner with registered counterparties, an
+  // anonymous call is refused anyway (COUNTERPARTY_AUTH_REQUIRED), and the real cause would be hidden behind it.
   async function serviceAuthHeaders(action, authorizationId, fields = []) {
     if (!serviceDid || !/^did:(key|hedera):/.test(serviceDid)) return {};
-    if (!keyProvider || typeof keyProvider.signServiceMessage !== 'function') return {};
+    const canSignCall = typeof keyProvider?.signServiceCall === 'function';
+    if (!keyProvider || (!canSignCall && typeof keyProvider.signServiceMessage !== 'function')) return {};
     const escape = (v) => String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
-    const message = ['MAGP-SERVICE-v1', action, authorizationId, ...fields, nonce, issuedAt].map(escape).join('|');
-    const signature = await keyProvider.signServiceMessage(message);
+    let signature;
+    try {
+      signature = canSignCall
+        ? await keyProvider.signServiceCall({ serviceDid, action, authorizationId, fields: fields.map(String), nonce, issuedAt })
+        : await keyProvider.signServiceMessage(['MAGP-SERVICE-v1', action, authorizationId, ...fields, nonce, issuedAt].map(escape).join('|'));
+    } catch (err) {
+      throw Object.assign(new Error(`could not sign the ${action} call as ${serviceDid}: ${err?.message ?? err}`), { code: 'SERVICE_SIGNING_FAILED', cause: err });
+    }
     return { 'x-magp-service-did': serviceDid, 'x-magp-service-nonce': nonce, 'x-magp-service-issued-at': issuedAt, 'x-magp-service-signature': signature };
   }
+  /** The settlement helpers never throw: a signing failure is reported like any other refusal. */
+  const signingFailed = (err) => ({ ok: false, reasonCode: 'SERVICE_SIGNING_FAILED', error: String(err?.message ?? err) });
 
   /**
    * Claim the authorization, retrying ONCE when the answer is lost.
@@ -186,13 +201,19 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * EFFECT_TRANSITION_CONTENDED). A definite answer, including AUTHORIZATION_ALREADY_CLAIMED, is final and is
    * returned as it is.
    */
-  async function claimAuthorization({ authorizationId, payloadDigest } = {}) {
+  //
+  // `x402: true` declares that this Service settles the hold by an x402 payment (MAGP §8.7.9 / §11). The issuer then records
+  // the hold as x402-bound, and only then does it ask an independent observer to confirm a settlement BELOW the authorization
+  // (the Hedera mirror node, from the settlementTxHash + payTo the capture states) or a release after a claim. It only ever
+  // widens the checks that apply, so it is a plain body flag. Unset (the default), the claim request is exactly as before.
+  async function claimAuthorization({ authorizationId, payloadDigest, x402 = false } = {}) {
     if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!base) throw new Error('issuerApi is required to claim an authorization');
     if (payloadDigest !== undefined && !isPayloadDigest(payloadDigest)) return { claimed: false, reasonCode: 'PAYLOAD_DIGEST_INVALID' };
     const idempotencyKey = crypto.randomUUID().replace(/-/g, '');
     const attempts = 2;
     let lastError;
+    let lastCode;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
         // Re-signed per attempt (a fresh nonce; the signature also covers the key, so it cannot be swapped or stripped).
@@ -202,7 +223,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         const auth = await serviceAuthHeaders('claim', authorizationId, [idempotencyKey, ...(payloadDigest ? [claimDigestField(payloadDigest)] : [])]);
         const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, {
           method: 'POST',
-          headers: { ...auth, 'idempotency-key': idempotencyKey, ...(payloadDigest ? { [PAYLOAD_DIGEST_HEADER]: payloadDigest } : {}) },
+          headers: { ...auth, 'idempotency-key': idempotencyKey, ...(payloadDigest ? { [PAYLOAD_DIGEST_HEADER]: payloadDigest } : {}), ...(x402 === true ? { 'Content-Type': 'application/json' } : {}) },
+          ...(x402 === true ? { body: JSON.stringify({ x402: true }) } : {}),
         });
         const body = await res.json().catch(() => null);
         // Ambiguous, so worth one retry with the same key: a 5xx, or EFFECT_TRANSITION_CONTENDED — the issuer's
@@ -230,10 +252,15 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         };
       } catch (err) {
         lastError = String(err?.message ?? err);
-        if (attempt < attempts) { await sleep(150); continue; }
+        lastCode = err?.code === 'SERVICE_SIGNING_FAILED' ? 'SERVICE_SIGNING_FAILED' : undefined;
+        // A signing failure is local and deterministic (the signer is down or bound to another identity), not the
+        // ambiguous network failure this retry is for — so stop at once rather than wait and fail again.
+        if (lastCode !== 'SERVICE_SIGNING_FAILED' && attempt < attempts) { await sleep(150); continue; }
+        break;
       }
     }
-    return { claimed: false, reasonCode: 'AUTHORIZATION_CLAIM_UNREACHABLE', error: lastError };
+    // Nothing was claimed either way — but a signing failure is a local fault (the signer), not the issuer being unreachable.
+    return { claimed: false, reasonCode: lastCode ?? 'AUTHORIZATION_CLAIM_UNREACHABLE', error: lastError };
   }
 
   /**
@@ -318,7 +345,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!Number.isFinite(Number(amountCharged))) return { ok: false, reasonCode: 'AMOUNT_CHARGED_REQUIRED' };
     const amount = Number(amountCharged);
-    const auth = await serviceAuthHeaders('capture', authorizationId, [String(amount), bookingRef ?? '', settlementTxHash ?? '']);
+    let auth;
+    try { auth = await serviceAuthHeaders('capture', authorizationId, [String(amount), bookingRef ?? '', settlementTxHash ?? '']); } catch (err) { return signingFailed(err); }
     return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/capture`, { amountCharged: amount, bookingRef, settlementTxHash, claimToken, ...(payTo ? { payTo: String(payTo) } : {}) }, auth);
   }
 
@@ -331,7 +359,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    */
   async function releaseAuthorization({ authorizationId, claimToken, reason } = {}) {
     if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
-    const auth = await serviceAuthHeaders('void', authorizationId, [reason ?? '']);
+    let auth;
+    try { auth = await serviceAuthHeaders('void', authorizationId, [reason ?? '']); } catch (err) { return signingFailed(err); }
     return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/void`, { reason, claimToken }, auth);
   }
 
@@ -344,7 +373,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   // claimer — it is no longer enough to know the authorization id. A signed claim needs none: the call is signed instead.
   async function markAuthorizationUnknown({ authorizationId, reason, claimToken } = {}) {
     if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
-    const auth = await serviceAuthHeaders('unknown', authorizationId, [reason ?? '']);
+    let auth;
+    try { auth = await serviceAuthHeaders('unknown', authorizationId, [reason ?? '']); } catch (err) { return signingFailed(err); }
     return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/unknown`, { reason, ...(claimToken ? { claimToken } : {}) }, auth);
   }
 
@@ -432,7 +462,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    *   but not lowered. Without it the rules see the agent's own claim, as before.
    * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
-  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding } = {}) {
+  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, x402 = false } = {}) {
     try {
       assertTrustedContext(trustedContext); // a broken deriver is a refused request (GUARD_ERROR), never a quiet downgrade
       const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature } = signed;
@@ -527,7 +557,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         // The claim states the digest of what THIS Service is about to execute — only when the agent bound one (a digest for
         // an unbound authorization is refused by the issuer: this Service would be asserting a binding that does not exist).
         const claimDigest = payloadDigest !== undefined && signedDigest !== undefined ? payloadDigest : undefined;
-        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest });
+        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true });
         claimToken = claim.claimToken; claimAuthenticated = claim.counterpartyAuthenticated === true;
         if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
         // The grant states the digest the hold is bound to (null = unbound), so it must be the one this claim stated. The issuer
@@ -570,7 +600,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * agent's signed request must be passed as the first argument. Throws
    * GovernanceBlocked on any non-allow decision.
    */
-  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, requirePayloadBinding = false } = {}) {
+  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, requirePayloadBinding = false, x402 = false } = {}) {
     // `requirePayloadBinding` only checks that the AGENT bound something; the comparison with what this tool executes needs a
     // digest of it. Without `bindPayload` there is nothing to compare, so the option would give assurance it does not provide.
     if (requirePayloadBinding && !bindPayload) {
@@ -619,7 +649,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // Configured but yielding nothing usable (a function that returned undefined) is a broken deriver, not "no
       // trusted context": refuse rather than fall back to the agent's word. `undefined` option = not configured.
       if (trustedContext !== undefined) assertTrustedContext(derived === undefined ? null : derived, `"${action}"`);
-      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding });
+      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, x402 });
       // allow/observe both PERMIT the tool call; observe is permit-but-flag (SAFR §11).
       if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`MCP guard ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);

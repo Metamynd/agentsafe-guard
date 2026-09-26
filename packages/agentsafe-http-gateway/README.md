@@ -274,6 +274,11 @@ is not JSON, or has none, for a request that bound a payload is refused (`PAYLOA
 or per route) also refuses an authorization the agent did not bind (`PAYLOAD_BINDING_REQUIRED`); `route.payload(req)` chooses what is
 digested when the body alone is not the whole call (path parameters, say). Off by default; requires `agentsafe-mcp-guard` 0.11.0.
 
+**0.12.0 — a route paid by x402 says so (`route.x402: true`).** Set `x402: true` on a route whose upstream is paid by
+an x402 payment and the gateway claims its holds x402-bound (via agentsafe-mcp-guard 0.14.0+). The issuer then has an
+independent observer confirm any settlement below the authorization, or a release after the claim. Routes without it
+call the guard exactly as before.
+
 **0.10.0 — a route can state its own risk (`route.trustedContext`).** The signed request's `riskLevel` is the
 agent's word; a route knows what its own action is. Set `route.trustedContext` to an object, or to
 `(signedRequest, req) => object`, and the gateway hands it to the guard as context it *derived* — most usefully
