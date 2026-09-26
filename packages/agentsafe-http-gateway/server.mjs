@@ -106,22 +106,22 @@ function readBody(req) {
 function buildResolveCredential() {
   if (!CREDENTIAL_VAULT_URL) return undefined;
   if (!CREDENTIAL_VAULT_GATEWAY_TOKEN || !CREDENTIAL_VAULT_CONNECTOR_ID) {
-    console.warn(
-      '[gateway] CREDENTIAL_VAULT_URL is set but CREDENTIAL_VAULT_GATEWAY_TOKEN / ' +
-      'CREDENTIAL_VAULT_CONNECTOR_ID are not both set — the credential vault hook is ' +
-      'DISABLED, calls will forward with no injected credential.',
+    // A half-configured vault is a misconfiguration, not "vault off": refuse to start rather than
+    // quietly forward every call with no credential.
+    throw new Error(
+      'CREDENTIAL_VAULT_URL is set but CREDENTIAL_VAULT_GATEWAY_TOKEN / CREDENTIAL_VAULT_CONNECTOR_ID ' +
+      'are not both set. Set both, or unset CREDENTIAL_VAULT_URL to run without the Credential Vault.',
     );
-    return undefined;
   }
   return async function resolveCredential({ request }) {
     const authorizationId = request?.authorizationId;
-    if (!authorizationId) return null; // no claimed authorization to resolve against
+    if (!authorizationId) return null; // no claimed authorization to resolve against — the gateway refuses the call
     const res = await fetch(`${CREDENTIAL_VAULT_URL}/resolve`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-credential-vault-token': CREDENTIAL_VAULT_GATEWAY_TOKEN },
       body: JSON.stringify({ connectorId: CREDENTIAL_VAULT_CONNECTOR_ID, authorizationId }),
     });
-    if (!res.ok) return null; // vault refused (or is unreachable) — forward without the header
+    if (!res.ok) return null; // vault refused (or is unreachable) — the gateway refuses the call (CREDENTIAL_UNAVAILABLE)
     const body = await res.json().catch(() => null);
     const value = body?.data?.value;
     if (!value) return null;

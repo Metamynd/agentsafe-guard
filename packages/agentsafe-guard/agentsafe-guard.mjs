@@ -917,9 +917,10 @@ export function createGuard(opts = {}) {
   /**
    * Effect-safety runtime (E2): report the external-effect lifecycle so an AMBIGUOUS
    * connector outcome never becomes a blind capture/void. Call effectDispatching() just
-   * before the side-effecting call, effectDispatched() when the connector accepts, and —
-   * critically — effectUnknown() when the response is lost/timed out (instead of guessing).
+   * before the side-effecting call and effectDispatched() when the connector accepts.
    * Once UNKNOWN, capture/void are refused by the gate until the effect is reconciled.
+   *
+   * Reporting UNKNOWN is NOT the agent's call: see effectUnknown() below (deprecated).
    */
   async function _effectPost(authorizationId, kind, payload = {}) {
     try {
@@ -934,7 +935,33 @@ export function createGuard(opts = {}) {
   }
   const effectDispatching = (authorizationId) => _effectPost(authorizationId, 'dispatching');
   const effectDispatched = (authorizationId, remoteRef) => _effectPost(authorizationId, 'dispatched', { remoteRef });
-  const effectUnknown = (authorizationId, reason) => _effectPost(authorizationId, 'unknown', { reason });
+  /**
+   * @deprecated since 0.15.4 — always rejects, without calling the gate. Kept only so existing imports do not break.
+   *
+   * Since 2026-09-24 `POST /policy/mandate/authorize/:authId/effect/unknown` accepts only the party that CLAIMED the hold
+   * (its signature, or an anonymous claim's token), the hold's owner, or an admin. The agent is none of those, and this
+   * method sent no claimer credential, so the gate refused it every time (403 COUNTERPARTY_MISMATCH) and the effect was
+   * never marked. Report an ambiguous outcome from the claiming SERVICE instead —
+   * `@metamynd/agentsafe-mcp-guard`'s `markAuthorizationUnknown({ authorizationId, reason, claimToken })` (signed as its
+   * serviceDid, or with the claimToken its claim returned) — or have the hold's owner (an owner-authenticated call) do it. An agent
+   * that only needs to know what happened can poll `effectStatus(authorizationId)`.
+   *
+   * @param {string} authorizationId
+   * @param {string} [reason]
+   * @returns {Promise<never>} rejects with an Error named `EffectUnknownNotSupported`, `code: 'EFFECT_UNKNOWN_AGENT_UNSUPPORTED'`
+   */
+  async function effectUnknown(authorizationId, reason) {
+    const e = new Error(
+      'guard.effectUnknown() is deprecated and no longer calls the gate: only the party that claimed the hold ' +
+      '(the executing service), the hold\'s owner or an admin may mark an effect UNKNOWN, and an agent is none of them. ' +
+      'Report it from the service with @metamynd/agentsafe-mcp-guard markAuthorizationUnknown({ authorizationId, reason, claimToken }) ' +
+      '(signed as its serviceDid, or with its claimToken), or ask the owner. Poll guard.effectStatus(authorizationId) to follow the outcome.',
+    );
+    e.name = 'EffectUnknownNotSupported';
+    e.code = 'EFFECT_UNKNOWN_AGENT_UNSUPPORTED';
+    e.authorizationId = authorizationId ?? null;
+    throw e;
+  }
   async function effectStatus(authorizationId) {
     try {
       const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect`);

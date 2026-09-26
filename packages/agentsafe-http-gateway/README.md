@@ -364,6 +364,61 @@ not the tool body.
 keys: list them in `allowedFields`, or set `allowedFields: null`). Reproduced before the change: a
 request signed for $250 to an approved merchant, carrying `surcharge: 9999`, reached the upstream.
 
+## Credential Vault (`resolveCredential`) — fails CLOSED since 0.13.0
+
+The gateway can inject an upstream credential that the **agent never sees**, released just in time
+by MetaMynd's Credential Vault (or any source you choose). Pass `resolveCredential` to
+`createHttpGateway`:
+
+```js
+const handle = createHttpGateway({
+  guard, routes, forward,
+  // Called ONLY on a permit (allow/observe), right before forward(). Return the header to add.
+  resolveCredential: async ({ request, route, decision }) => {
+    const value = await myVault.release({ authorizationId: request.authorizationId });
+    return value ? { header: 'Authorization', value: `Bearer ${value}` } : null;
+  },
+});
+```
+
+| Argument | What it is |
+|---|---|
+| `request` | the signed MAGP request (with the route's pinned `action`); `request.authorizationId` is the hold the agent claims to execute |
+| `route` | the matched route config |
+| `decision` | the guard's permit verdict |
+
+The header is added to a **copy** of the forwarded headers; the `req` you passed in is never mutated.
+A denied call never reaches the hook. The hook is not called for a route with `credential: false` (a
+route that needs no credential), and nothing changes when `resolveCredential` is omitted.
+
+**If no credential is released, the call is not forwarded.** When the hook throws, resolves `null` /
+`undefined` (the vault refused: no active Action Passport, no credential for the connector, vault
+unreachable), or resolves anything other than a non-empty string `header` and `value`, the caller gets
+`502 { decision: 'block', reasonCode: 'CREDENTIAL_UNAVAILABLE' }`, the upstream is never called, and a
+hold the request claimed is **released** (nothing was sent, so nothing executed; skipped with
+`settle: false`). The vault's own error is logged, not returned to the caller.
+
+`server.mjs` builds this hook from environment variables:
+
+| Variable | Meaning |
+|---|---|
+| `CREDENTIAL_VAULT_URL` | the vault's base URL (e.g. `https://metamynd.ai/api/v1/credential-vault`). Unset = no hook, no vault |
+| `CREDENTIAL_VAULT_GATEWAY_TOKEN` | the gateway token this process presents (`x-credential-vault-token`). The agent never holds it |
+| `CREDENTIAL_VAULT_CONNECTOR_ID` | which stored connector credential to release |
+| `CREDENTIAL_VAULT_HEADER_NAME` | the header to inject (default `Authorization`) |
+
+It calls `POST {CREDENTIAL_VAULT_URL}/resolve` with `{ connectorId, authorizationId }`. The vault works
+out the tenant itself from the Action Passport bound to that authorization, so one gateway can serve
+many tenants and never sends an owner id. A request with no `authorizationId` (no claimed hold) gets no
+credential and is refused. Setting `CREDENTIAL_VAULT_URL` without both the token and the connector id is
+a startup error (it used to disable the hook with a warning).
+
+**0.13.0 — a refused credential no longer reaches the upstream (breaking).** Before, a `resolveCredential`
+that threw or resolved `null` was logged and the call was forwarded **without** a credential, which was
+only safe if every upstream rejected an unauthenticated call. Now it is `502 CREDENTIAL_UNAVAILABLE` and
+the claimed hold is released. Mark routes that need no credential with `credential: false`. Raised the
+`agentsafe-mcp-guard` floor to `^0.15.0`.
+
 ## Embed the core
 
 ```js

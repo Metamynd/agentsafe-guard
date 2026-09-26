@@ -198,10 +198,14 @@ that merchant's accounts (MAGP 8.7.14), a lowered capture without a listed `pay_
 (kept after settlement — `None` means unknown, not zero), `settled_amount`, and `settlement_evidence`:
 `unattested` (the full authorization, counted for a caller that is not the claiming service),
 `unclaimed_lowered` (released below the authorization before anyone claimed it),
-`counterparty_attested` (the claiming service said so), `independently_confirmed` (the payment facilitator
-reported the same amount), `operator_resolved`, or `reconciled_at_authorized`. Where a facilitator is
-configured, a service settling *below* the authorization must be confirmed by it — an unreachable or
-silent facilitator refuses the lower figure rather than believing it (the service can still settle in full).
+`counterparty_attested` (the claiming service said so), `independently_confirmed` (an independent observer
+of the payment saw this amount — in practice the Hedera mirror node, for an x402-bound hold), `operator_resolved`,
+or `reconciled_at_authorized`. On an **x402-bound** hold, a service settling *below* the authorization must
+back the lower figure with the transaction id and the account paid (`pay_to`), and the mirror node must show
+that account credited with that amount; the x402 facilitator probe keeps no settlement record, so it can never
+confirm a figure on its own. Anything the observer cannot confirm refuses the lower figure rather than
+believing it (the service can still settle in full). A lowered settlement on a hold that is not x402-bound is
+not probed and is recorded as `counterparty_attested`.
 
 **Retry only when it is safe.** `Outcome` carries two flags: `nothing_executed` (nothing has run
 *so far*) and `retry_safe` (nothing can run *later* either — only `expired` and `not_executed`).

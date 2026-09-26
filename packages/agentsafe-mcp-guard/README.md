@@ -280,7 +280,12 @@ could neither settle below the hold nor release one after an upstream failure. N
 - New guard methods, all best-effort and non-throwing (they return `{ ok, reasonCode }`):
   `captureAuthorization({ authorizationId, claimToken, amountCharged, bookingRef?, settlementTxHash?, payTo? })`,
   `releaseAuthorization({ authorizationId, claimToken, reason? })`, and
-  `markAuthorizationUnknown({ authorizationId, reason? })`.
+  `markAuthorizationUnknown({ authorizationId, reason?, claimToken? })`. Since 2026-09-24 the issuer accepts
+  mark-unknown only from the claimer (or the hold's owner or an admin): a Service whose claim was **anonymous**
+  must pass that claim's `claimToken`; a Service that signed its claim (`serviceDid` + key) needs none — the call is
+  signed. Without either, it is refused `COUNTERPARTY_MISMATCH`. (The agent-side `effectUnknown()` in
+  `@metamynd/agentsafe-guard` is deprecated for this reason: the agent is not the claimer.)
+  **0.15.0** — `refundAuthorization({ authorizationId, amount?, reason?, claimToken? })`, see [Refunds](#refunds-refundauthorization--since-0150).
   **0.11.4** — a successful call also spreads the issuer's response onto the top level of the returned object (same
   convention `lookupOutcome` already used): `result.settlementEvidence`, `result.amountCharged`, `result.authorizedAmount`
   are readable directly, not only via `result.data` (which is unchanged and still there).
@@ -297,6 +302,52 @@ could neither settle below the hold nor release one after an upstream failure. N
   the upstream cleanly refused; use `markAuthorizationUnknown` for a timeout, a 5xx or a dropped
   connection, which keeps the spend committed and hands it to reconciliation. Failing to settle can only
   over-count spend, never under-count it.
+
+### Refunds (`refundAuthorization`) — since 0.15.0
+
+When you give money back for a hold you already **captured** (a cancelled booking, a returned item), record it
+so the mandate's cumulative-spend cap stops counting it:
+
+```js
+await guard.refundAuthorization({ authorizationId, amount: 50, reason: 'customer-cancelled' }); // partial
+await guard.refundAuthorization({ authorizationId });                                           // everything still captured
+// → { ok: true, refundAmount, remainingCaptured, reasonCode: 'REFUNDED' }  or  { ok: false, status?, reasonCode }
+```
+
+It calls `POST /policy/mandate/authorize/:id/refund` and is **record-only**: MetaMynd moves no money, so returning
+the funds stays your (or your facilitator's) job, exactly as the original charge was. Only a captured hold can be
+refunded, and never for more than remains captured. **Only the hold's claimer** may refund it (or the hold's owner or
+an admin, from their own session). A Service that signed its claim signs the refund as its `serviceDid` under the
+dedicated `refund` action, over `[amount ('' for a full refund), reason]`, so a release signature can never be replayed
+as a refund or the reverse. A Service whose claim was **anonymous** passes that claim's token:
+`refundAuthorization({ authorizationId, amount, reason, claimToken: decision.claimToken })`. Anyone else is refused
+`COUNTERPARTY_MISMATCH` (HTTP 403). This needs an issuer with the dedicated refund action; an older one checks a refund
+as a `void` and refuses the signature (401 `COUNTERPARTY_SIGNATURE_INVALID`). A daemon-held key needs
+`@metamynd/agentsafe-signer` 0.17.0. Best-effort and non-throwing, like the other settlement helpers.
+
+### Computing the payload digest yourself (`payloadDigestOf`) — exported since 0.15.0
+
+`guardIncomingTool(..., { bindPayload: true })` digests the tool's arguments for you. A Service that calls
+`verifyRequest` directly must state the digest of what it is about to execute, computed with the **same**
+canonicalisation the agent SDK and the issuer use. The helpers are exported from the package entry (and from
+`@metamynd/agentsafe-mcp-guard/payload-binding`):
+
+```js
+import { createMcpGuard, payloadDigestOf, toWireJson } from '@metamynd/agentsafe-mcp-guard';
+
+const wire = toWireJson(bookingRequest);          // the JSON value as it travels; execute THIS
+const verdict = await guard.verifyRequest(signed, { payloadDigest: payloadDigestOf(wire) });
+if (verdict.decision === 'allow' || verdict.decision === 'observe') await upstream.book(wire);
+```
+
+| Export | What it does |
+|---|---|
+| `payloadDigestOf(value)` | `"sha256:<64 hex>"` over the canonical JSON of `value`; throws `PayloadNotCanonicalizable` for a value JSON cannot carry exactly (NaN, a lone surrogate, a class instance, over 256 KiB or 32 levels) |
+| `toWireJson(value)` | `value` after a JSON round trip (applies `toJSON`, drops `undefined`), so what you digest is what you send |
+| `canonicalPayload(value)` | the canonical JSON text that is hashed |
+| `isPayloadDigest(s)` | whether `s` is a well-formed digest |
+| `PAYLOAD_DIGEST_HEADER` | `x-magp-payload-digest`, the header a claim carries it in |
+| `PayloadNotCanonicalizable` | the error class thrown above |
 
 ### Pin the policy key (`policyPublicKey`)
 

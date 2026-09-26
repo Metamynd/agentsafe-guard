@@ -394,11 +394,14 @@ function withHeader(headers, name, value) {
  * credential the AGENT never sees, resolved server-side from `request.authorizationId` (the
  * signed request's own claimed authorization — see agentsafe-mcp-guard's `requireAuthorization`
  * doc for where that field comes from). Omitted (the default) → today's exact behavior, zero
- * change for every existing consumer of this package. A `resolveCredential` failure is logged
- * and swallowed, NOT a reason to block the call: forwarding without the header just means the
- * upstream legitimately rejects the request for lack of auth, which is a safe, honest failure
- * mode, not a bypass — the credential release itself was already gated (by the vault, not by
- * this package) on a valid gateway token + a currently-active Action Passport.
+ * change for every existing consumer of this package. FAILS CLOSED (since 0.13.0): when the hook
+ * throws, resolves null/undefined (the vault refused), or resolves anything that is not a
+ * non-empty string `{header, value}`, the call is NOT forwarded — the caller gets
+ * `502 { decision: 'block', reasonCode: 'CREDENTIAL_UNAVAILABLE' }`, and a hold this request
+ * claimed is released (nothing was sent upstream, so nothing executed; skipped with
+ * `settle: false`). Earlier versions logged the failure and forwarded WITHOUT a credential,
+ * which relied on every upstream rejecting an unauthenticated call. A route that needs no
+ * credential sets `route.credential: false` and the hook is not called for it.
  *
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
@@ -444,6 +447,20 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       }
     } catch (err) {
       console.warn('[gateway] could not close the claimed hold (it stays committed to the cap):', err?.message ?? err);
+    }
+  }
+
+  /**
+   * Release the hold this request claimed when the gateway itself refused to forward it (the upstream was
+   * never called, so nothing can have executed). Same gating and best-effort posture as closeHold.
+   */
+  async function releaseUnexecuted(decision, reason) {
+    if (!settle || !decision?.authorizationId || !(decision.claimToken || decision.counterpartyAuthenticated)) return;
+    if (typeof guard.releaseAuthorization !== 'function') return;
+    try {
+      await guard.releaseAuthorization({ authorizationId: decision.authorizationId, claimToken: decision.claimToken, reason });
+    } catch (err) {
+      console.warn('[gateway] could not release the claimed hold (it stays committed to the cap):', err?.message ?? err);
     }
   }
 
@@ -595,15 +612,26 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     let forwardReq = { ...req, headers: withHeader(req.headers, 'idempotency-key', decision?.authorizationId) };
     // Trusted Execution Gateway hook (Module G): resolve an upstream credential the agent
     // never sees, and inject it into a CLONE of the outbound headers — never the original req.
-    if (typeof resolveCredential === 'function') {
+    // FAIL CLOSED: once a vault is configured, a call it did not release a credential for is never
+    // forwarded (it used to go upstream with no credential, which is only "safe" if every upstream
+    // rejects an unauthenticated call — an assumption this package cannot check). A route that
+    // genuinely needs no credential opts out with `route.credential: false`.
+    if (typeof resolveCredential === 'function' && route.credential !== false) {
+      let cred;
+      let failure;
       try {
-        const cred = await resolveCredential({ request, route, decision });
-        if (cred && cred.header && cred.value) {
-          forwardReq = { ...forwardReq, headers: { ...(forwardReq.headers ?? {}), [cred.header]: cred.value } };
-        }
+        cred = await resolveCredential({ request, route, decision });
       } catch (err) {
-        console.warn('[gateway] resolveCredential failed (forwarding without an injected credential):', err?.message ?? err);
+        failure = err;
       }
+      if (failure || !cred || typeof cred.header !== 'string' || !cred.header || typeof cred.value !== 'string' || !cred.value) {
+        console.warn(`[gateway] no credential released for "${route.method ?? '*'} ${route.path}" — refusing to forward:`, failure ? (failure?.message ?? failure) : 'the vault returned no credential');
+        // Nothing was sent upstream, so nothing executed: release the hold this request claimed (the
+        // budget returns), the same close-out closeHold applies to a status that guarantees non-execution.
+        await releaseUnexecuted(decision, 'CREDENTIAL_UNAVAILABLE');
+        return { status: 502, body: { decision: 'block', reasonCode: 'CREDENTIAL_UNAVAILABLE', action: route.action } };
+      }
+      forwardReq = { ...forwardReq, headers: { ...(forwardReq.headers ?? {}), [cred.header]: cred.value } };
     }
 
     let upstream;

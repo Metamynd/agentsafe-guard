@@ -19,6 +19,23 @@ import { verifyBundle } from './magp-policy.mjs';
 import { resolveKeyProvider } from './key-providers.mjs';
 import { PAYLOAD_DIGEST_HEADER, buildPayloadBindingMessage, claimDigestField, isPayloadDigest, payloadDigestOf, toWireJson } from './payload-binding.mjs';
 
+/**
+ * Payload binding helpers (spec 8.3.9), re-exported so a Service that calls `verifyRequest` directly can compute the digest
+ * it must state as `{ payloadDigest }` — the SAME canonicalisation the guard, the gate and the agent SDK use:
+ *
+ *   const digest = payloadDigestOf(toWireJson(whatThisServiceWillExecute));
+ *   const verdict = await guard.verifyRequest(signed, { payloadDigest: digest });
+ *
+ * `toWireJson(value)` → the JSON value as it would travel (drops `undefined`, applies `toJSON`); digest THAT, and execute that.
+ * `payloadDigestOf(value)` → `"sha256:<64 hex>"` over the RFC 8785-style canonical JSON; throws `PayloadNotCanonicalizable` for a
+ *   value JSON cannot carry exactly (NaN/Infinity, a lone surrogate, a non-plain object, > 256 KiB canonical, > 32 levels deep).
+ * `canonicalPayload(value)` → the canonical JSON text that is hashed.
+ * `isPayloadDigest(s)` → whether `s` is a well-formed digest string.
+ * `PAYLOAD_DIGEST_HEADER` → the header (`x-magp-payload-digest`) a claim carries the digest in.
+ * @typedef {`sha256:${string}`} PayloadDigest
+ */
+export { PAYLOAD_DIGEST_HEADER, PayloadNotCanonicalizable, canonicalPayload, isPayloadDigest, payloadDigestOf, toWireJson } from './payload-binding.mjs';
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -376,6 +393,31 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     let auth;
     try { auth = await serviceAuthHeaders('unknown', authorizationId, [reason ?? '']); } catch (err) { return signingFailed(err); }
     return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/unknown`, { reason, ...(claimToken ? { claimToken } : {}) }, auth);
+  }
+
+  /**
+   * Record a refund of an already-CAPTURED hold (`POST /policy/mandate/authorize/:id/refund`). RECORD-ONLY: MetaMynd moves
+   * no money — returning the funds is this Service's (or its facilitator's) job, exactly as the original charge was. What it
+   * does do is lower the amount the mandate's cumulative-spend cap counts, so the refunded budget is genuinely freed.
+   *
+   *   `amount` omitted → refund everything still captured. Only the hold's CLAIMER may refund it (or its owner / an admin,
+   *   from their own session): a Service that signed its claim signs this call under the dedicated `refund` action over
+   *   `[amount ('' for a full refund), reason ('' when absent)]` — never the `void` message, so neither signature can be
+   *   replayed as the other; a Service whose claim was ANONYMOUS passes that claim's `claimToken` instead. Anyone else is
+   *   refused `COUNTERPARTY_MISMATCH` (HTTP 403). Needs an issuer with the dedicated refund action (2026-09-26); an older
+   *   issuer checks a refund as a `void` and refuses this signature (401 COUNTERPARTY_SIGNATURE_INVALID).
+   *
+   * Best-effort and non-throwing, like the other settlement helpers: `{ ok: true, refundAmount, remainingCaptured }` on
+   * success, `{ ok: false, status?, reasonCode }` otherwise (e.g. `Only a captured (settled) authorization can be refunded`).
+   * @param {{ authorizationId: string, amount?: number, reason?: string, claimToken?: string }} p
+   */
+  async function refundAuthorization({ authorizationId, amount, reason, claimToken } = {}) {
+    if (!authorizationId) return { ok: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
+    if (amount !== undefined && !(Number.isFinite(Number(amount)) && Number(amount) > 0)) return { ok: false, reasonCode: 'REFUND_AMOUNT_INVALID' };
+    const amountField = amount === undefined ? '' : String(Number(amount));
+    let auth;
+    try { auth = await serviceAuthHeaders('refund', authorizationId, [amountField, reason ?? '']); } catch (err) { return signingFailed(err); }
+    return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/refund`, { ...(amount !== undefined ? { amount: Number(amount) } : {}), ...(reason !== undefined ? { reason } : {}), ...(claimToken ? { claimToken } : {}) }, auth);
   }
 
   async function loadBundle(agentDid) {
@@ -771,7 +813,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     return { settled: true, txHash: result.txHash, reasonCode: 'SETTLED' };
   }
 
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, serviceDid };
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, serviceDid };
 }
 
 /**

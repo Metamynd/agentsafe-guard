@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // create-metamynd-agent — scaffold a MetaMynd/AgentSafe-governed agent in one command.
 //
-// Logs a KYB-verified owner in, provisions the agent in ONE call
+// Logs the owner in (provisioning uses the owner's verified principal; the agent is always
+// Testnet — mainnet goes through the dashboard Launchpad), provisions the agent in ONE call
 // (POST /onboarding/agent → identity + mandate + starter SOP + enforced Standards),
 // writes the portable `agent.metamynd.json` and a runnable agent example, PLUS (by default)
 // a separate `gateway/` process — a second, independent guard that re-verifies every request
@@ -106,7 +107,9 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // DID instead of claiming anonymously — refused on every mainnet hold before. No template change.
 // 0.14.0: the claim can declare an x402 payment (x402: true) so the issuer observes lowered settlements. No template
 // change (the scaffolded gateways don't pay by x402), but the floor must cover the real current version.
-const MCP_GUARD_VERSION = '^0.14.0';
+// 0.15.0: payloadDigestOf/toWireJson exported and refundAuthorization (its own signed `refund` action). No template
+// change (the scaffolded gateways don't refund), but the floor must cover the real current version.
+const MCP_GUARD_VERSION = '^0.15.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -119,7 +122,9 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // G) — additive and backward-compatible (every existing consumer sees zero behavior change), but
 // the floor must still cover the real current version per this repo's own package-version check.
 // 0.12.0: per-route `x402: true` declares an x402 payment on the claim. No template change.
-const GATEWAY_VERSION = '^0.12.0';
+// 0.13.0: a configured resolveCredential that refuses now FAILS CLOSED (502 CREDENTIAL_UNAVAILABLE) instead of forwarding
+// without a credential. No template change (the scaffolded gateway does not use the Credential Vault).
+const GATEWAY_VERSION = '^0.13.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -224,11 +229,13 @@ ${c.b('Environment')}
 ${c.b('Network')}
   Every hosted agent this CLI provisions is a ${c.b('Testnet')} agent, whatever your verification status —
   there is deliberately no mainnet flag. To launch a ${c.b('Mainnet')} agent, use the Launchpad in the
-  dashboard (https://metamynd.ai/dashboard/launchpad): its Mainnet option is available once your
-  owner verification (KYC/KYB) is complete.
+  dashboard (https://metamynd.ai/dashboard/launchpad): its Mainnet option needs a mainnet-eligible
+  principal (verified by the identity provider, or reviewed by a person on the platform's team).
 
 ${c.b('What it does')}
-  1. Logs in as a KYB-verified owner       → owner access token
+  1. Logs in as the owner                   → owner access token
+     (provisioning uses your account's verified principal — KYC/KYB, or one the platform
+     auto-approves on a beta deployment; mainnet eligibility is NOT needed for Testnet)
   2. POST /onboarding/agent (one call)      → identity + mandate + SOP + Standards
   3. Writes agent.metamynd.json + index.mjs, PLUS (by default) a separate gateway/ process —
      the real enforcement boundary, not index.mjs's own guard.guardTool() call. --no-gateway
