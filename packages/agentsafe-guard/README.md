@@ -256,7 +256,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.6.4
+      - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard@v0.5.3
         with:
           config: ./agent.metamynd.json
           require: merchants,perTxn
@@ -265,7 +265,9 @@ jobs:
 ```
 
 Pinned to a released tag, the same way you'd pin any third-party action — not `@main`,
-which moves under you every time this repository resyncs. Inputs: `config` (default
+which moves under you every time this repository resyncs. The action's tag is a release tag of the
+public [`Metamynd/agentsafe-guard`](https://github.com/Metamynd/agentsafe-guard/tags) repository (latest `v0.5.3`),
+not the npm version of this package; the npm package the action runs is chosen by its `version` input. Inputs: `config` (default
 `./agent.metamynd.json`), `require`, `version` (the `@metamynd/agentsafe-guard` npm range
 to run, default `latest`), `working-directory`. Output: `ok` (`"true"`/`"false"`), if a
 later step needs to branch on the result.
@@ -478,6 +480,15 @@ const gatedBookFlight = guard.guardTool(
   unbound or mismatched 402 — pay via x402, then reconcile the hold with
   `await guard.capture(authorizationId, amountCharged, bookingRef, settlementTxHash)`. An
   uncaptured hold auto-voids at its expiry (`POST /policy/mandate/authorize/:id/void` to release early).
+- **An ambiguous outcome (a timeout, a lost response) is reported by the service, not the agent.**
+  `guard.effectUnknown()` is **deprecated since 0.15.4** and rejects immediately (`EffectUnknownNotSupported`,
+  `code: 'EFFECT_UNKNOWN_AGENT_UNSUPPORTED'`) without calling the gate. Since 2026-09-24 the gate accepts
+  `effect/unknown` only from the party that **claimed** the hold, the hold's owner, or an admin — and the agent is
+  none of them, so the call was always refused. The executing service reports it with
+  `@metamynd/agentsafe-mcp-guard`'s `markAuthorizationUnknown({ authorizationId, reason, claimToken })` (signed as its
+  `serviceDid`, or with the `claimToken` its claim returned), or the owner does. An agent that needs to follow the
+  outcome polls `guard.effectStatus(authorizationId)`. The export stays so existing imports keep working; remove the
+  call from your code.
 
 ## 4. Evaluate locally (no network)
 

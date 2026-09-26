@@ -436,6 +436,96 @@ test('lookupOutcome reads the public effect status and never signs or throws', a
   assert.equal((await mk().lookupOutcome({})).reasonCode, 'AUTHORIZATION_REQUIRED');
 });
 
+// --- refund: record-only reversal of a captured hold ---
+const refundPath = '/policy/mandate/authorize/a9/refund';
+
+test('refundAuthorization posts to /refund with the amount and reason, and surfaces the result at the top level', async () => {
+  const m = mockIssuer(() => ok({ authorizationId: 'a9', refunded: true, refundAmount: 50, remainingCaptured: 150, reasonCode: 'REFUNDED' }));
+  try {
+    const r = await mk().refundAuthorization({ authorizationId: 'a9', amount: 50, reason: 'customer-cancelled' });
+    assert.equal(r.ok, true);
+    assert.equal(r.refundAmount, 50);
+    assert.equal(r.remainingCaptured, 150);
+    assert.deepEqual(m.calls[0], { path: refundPath, method: 'POST', body: { amount: 50, reason: 'customer-cancelled' } });
+  } finally { m.restore(); }
+});
+
+test('refundAuthorization with no amount asks for a FULL refund (sends no amount field); an anonymous claimer passes its claimToken', async () => {
+  const m = mockIssuer(() => ok({ refunded: true, refundAmount: 200, remainingCaptured: 0 }));
+  try {
+    await mk().refundAuthorization({ authorizationId: 'a9' });
+    assert.deepEqual(m.calls[0].body, {});
+    await mk().refundAuthorization({ authorizationId: 'a9', amount: 5, claimToken: TOKEN });
+    assert.deepEqual(m.calls[1].body, { amount: 5, claimToken: TOKEN });
+    assert.ok(!('x-magp-service-did' in m.headers[1]), 'mk() has no key: anonymous, the token is the credential')
+  } finally { m.restore(); }
+});
+
+test('a signed Service signs its refund under the dedicated "refund" action over [amount, reason] — never as a void', async () => {
+  const m = mockIssuer(() => ok({ refunded: true }));
+  try {
+    await mkSigned().refundAuthorization({ authorizationId: 'a9', amount: 25, reason: 'partial|return' });
+    assert.ok(verifiesAs(m.headers[0], 'refund', 'a9', ['25', 'partial|return']), 'the refund signature verifies under the issuer\'s refund message');
+    assert.ok(!verifiesAs(m.headers[0], 'void', 'a9', ['partial|return']), 'it can never be replayed as a void');
+    assert.ok(!verifiesAs(m.headers[0], 'refund', 'a9', ['', 'partial|return']), 'nor as a FULL refund');
+    assert.equal(m.calls[0].body.claimToken, undefined, 'a signed claimer sends no token');
+  } finally { m.restore(); }
+  const m2 = mockIssuer(() => ok({ refunded: true }));
+  try {
+    await mkSigned().refundAuthorization({ authorizationId: 'a9' });
+    assert.ok(verifiesAs(m2.headers[0], 'refund', 'a9', ['', '']), 'a full refund with no reason signs two empty fields');
+  } finally { m2.restore(); }
+});
+
+test('refundAuthorization refuses bad input locally and reports issuer refusals without throwing', async () => {
+  const m = mockIssuer(() => ({ status: 400, body: { success: false, message: 'Only a captured (settled) authorization can be refunded' } }));
+  try {
+    const g = mk();
+    assert.equal((await g.refundAuthorization({})).reasonCode, 'AUTHORIZATION_REQUIRED');
+    for (const amount of [0, -5, 'abc', Number.NaN]) assert.equal((await g.refundAuthorization({ authorizationId: 'a9', amount })).reasonCode, 'REFUND_AMOUNT_INVALID', String(amount));
+    assert.equal(m.calls.length, 0, 'nothing invalid reaches the issuer');
+    const r = await g.refundAuthorization({ authorizationId: 'a9' });
+    assert.deepEqual(r, { ok: false, status: 400, reasonCode: 'Only a captured (settled) authorization can be refunded' });
+  } finally { m.restore(); }
+  const d = mockIssuer(() => 'DROP');
+  try { assert.equal((await mk().refundAuthorization({ authorizationId: 'a9' })).reasonCode, 'ISSUER_UNREACHABLE'); } finally { d.restore(); }
+  const failing = mockIssuer(() => ok({}));
+  try {
+    const g = createMcpGuard({ serviceDid: SVC_DID, keyProvider: { signHandshakeNonce: async () => '00', signServiceMessage: async () => { throw new Error('daemon down'); } }, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1' });
+    assert.equal((await g.refundAuthorization({ authorizationId: 'a9' })).reasonCode, 'SERVICE_SIGNING_FAILED');
+    assert.equal(failing.calls.length, 0, 'a signing failure never sends the call anonymously');
+  } finally { failing.restore(); }
+});
+
+// --- the payload-digest helper is exported, so a Service calling verifyRequest directly can state the digest ---
+test('the entry exports payloadDigestOf/toWireJson/etc., and a digest computed with them is what verifyRequest accepts', async () => {
+  const mod = await import('./agentsafe-mcp-guard.mjs');
+  for (const name of ['payloadDigestOf', 'toWireJson', 'canonicalPayload', 'isPayloadDigest']) assert.equal(typeof mod[name], 'function', name);
+  assert.equal(mod.PAYLOAD_DIGEST_HEADER, 'x-magp-payload-digest');
+  assert.equal(typeof mod.PayloadNotCanonicalizable, 'function');
+  const sub = await import('@metamynd/agentsafe-mcp-guard/payload-binding'); // package self-reference: exercises the exports map
+  assert.equal(sub.payloadDigestOf, mod.payloadDigestOf, 'the ./payload-binding subpath is the same module');
+  // Key order does not matter; the canonical form does.
+  assert.equal(mod.payloadDigestOf({ b: 1, a: [1, 'x'] }), mod.payloadDigestOf({ a: [1, 'x'], b: 1 }));
+  assert.ok(mod.isPayloadDigest(mod.payloadDigestOf({ a: 1 })));
+  assert.throws(() => mod.payloadDigestOf({ a: Number.NaN }), mod.PayloadNotCanonicalizable);
+  assert.deepEqual(mod.toWireJson({ a: undefined, b: 1 }), { b: 1 });
+
+  // End to end: an agent binds a payload; this Service digests what it will execute with the exported helper.
+  const { buildPayloadBindingMessage } = await import('./payload-binding.mjs');
+  const payload = { amount: 250, payee: 'acct-42' };
+  const payloadDigest = mod.payloadDigestOf(mod.toWireJson(payload));
+  const s = signedRequest();
+  s.payloadDigest = payloadDigest;
+  s.payloadSignature = agent.sign(buildPayloadBindingMessage({ agentDid: agent.did, action: 'flight-purchase', nonce: s.nonce, issuedAt: s.issuedAt, payloadDigest }));
+  const g = mk({ requireAuthorization: false });
+  const warn = console.warn; console.warn = () => {};
+  try {
+    assert.equal((await g.verifyRequest(s, { payloadDigest: mod.payloadDigestOf(mod.toWireJson(payload)) })).decision, 'allow', 'the matching digest is accepted');
+    assert.equal((await g.verifyRequest(s, { payloadDigest: mod.payloadDigestOf({ ...payload, payee: 'acct-666' }) })).reasonCode, 'PAYLOAD_NOT_BOUND', 'a different payload is refused');
+  } finally { console.warn = warn; }
+});
+
 let failed = 0;
 for (const [name, fn] of t) {
   try { await fn(); console.log('  ok   ' + name); }

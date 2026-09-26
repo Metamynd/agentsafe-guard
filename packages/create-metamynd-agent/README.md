@@ -10,11 +10,14 @@ default, a second `gateway/` process** built on
 The agent's own `guardTool()` call is a fast, local, client-side check; the gateway is the real
 enforcement boundary — see [Separate tool gateway](#separate-tool-gateway-default) below.
 
-> **Prerequisite:** an agent is always owned by a person/org with a **MetaMynd account**. Verification
-> is *reported*, not required, to get started: an unverified owner works on Testnet within the
-> free-tier limits, and verifying once in the dashboard (KYC/KYB) is what unlocks mainnet.
-> This CLI always provisions **Testnet** agents; a mainnet agent is launched from the dashboard's
-> **Launchpad** (`/dashboard/launchpad`) once you are verified.
+> **Prerequisite:** an agent is always owned by a person/org with a **MetaMynd account**. The hosted
+> flow provisions under your account's **verified principal** (KYC/KYB; on a beta deployment the
+> platform can auto-approve one on first use) — if there is none, provisioning stops with "complete
+> KYC/KYB first". That is all it needs: this CLI always provisions **Testnet** agents, so mainnet
+> eligibility is not required. A mainnet agent is launched from the dashboard's **Launchpad**
+> (`/dashboard/launchpad`) and needs a **mainnet-eligible** principal (verified by the identity
+> provider, or reviewed by a person on the platform's team). `--harness` and `--sandbox` need no
+> account or verification at all.
 
 ## Free local harness (no account, no network, `--harness`)
 
