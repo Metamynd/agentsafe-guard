@@ -267,7 +267,8 @@ class FakeGate:
     def _settle(self, verb: str, auth_id: str, body: Mapping[str, Any]) -> "tuple[int, Any]":
         h = self.holds.get(auth_id)
         if not h:
-            return 404, {"success": False, "message": "Authorization not found", "data": None}
+            flag = {"capture": "captured", "void": "voided"}.get(verb, "refunded")
+            return 404, {"success": False, "message": "AUTHORIZATION_NOT_FOUND", "data": {flag: False, "authorizationId": auth_id, "reasonCode": "AUTHORIZATION_NOT_FOUND", "detail": "AUTHORIZATION_NOT_FOUND: no authorization with this id"}}
         if verb == "capture":
             if float(body.get("amountCharged", -1)) != h["amount"]:
                 return 400, {"success": False, "message": "amountCharged is below the claimed hold", "data": None}
