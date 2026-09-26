@@ -93,6 +93,15 @@ class DaemonSignerConformance(unittest.TestCase):
         _public_key(self.daemon).verify(bytes.fromhex(signed.body["signature"]), message.encode("utf-8"))  # raises InvalidSignature on mismatch
         self.assertEqual(signed.body["agentDid"], self.daemon.agent_did)
 
+    def test_a_jurisdiction_signed_by_the_real_daemon_verifies_as_the_v2_message(self) -> None:
+        client = self._client()
+        signed = client.sign_request("flight-purchase", 250, merchant="skyward-air", jurisdiction="sg")
+        b = signed.body
+        self.assertEqual(b["jurisdiction"], "SG")
+        message = canonical_message(b["agentDid"], b["action"], b["amount"], b["currency"], b.get("merchant"), b["nonce"], b["issuedAt"], resource=b.get("resource"), jurisdiction=b["jurisdiction"])
+        self.assertTrue(message.endswith("|MAGP-AUTH-v2|SG"))
+        _public_key(self.daemon).verify(bytes.fromhex(b["signature"]), message.encode("utf-8"))  # raises InvalidSignature on mismatch
+
     def test_a_daemon_signed_request_does_not_verify_under_a_DIFFERENT_key_or_message(self) -> None:
         client = self._client()
         signed = client.sign_request("flight-purchase", 250, merchant="skyward-air")
@@ -178,10 +187,24 @@ class DaemonErrorMapping(unittest.TestCase):
 
     def test_sign_authorize_does_not_get_the_payload_specific_remap(self) -> None:
         signer = metamynd_client._DaemonSigner("unused-in-this-test")
-        signer._request = lambda op, fields: (_ for _ in ()).throw(DaemonError("DAEMON_UNKNOWN_OPERATION"))
+        signer._call = lambda op, fields: (_ for _ in ()).throw(DaemonError("DAEMON_UNKNOWN_OPERATION"))
         with self.assertRaises(DaemonError) as ctx:
             signer.sign_authorize({"agentDid": "d", "action": "a", "amount": 1, "currency": "USD", "nonce": "n", "issuedAt": "t"})
         self.assertEqual(ctx.exception.code, "DAEMON_UNKNOWN_OPERATION")
+
+    def test_a_daemon_that_does_not_echo_the_jurisdiction_is_refused(self) -> None:
+        """A daemon older than signer 0.18.0 ignores `jurisdiction` and signs v1 — the gate would refuse the request
+        SIGNATURE_INVALID. The client catches it first: a current daemon echoes the jurisdiction it signed."""
+        signer = metamynd_client._DaemonSigner("unused-in-this-test")
+        fields = {"agentDid": "d", "action": "a", "amount": 1, "currency": "USD", "nonce": "n", "issuedAt": "t", "jurisdiction": "SG"}
+        signer._call = lambda op, f: {"signature": "aa"}
+        with self.assertRaises(DaemonError) as ctx:
+            signer.sign_authorize(fields)
+        self.assertEqual(ctx.exception.code, "JURISDICTION_SIGNING_UNSUPPORTED")
+        signer._call = lambda op, f: {"signature": "aa", "jurisdiction": f.get("jurisdiction")}
+        self.assertEqual(signer.sign_authorize(fields), b"\xaa")
+        signer._call = lambda op, f: {"signature": "bb"}
+        self.assertEqual(signer.sign_authorize({k: v for k, v in fields.items() if k != "jurisdiction"}), b"\xbb", "no jurisdiction: no echo needed")
 
 
 if __name__ == "__main__":

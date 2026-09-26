@@ -325,7 +325,8 @@ with the default hosted flow (login + provision):
   never faked, still enforced.
 - **The generated README lists the request fields your rules read** (`consent`, `piiPresent`,
   `jurisdiction`, …). An allow-list, consent or PII rule does not fire when its field is absent, so
-  your application must supply it. These fields are asserted by the calling agent.
+  your application must supply it. These fields are asserted by the calling agent — except
+  `jurisdiction`, which is signed (see [Jurisdiction](#jurisdiction-signed-since-0130)).
 
 **Hosted specifics.** The default shape is still agent + `gateway/`. The gateway runs with
 `requireAuthorization: false` and a route with no value fields: the guard only seals a single-use
@@ -401,6 +402,20 @@ npx create-metamynd-agent --claim --watch
 polls until the owner approves, then scaffolds the project (the same default two-process shape as
 the full flow above — `--no-gateway`/`--gateway-port` work here too). With `--byok` the keypair is
 generated locally and control is proven on claim — MetaMynd never sees the private key.
+
+## Jurisdiction (signed, since 0.13.0)
+
+The scaffolded agents pass a request's `jurisdiction` (ISO 3166-1 alpha-2) as the guard's **signed** top-level field
+(MAGP §8.3.12), not as context: the generated `mapArgs` is `({ jurisdiction, ...context }) => ({ jurisdiction, context })`,
+and the gateway call signs it the same way. The gate (and the harness's local check) judges jurisdiction rules on the
+signed value only and ignores one in the context. Scaffolds pin `@metamynd/agentsafe-guard` ^0.16.0,
+`@metamynd/agentsafe-mcp-guard` ^0.16.0 and `@metamynd/agentsafe-http-gateway` ^0.14.0, which sign and verify it.
+
+- A value that is not two ASCII letters is refused before anything is sent (`MALFORMED_REQUEST`).
+- **A registered payee's country wins**: a signed value that differs is refused `JURISDICTION_MISMATCH`.
+- A jurisdiction rule with none signed is refused `JURISDICTION_REQUIRED`; a value off the mandate's list is
+  `JURISDICTION_NOT_ALLOWED`. The demo stages a jurisdiction rule with a user-assigned code (`ZZ`) off the list, and
+  stages nothing when no two-letter code is on every jurisdiction allow-list (no passing request can exist).
 
 ## Risk: say it, or have your owner set it
 

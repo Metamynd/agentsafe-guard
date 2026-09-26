@@ -38,6 +38,8 @@ export {
   type StandardDocument,
   type StandardRuleResult,
   type ValidationIssue,
+  documentEnforcesJurisdiction,
+  JURISDICTION_ATOM,
 } from './standards-rules.js';
 
 // Mandate (ODRL) evaluator + budget helpers
@@ -66,7 +68,7 @@ export type {
 
 // Composed evaluation + canonical message + context construction
 export { evaluate, type EvaluateInput, type RulePack } from './evaluate.js';
-export { buildAuthMessage, buildLegacyAuthMessageV1, type AuthMessageFields } from './canonical.js';
+export { buildAuthMessage, buildLegacyAuthMessageV1, AUTH_MESSAGE_V2_TAG, type AuthMessageFields } from './canonical.js';
 export { buildLocalDecisionMessage, type LocalDecisionMessageFields } from './canonical.js';
 export { buildCheckpointAnchorMessage, type CheckpointAnchorMessageFields } from './checkpoint-anchor.js';
 export { applySignedLast } from './context.js';

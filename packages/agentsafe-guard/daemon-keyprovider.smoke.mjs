@@ -40,6 +40,10 @@ async function main() {
   const message = buildAuthMessage(req);
   check(verifyDidSignature(agentDid, message, req.signature), 'buildSignedRequest via keyProvider:"daemon" produces a signature the backend-shaped verifier accepts');
 
+  // The signed jurisdiction (MAGP 8.3.12) through the REAL daemon: the v2 message over exactly the value sent.
+  const reqJ = await guard.buildSignedRequest({ action: 'flight-purchase', amount: 100, merchant: 'amadeus', jurisdiction: 'sg' });
+  check(reqJ.jurisdiction === 'SG' && verifyDidSignature(agentDid, buildAuthMessage(reqJ), reqJ.signature) && buildAuthMessage(reqJ).endsWith('|MAGP-AUTH-v2|SG'), 'a jurisdiction signed via the daemon verifies as the v2 message over the value sent');
+
   // Signed over the UTF-8 bytes of the challenge STRING, not its hex-decoded bytes — the real
   // convention both agentsafe-guard's original sign() and create-metamynd-agent's
   // signChallengeHex use. verifyDidSignature signs/verifies over UTF-8 message bytes, so this is

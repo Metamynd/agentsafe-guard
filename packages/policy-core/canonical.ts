@@ -18,7 +18,18 @@
  * committed the same way `merchant` already is, not just signed-last-ordered into the
  * evaluation context, which would leave it alterable by a compromised counterparty
  * relaying a `buildSignedRequest()`-built request onward.
+ *
+ * Version 2 (spec §8.3.12) — the SIGNED jurisdiction. A request that carries `jurisdiction` signs the eight v1 fields,
+ * then the literal version tag `MAGP-AUTH-v2`, then the jurisdiction (ten fields):
+ *
+ *   agentDid | action | amount | currency | merchant | resource | nonce | issuedAt | MAGP-AUTH-v2 | jurisdiction
+ *
+ * A request that does not carry it signs exactly the eight v1 fields, byte for byte as before, so every existing client
+ * keeps verifying. The verifier chooses the shape from the request itself — `jurisdiction` present → v2, absent → v1 —
+ * and never tries the other: stripping the field from a v2 request, or adding one to a v1 request, fails the signature.
+ * Every field (the tag included) is escaped as in v1, so a ten-field message can never rebuild as an eight-field one.
  */
+export const AUTH_MESSAGE_V2_TAG = 'MAGP-AUTH-v2';
 
 export interface AuthMessageFields {
   agentDid: string;
@@ -29,6 +40,11 @@ export interface AuthMessageFields {
   resource?: string | null;
   nonce: string;
   issuedAt: string;
+  /**
+   * The signed jurisdiction (ISO 3166-1 alpha-2, sent upper-case). Absent (undefined/null) = the v1 eight-field message;
+   * present = the v2 message above, signed as the literal string transmitted (§8.3.5).
+   */
+  jurisdiction?: string | null;
 }
 
 /**
@@ -48,9 +64,9 @@ export function escapeField(v: string): string {
 
 /** Build the canonical UTF-8 message a verifier reconstructs from received fields. */
 export function buildAuthMessage(f: AuthMessageFields): string {
-  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? '', f.resource ?? '', f.nonce, f.issuedAt]
-    .map((v) => escapeField(String(v)))
-    .join('|');
+  const v1 = [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? '', f.resource ?? '', f.nonce, f.issuedAt];
+  const fields = f.jurisdiction === undefined || f.jurisdiction === null ? v1 : [...v1, AUTH_MESSAGE_V2_TAG, f.jurisdiction];
+  return fields.map((v) => escapeField(String(v))).join('|');
 }
 
 /**

@@ -46,6 +46,26 @@ instead of allowing it: an agent that omits its risk is indistinguishable from o
 not an assessment**. A real integration states an honest one — or, better, doesn't depend on
 the agent: the mandate's owner can set a `riskTier` no claim can lower (MAGP §6.3).
 
+### Jurisdiction (0.6.0, MAGP §8.3.12)
+
+```python
+verdict = client.authorize("flight-purchase", 150, merchant="skyward-air",
+                           context={"riskLevel": "low"}, jurisdiction="SG")
+```
+
+`jurisdiction` (ISO 3166-1 alpha-2) is trimmed, checked to be two ASCII letters and upper-cased — anything else raises
+`ValueError` before anything is signed or sent — then sent as a top-level field and **signed** (the v2 message: the
+eight fields, `MAGP-AUTH-v2`, the jurisdiction). Omit it and the request is the v1 message, byte for byte as before. A
+`jurisdiction` in `context` is unsigned and the gate ignores it. `guard_tool`'s `map_args` may return `"jurisdiction"`
+too.
+
+- **A registered payee's country wins**: a signed value that differs is refused `JURISDICTION_MISMATCH`.
+- `JURISDICTION_REQUIRED`: the mandate (or an enforced rule) needs a jurisdiction and none was signed.
+- `JURISDICTION_NOT_ALLOWED`: the signed value is outside the mandate's list.
+- `verdict.jurisdiction_refused` is true for any of the three (`JURISDICTION_REASON_CODES`).
+- With `daemon_socket=`, the daemon must be `agentsafe-signer` ≥ 0.18.0; an older one raises
+  `DaemonError("JURISDICTION_SIGNING_UNSUPPORTED")` instead of signing the wrong message.
+
 ## Guard a tool
 
 ```python
@@ -188,6 +208,14 @@ an agent normally doesn't. Once a service has claimed a hold, only that service 
 below the authorized amount or release it — the gate refuses the agent's attempt (`ok=False`,
 with the reason), on purpose: otherwise an agent could wait for a purchase to happen and then take
 its budget back. An agent can `capture` at the full amount, and `void` a hold nobody has claimed.
+
+**Why a settlement was refused (0.5.3).** A refused `capture` or `void` is `ok=False` with `reason_code` — the
+gate's stable code (MAGP 8.7.8) — and `detail`, a sentence for people. Branch on `reason_code`, never on `detail`:
+`COUNTERPARTY_MISMATCH` (403: the hold is claimed and you are not its claimer), `NOT_HELD` (409 on capture: it is
+already settled or released — usually an earlier call landed, so read `outcome()` before retrying; on `void` it is
+not an error), `AUTHORIZATION_EXPIRED`, `AMOUNT_EXCEEDS_AUTHORIZED`, `AUTHORIZATION_NOT_FOUND` (404), and the rest of
+the table in the spec. The code is read from `data.reasonCode` first, so it is right on the `200` NOT_HELD void too,
+whose `message` is `Not voided (NOT_HELD)`.
 
 **Settling below the authorization (0.5.2).** A service that charged less passes `pay_to`, the account it paid
 (a Hedera account id or an EVM address): `client.capture(auth_id, 120, pay_to="0.0.5005")`. If the owner lists

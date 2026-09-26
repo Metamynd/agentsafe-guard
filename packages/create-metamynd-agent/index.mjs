@@ -54,7 +54,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // requires request inputs blocks a bare baseline request).
 // 0.12.4 makes `verify` probe in the currency the mandate's caps name (it assumed USD), which a scaffolded
 // non-USD agent's `npm test` needs.
-const GUARD_VERSION = '^0.15.0';
+// 0.16.0 signs an optional top-level `jurisdiction` (MAGP 8.3.12, the v2 message) — the scaffolded non-financial agent
+// passes a request's jurisdiction that way, since the gate no longer reads one from the unsigned context.
+const GUARD_VERSION = '^0.16.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -109,7 +111,9 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // change (the scaffolded gateways don't pay by x402), but the floor must cover the real current version.
 // 0.15.0: payloadDigestOf/toWireJson exported and refundAuthorization (its own signed `refund` action). No template
 // change (the scaffolded gateways don't refund), but the floor must cover the real current version.
-const MCP_GUARD_VERSION = '^0.15.0';
+// 0.16.0: verifies a v2 (signed-jurisdiction) request and judges jurisdiction rules on the signed value only. Required:
+// the scaffolded agent now signs jurisdiction, which an older gateway would refuse SIGNATURE_INVALID.
+const MCP_GUARD_VERSION = '^0.16.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -124,7 +128,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.12.0: per-route `x402: true` declares an x402 payment on the claim. No template change.
 // 0.13.0: a configured resolveCredential that refuses now FAILS CLOSED (502 CREDENTIAL_UNAVAILABLE) instead of forwarding
 // without a credential. No template change (the scaffolded gateway does not use the Credential Vault).
-const GATEWAY_VERSION = '^0.13.0';
+// 0.14.0: depends on agentsafe-mcp-guard ^0.16.0 (verifies a signed-jurisdiction request). No template change.
+const GATEWAY_VERSION = '^0.14.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -495,7 +500,16 @@ const ATOM_DEMO = {
     fire: (cfg) => ({ riskLevel: cfg?.level ?? 'high' }),
     says: (cfg) => 'the risk level is ' + (cfg?.level ?? 'high') + ' or above',
   },
-  'jurisdiction-not-allowed': { field: 'jurisdiction', fire: () => ({ jurisdiction: 'ZZ-NOT-ALLOWED' }), says: () => 'the jurisdiction is not on the allowed list' },
+  // The jurisdiction is SIGNED, so it must be a real two-letter code (MAGP 8.3.12): a user-assigned ISO code the list omits.
+  'jurisdiction-not-allowed': {
+    field: 'jurisdiction',
+    fire: (cfg) => {
+      const allowed = new Set((Array.isArray(cfg?.allowed) ? cfg.allowed : []).map((c) => String(c).toUpperCase()));
+      const code = ['ZZ', 'XX', 'QZ', 'XZ'].find((c) => !allowed.has(c));
+      return code ? { jurisdiction: code } : null;
+    },
+    says: () => 'the jurisdiction is not on the allowed list',
+  },
   'data-residency-violation': { field: 'dataResidency', fire: () => ({ dataResidency: 'zz-not-allowed' }), says: () => 'the data would be stored outside the allowed regions' },
   'model-not-allowed': { field: 'model', fire: () => ({ model: 'unlisted-model' }), says: () => 'the model is not on the allowed list' },
   'tool-not-allowed': { field: 'tool', fire: () => ({ tool: 'unlisted-tool' }), says: () => 'the tool is not on the allowed list' },
@@ -516,6 +530,8 @@ const ATOM_DEMO = {
     says: (cfg) => 'the evidence confidence is below ' + Number(cfg?.min ?? 0),
   },
 };
+
+const TWO_LETTERS = /^[A-Za-z]{2}$/;
 
 // [predicate, request field, config key holding the allow-list, exact (case-sensitive) match?]
 // data-source-not-approved compares exactly; the other allow-list atoms compare case-insensitively.
@@ -615,8 +631,23 @@ function buildPolicyCases(molecules, { maxCases = 8 } = {}) {
     const lists = configsOf(pred).map((cfg) => (Array.isArray(cfg[key]) ? cfg[key].map(String) : []));
     if (!lists.length || lists.some((l) => l.length === 0)) continue;
     const norm = (v) => (exact ? v : v.toLowerCase().trim());
-    const common = lists[0].find((v) => lists.every((l) => l.some((x) => norm(x) === norm(v))));
-    if (common !== undefined) base[field] = common;
+    // The jurisdiction is SIGNED (MAGP 8.3.12), so only a real two-letter code can be sent at all.
+    const sendable = (v) => field !== 'jurisdiction' || TWO_LETTERS.test(v.trim());
+    const common = lists[0].find((v) => sendable(v) && lists.every((l) => l.some((x) => norm(x) === norm(v))));
+    if (common !== undefined) base[field] = field === 'jurisdiction' ? common.trim().toUpperCase() : common;
+  }
+  // A jurisdiction rule that can refuse makes the field REQUIRED: the gate (and the guard's local check) refuses a request
+  // that signs none with JURISDICTION_REQUIRED. With no code on every list, no request can pass — stage nothing, truthfully.
+  const jurisdictionEnforced = live.some((m) => m.decision !== 'observe' && m.atoms.some((a) => a.predicate === 'jurisdiction-not-allowed'));
+  if (jurisdictionEnforced && base.jurisdiction === undefined) {
+    return {
+      cases: [],
+      inputs,
+      notDemonstrated: molecules.map((m) => ({
+        rule: label(m),
+        why: 'no two-letter jurisdiction is on every jurisdiction allow-list, and a request that signs none is refused JURISDICTION_REQUIRED, so the demo cannot stage a passing request',
+      })),
+    };
   }
   const evidenceCfgs = configsOf('evidence-requirement');
   if (evidenceCfgs.length) base.evidenceTypes = [...new Set(evidenceCfgs.flatMap((cfg) => (Array.isArray(cfg.required) ? cfg.required.map(String) : [])))];
@@ -1252,7 +1283,8 @@ ${withGateway ? `const GATEWAY = process.env.GATEWAY_URL || 'http://localhost:${
 // --- this file to call directly — the tool, and any real credentials it needs, live only in
 // --- ./gateway, which independently re-verifies this signed request itself.
 async function performViaGateway(args, decision) {
-  const signed = await guard.buildSignedRequest({ action: '${scope}', merchant: MERCHANT, context: args });
+  const { jurisdiction, ...context } = args; // the jurisdiction is SIGNED (a top-level field), never context
+  const signed = await guard.buildSignedRequest({ action: '${scope}', merchant: MERCHANT, jurisdiction, context });
   signed.authorizationId = decision?.authorizationId; // none for a value-less action — see ./gateway/README.md
   const res = await fetch(GATEWAY + '/perform', {
     method: 'POST',
@@ -1278,11 +1310,12 @@ async function performAction(args) {
 }
 `}
 // --- The GATED version. Register THIS with your agent instead of the raw handler. ---
-// The request's own fields (consent, piiPresent, jurisdiction, ...) travel as the gate's \`context\`.
+// The request's own fields (consent, piiPresent, ...) travel as the gate's \`context\`. \`jurisdiction\` is the
+// exception: it is SIGNED (a top-level field, ISO 3166-1 alpha-2) — the gate ignores one in the unsigned context.
 const gatedAction = guard.guardTool(
   '${scope}',                                   // = your mandate scope
   ${withGateway ? 'performViaGateway' : 'performAction'},
-  (a) => ({ merchant: MERCHANT, context: a }),   // map tool args → gate inputs
+  ({ jurisdiction, ...context }) => ({ merchant: MERCHANT, jurisdiction, context }),   // map tool args → gate inputs
 );
 
 // --- An action the agent was NEVER granted. Wrapping it is the demonstration: no rule anywhere
@@ -1512,8 +1545,9 @@ a forged bundle with a higher cap or no rules; \`server.mjs\` refuses an unsigne
 
 **NOT closed — be precise about this:**
 
-- **Rule inputs are not signed.** The request fields your rules read (\`consent\`, \`piiPresent\`,
-  \`jurisdiction\`, …) travel in the request's \`itinerary\`, which the signature does not cover, and
+- **Rule inputs are not signed** — except \`jurisdiction\`, which this agent signs (MAGP 8.3.12; a
+  registered payee's country overrides it at the gate). The other fields your rules read (\`consent\`,
+  \`piiPresent\`, …) travel in the request's \`itinerary\`, which the signature does not cover, and
   the body the tool executes is not bound to it (\`valueFields: []\`). An agent that CAN sign — a
   dishonest one, or a compromised one — can omit a field or send a different one, and the rule that
   reads it will not fire: an allow-list, consent or PII rule treats an absent field as "nothing to
@@ -1601,8 +1635,9 @@ these (the demo in \`index.mjs\` does):
 ${demo.inputs.map((i) => `- \`${i.field}\` — ${i.rules.join(', ')}`).join('\n') || '- (none — your rules read no request fields)'}
 
 **A missing field is not a violation** for an allow-list, consent or PII rule: if your application
-forgets to send \`jurisdiction\` or \`consent\`, that rule simply does not fire. Make sure the field is
-always present. These fields are asserted by the calling agent and are not covered by its signature —
+forgets to send \`consent\`, that rule simply does not fire. Make sure the field is always present.
+(\`jurisdiction\` is different: it is signed, and a jurisdiction rule with none signed is refused
+\`JURISDICTION_REQUIRED\`.) These fields are asserted by the calling agent and are not covered by its signature —
 an agent that can sign could omit or forge one, and the rule would not fire. Source them from a system you
 control, not from model output.${demo.notDemonstrated.length ? `
 
@@ -3100,7 +3135,8 @@ ${withGateway ? `console.log(dim('  gateway  : http://localhost:${gatewayPort} (
 // takes effect on the next decision, no restart. The gateway process (when scaffolded) reads the SAME file.
 const getBundle = () => JSON.parse(readFileSync('./metamynd-rules.json', 'utf8'));
 
-// The request's own fields (consent, piiPresent, jurisdiction, ...) travel as the gate's \`context\`.
+// The request's own fields (consent, piiPresent, ...) travel as the gate's \`context\`. \`jurisdiction\` is the exception:
+// it is SIGNED (a top-level field, ISO 3166-1 alpha-2) and rules judge only that one, never a context value.
 const MERCHANT = ${merchant ? JSON.stringify(merchant) : 'undefined'};
 ${withGateway ? `const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://localhost:${gatewayPort}';
 // Calls the gateway process instead of a local function — there is no raw performAction() in THIS
@@ -3109,7 +3145,8 @@ ${withGateway ? `const GATEWAY = process.env.HARNESS_GATEWAY_URL || 'http://loca
 async function callGateway(path, action, args) {
   // The body is empty on purpose (this tool reads nothing from it), and it is signed as the payload so the gateway can
   // require binding on every route: a body with anything in it is not the one signed (MAGP 8.3.9).
-  const signed = await guard.buildSignedRequest({ action, merchant: MERCHANT, context: args, payload: {} });
+  const { jurisdiction, ...context } = args;
+  const signed = await guard.buildSignedRequest({ action, merchant: MERCHANT, jurisdiction, context, payload: {} });
   const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: '{}' });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -3129,7 +3166,7 @@ async function performAction(args) {
 const gatedAction = guard.guardToolLocal(
   '${scope}',                                   // = your mandate scope
   ${withGateway ? `(args) => callGateway('/perform', '${scope}', args)` : 'performAction'},
-  (a) => ({ merchant: MERCHANT, context: a }),   // map tool args → gate inputs
+  ({ jurisdiction, ...context }) => ({ merchant: MERCHANT, jurisdiction, context }),   // map tool args → gate inputs
   getBundle,
 );
 
@@ -3309,8 +3346,9 @@ of these (the demo in \`index.mjs\` does):
 ${demo.inputs.map((i) => `- \`${i.field}\` — ${i.rules.join(', ')}`).join('\n') || '- (none — your rules read no request fields)'}
 
 **A missing field is not a violation** for an allow-list, consent or PII rule: if your application
-forgets to send \`jurisdiction\` or \`consent\`, that rule simply does not fire. Make sure the
-field is always present.${demo.notDemonstrated.length ? `
+forgets to send \`consent\`, that rule simply does not fire. Make sure the field is always present.
+(\`jurisdiction\` is different: it is signed, and a jurisdiction rule with none signed is refused
+\`JURISDICTION_REQUIRED\`.)${demo.notDemonstrated.length ? `
 
 Rules the demo does not stage (they are still enforced):
 
@@ -3335,9 +3373,9 @@ runs, and so is any top-level body key you did not list in that route's \`allowe
 (\`PAYLOAD_UNBINDABLE\`) — nothing signed covers it. When your real tool reads more body fields, list exactly
 those keys; the gateway refuses the rest.${neutral ? `
 
-**Also NOT closed — rule inputs are not signed.** The request fields your rules read (\`consent\`,
-\`piiPresent\`, \`jurisdiction\`, …) travel in the signed request's context, which the signature does
-not cover. An agent that can sign could omit a field or send a different one, and the rule that reads
+**Also NOT closed — rule inputs are not signed** (except \`jurisdiction\`, a signed top-level field).
+The other request fields your rules read (\`consent\`, \`piiPresent\`, …) travel in the signed request's
+context, which the signature does not cover. An agent that can sign could omit a field or send a different one, and the rule that reads
 it would not fire. The gateway enforces scope and identity firmly; an input-dependent rule is only as
 strong as whatever supplies its input.` : ''}
 

@@ -33,6 +33,8 @@ const bundle = {
   mandates: [
     { action: 'flight-purchase', document: { permission: [{ target: 'flight-purchase', constraint: [{ leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 1000 }, { leftOperand: 'mm:merchant', operator: 'isAnyOf', rightOperand: ['skyward-air'] }] }] } },
     { action: 'db-read', document: { permission: [{ target: 'db-read', constraint: [{ leftOperand: 'resource', operator: 'isAnyOf', rightOperand: ['inspection-db'] }] }] } },
+    // An allowed-jurisdictions term (MAGP 8.3.12): judged on the SIGNED jurisdiction only.
+    { action: 'visa-apply', document: { permission: [{ target: 'visa-apply', constraint: [{ leftOperand: 'mm:jurisdiction', operator: 'isAnyOf', rightOperand: ['MY', 'SG'] }] }] } },
   ],
 };
 

@@ -419,6 +419,14 @@ only safe if every upstream rejected an unauthenticated call. Now it is `502 CRE
 the claimed hold is released. Mark routes that need no credential with `credential: false`. Raised the
 `agentsafe-mcp-guard` floor to `^0.15.0`.
 
+## Jurisdiction (signed) — since 0.14.0
+
+Depends on `@metamynd/agentsafe-mcp-guard` ^0.16.0, so the gateway verifies a request whose agent signed a top-level
+`jurisdiction` (the v2 message, MAGP §8.3.12) and judges jurisdiction rules on that signed value only — a
+jurisdiction in the itinerary is ignored, and one stripped or changed in transit is `SIGNATURE_INVALID`. A registered
+payee's country wins at the issuer (`JURISDICTION_MISMATCH`); the other refusals are `JURISDICTION_REQUIRED` and
+`JURISDICTION_NOT_ALLOWED`. Nothing to configure.
+
 ## Embed the core
 
 ```js

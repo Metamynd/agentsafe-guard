@@ -101,6 +101,29 @@ class RealGuardConformance(unittest.TestCase):
         for name in ("amount swapped", "resource swapped", "seven-field signature"):
             self.assertEqual((r[name]["decision"], r[name]["reasonCode"]), ("block", "SIGNATURE_INVALID"), f"{name}: {r[name]}")
 
+    def test_a_signed_jurisdiction_verifies_as_v2_and_is_the_only_one_judged(self) -> None:
+        """MAGP §8.3.12 against the real guard: the v2 message verifies, the mandate's allowed-jurisdictions term judges
+        the SIGNED value, a context jurisdiction stands in for nothing, and stripping the field breaks the signature."""
+        c = self.client
+        low = {"riskLevel": "low"}
+        allowed = dict(c.sign_request("visa-apply", 0, context=low, jurisdiction="sg").body)
+        stripped = {k: v for k, v in allowed.items() if k != "jurisdiction"}
+        r = self._verify([
+            self._guard("signed SG", allowed),
+            self._guard("signed DE", dict(c.sign_request("visa-apply", 0, context=low, jurisdiction="DE").body)),
+            self._guard("none signed", dict(c.sign_request("visa-apply", 0, context=low).body)),
+            self._guard("context only", dict(c.sign_request("visa-apply", 0, context={**low, "jurisdiction": "SG"}).body)),
+            self._guard("stripped in transit", stripped),
+            self._guard("changed in transit", {**allowed, "jurisdiction": "MY"}),
+        ])
+        self.assertEqual(allowed["jurisdiction"], "SG")
+        self.assertEqual((r["signed SG"]["decision"], r["signed SG"]["reasonCode"]), ("allow", "AUTHORIZED"), r["signed SG"])
+        self.assertEqual(r["signed DE"]["reasonCode"], "JURISDICTION_NOT_ALLOWED", r["signed DE"])
+        self.assertEqual(r["none signed"]["reasonCode"], "JURISDICTION_REQUIRED", r["none signed"])
+        self.assertEqual(r["context only"]["reasonCode"], "JURISDICTION_REQUIRED", "a context jurisdiction is unsigned and never judged")
+        for name in ("stripped in transit", "changed in transit"):
+            self.assertEqual(r[name]["reasonCode"], "SIGNATURE_INVALID", f"{name}: {r[name]}")
+
     def test_the_signed_request_handoff_works_through_the_real_gateway(self) -> None:
         """`verdict.signed.headers()` is what a Python tool attaches to a call to a protected service."""
         c = self.client
