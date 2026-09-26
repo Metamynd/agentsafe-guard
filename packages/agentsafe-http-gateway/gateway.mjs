@@ -570,6 +570,9 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
         ...(trustedContext !== undefined ? { trustedContext } : {}),
         ...(payloadDigest !== undefined ? { payloadDigest } : {}),
         ...(requireBinding ? { requirePayloadBinding: true } : {}),
+        // A route whose upstream is paid by x402 marks its claims x402-bound (agentsafe-mcp-guard >= 0.14.0): the issuer then
+        // has an independent observer confirm any settlement below the authorization, or a release after the claim.
+        ...(route.x402 === true ? { x402: true } : {}),
       };
       decision = Object.keys(verifyOptions).length ? await guard.verifyRequest(request, verifyOptions) : await guard.verifyRequest(request);
     } catch (err) {

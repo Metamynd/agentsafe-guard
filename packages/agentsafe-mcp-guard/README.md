@@ -243,7 +243,27 @@ claim token is issued, so nothing can leak. The signature covers the action, the
 the amount/reason fields, plus a one-time nonce and timestamp, so a captured call can't be replayed or
 edited. A `serviceDid` with no key (or a non-DID label) keeps the 0.7.0 token behaviour. Limits, stated
 plainly: the issuer verifies the key controls the DID, not that the DID is one you trust — see spec
-§8.7.6. The `daemon` key provider does not sign service messages yet.
+§8.7.6.
+
+**0.14.0 — declare an x402 payment at the claim (`x402: true`).** A tool paid by x402 should say so when it claims:
+`guardIncomingTool(action, handler, { x402: true })`, `verifyRequest(signed, { x402: true })` or
+`claimAuthorization({ authorizationId, x402: true })`. The issuer then records the hold as **x402-bound**, and only an
+x402-bound hold has a settlement *below* its authorization (or a release after the claim) confirmed by an independent
+observer — the Hedera mirror node, from the `settlementTxHash` and `payTo` you state at capture. So after `settle()`
+returns `txHash`, capture with `settlementTxHash: txHash, payTo: requirements.payTo`. A lower figure the observer can't
+confirm is refused (`SETTLEMENT_NOT_CONFIRMED`); settling at the full amount needs no observer. Before 0.14.0 no guard
+could set the flag, so SDK-claimed holds were never observed. Unset, the claim request is exactly as before.
+
+**0.13.0 — a daemon-held service key signs claims and settlements too.** With `keyProvider: 'daemon'` (and an
+`@metamynd/agentsafe-signer` 0.16.0+ daemon started `--role service`), `claimAuthorization`,
+`captureAuthorization`, `releaseAuthorization` and `markAuthorizationUnknown` are signed as your `serviceDid`
+by the daemon — the private key never enters this process. Before 0.13.0 a daemon-backed Service could only
+claim anonymously, which is refused for every mainnet hold. A custom `keyProvider` may implement either
+`signServiceMessage(message)` (sign the built message) or `signServiceCall({ serviceDid, action,
+authorizationId, fields, nonce, issuedAt })` (the structured call). If signing fails — daemon not running,
+or its identity is not `serviceDid` — the call is **not** sent anonymously: the claim returns `{ claimed:
+false, reasonCode: 'SERVICE_SIGNING_FAILED' }` and the settlement helpers `{ ok: false, reasonCode:
+'SERVICE_SIGNING_FAILED', error }`, without throwing.
 
 **0.7.0 — the claim token is relayed, and a Service can close the hold it claimed.** The issuer now
 treats a *claimed* hold as a commitment: it stays against the mandate's cap until it is settled (it no

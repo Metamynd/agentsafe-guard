@@ -14,8 +14,9 @@ export function createStaticKeyProvider(serviceKeyHex) {
     },
     /**
      * Sign one settlement-surface call (claim / capture / void / unknown) as this Service's own identity —
-     * the issuer verifies it against the key embedded in `serviceDid`. The daemon provider does not offer
-     * this yet, so a daemon-backed Service keeps making anonymous (token-bearing) calls.
+     * the issuer verifies it against the key embedded in `serviceDid`. Takes the already-built canonical
+     * message; the daemon provider takes the structured call instead (signServiceCall) so the daemon can
+     * build the message itself.
      */
     async signServiceMessage(message) {
       return crypto.sign(null, Buffer.from(message, 'utf8'), privateKey).toString('hex');
@@ -83,6 +84,15 @@ export function createDaemonKeyProvider({ socketPath }) {
   return {
     async signHandshakeNonce(nonce) {
       const { signature } = await daemonRequest(socketPath, 'sign-handshake-nonce', { nonce });
+      return signature;
+    },
+    /**
+     * Sign one settlement-surface call as this Service (MAGP §8.7.6) — agentsafe-signer >= 0.16.0. The daemon never
+     * signs caller-built bytes, so this passes the call's fields and the daemon reconstructs the MAGP-SERVICE-v1
+     * message itself (and refuses a `serviceDid` that is not its own bound identity).
+     */
+    async signServiceCall({ serviceDid, action, authorizationId, fields, nonce, issuedAt }) {
+      const { signature } = await daemonRequest(socketPath, 'sign-service-call', { serviceDid, action, authorizationId, fields, nonce, issuedAt });
       return signature;
     },
   };

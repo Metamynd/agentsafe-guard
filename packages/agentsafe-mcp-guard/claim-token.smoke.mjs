@@ -236,6 +236,30 @@ test('guardIncomingTool without { settle } behaves exactly as before: only the c
   } finally { m.restore(); }
 });
 
+test('x402: true marks the claim x402-bound at every entry point; unset, the claim request is exactly as before', async () => {
+  const m = mockIssuer(router());
+  try {
+    // Default: no body, no Content-Type — byte-identical to earlier versions.
+    await mk().verifyRequest(signedRequest());
+    assert.equal(m.calls[0].body, null, 'no body by default');
+    assert.equal('Content-Type' in m.headers[0], false);
+    // claimAuthorization({ x402 })
+    await mk().claimAuthorization({ authorizationId: 'auth-2', x402: true });
+    assert.deepEqual(m.calls[1].body, { x402: true });
+    assert.equal(m.headers[1]['Content-Type'], 'application/json');
+    // verifyRequest(signed, { x402 })
+    await mk().verifyRequest(signedRequest(), { x402: true });
+    assert.deepEqual(m.calls[2].body, { x402: true });
+    // guardIncomingTool(action, handler, { x402 })
+    const tool = mk().guardIncomingTool('flight-purchase', async () => 'BOOKED', { x402: true });
+    assert.equal(await tool(signedRequest()), 'BOOKED');
+    assert.deepEqual(m.calls[3].body, { x402: true });
+    // Anything but literal true is ignored (never a truthy string or 1).
+    await mk().claimAuthorization({ authorizationId: 'auth-3', x402: 'yes' });
+    assert.equal(m.calls[4].body, null);
+  } finally { m.restore(); }
+});
+
 // --- authenticated counterparty identity: the Service signs its own settlement-surface calls ---
 const svcKeys = crypto.generateKeyPairSync('ed25519');
 const svcRaw = svcKeys.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
