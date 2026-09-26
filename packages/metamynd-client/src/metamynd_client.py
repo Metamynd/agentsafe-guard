@@ -53,6 +53,14 @@ unrecognised one) — an agent that omits its risk is indistinguishable from one
 Send an honest `riskLevel` in `context`, or have your mandate's owner set a `riskTier` so
 it does not depend on you (MAGP §6.3). `guard_tool` never invents one.
 
+Jurisdiction (0.6.0). Pass `jurisdiction="SG"` (ISO 3166-1 alpha-2) to `authorize` /
+`sign_request`: it is sent as a top-level field and SIGNED (the v2 message, MAGP §8.3.12 —
+the eight fields, then `MAGP-AUTH-v2`, then the jurisdiction). A jurisdiction in `context` is
+unsigned and the gate ignores it. When the payee is registered with a country, that country
+wins; a signed value that differs is refused `JURISDICTION_MISMATCH`. The other two refusals
+are `JURISDICTION_REQUIRED` (the mandate or a rule needs one and none was signed) and
+`JURISDICTION_NOT_ALLOWED` (outside the mandate's list). See `JURISDICTION_REASON_CODES`.
+
 Requires: Python 3.9+. `pip install metamynd-client` pulls in the one runtime
 dependency (`cryptography`) automatically; vendoring this file directly instead
 needs `pip install cryptography` on its own.
@@ -118,6 +126,9 @@ __all__ = [
     "js_number_to_string",
     "utc_now_rfc3339",
     "canonical_message",
+    "normalize_jurisdiction",
+    "AUTH_MESSAGE_V2_TAG",
+    "JURISDICTION_REASON_CODES",
     "canonical_payload",
     "payload_digest",
     "payload_binding_message",
@@ -132,7 +143,7 @@ __all__ = [
     "GovernanceBlocked",
 ]
 
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -271,6 +282,7 @@ def canonical_message(
     issued_at: str,
     *,
     resource: Optional[str] = None,
+    jurisdiction: Optional[str] = None,
 ) -> str:
     """The UTF-8 string that gets signed (MAGP §8.3.1).
 
@@ -281,20 +293,45 @@ def canonical_message(
     a verifier defaults an absent one to. The verifier reconstructs this string from the
     fields it received rather than trusting a client-sent message (§8.3.2), which is why
     every field below must be sent exactly as it was signed.
+
+    `jurisdiction` (0.6.0, MAGP §8.3.12): None = the v1 message above, byte for byte. A value =
+    the v2 message: the eight fields, then the literal tag `MAGP-AUTH-v2`, then the
+    jurisdiction, every one escaped the same way. It is signed as given — pass the value you
+    send (`normalize_jurisdiction` produces it); the gate picks v1 or v2 from the field's
+    presence on the wire and never tries the other.
     """
-    return "|".join(
-        _escape_field(v)
-        for v in [
-            agent_did,
-            action,
-            js_number_to_string(amount),
-            currency,
-            merchant or "",
-            resource or "",
-            nonce,
-            issued_at,
-        ]
-    )
+    fields = [
+        agent_did,
+        action,
+        js_number_to_string(amount),
+        currency,
+        merchant or "",
+        resource or "",
+        nonce,
+        issued_at,
+    ]
+    if jurisdiction is not None:
+        fields += [AUTH_MESSAGE_V2_TAG, jurisdiction]
+    return "|".join(_escape_field(v) for v in fields)
+
+
+AUTH_MESSAGE_V2_TAG = "MAGP-AUTH-v2"
+
+# The jurisdiction refusals the gate can answer (MAGP §8.3.12), all hard blocks: none signed where the mandate or an
+# enforced rule needs one; the signed one outside the mandate's list; the payee's REGISTERED country differs from it.
+JURISDICTION_REASON_CODES = frozenset({"JURISDICTION_REQUIRED", "JURISDICTION_NOT_ALLOWED", "JURISDICTION_MISMATCH"})
+
+
+def normalize_jurisdiction(value: Optional[str]) -> Optional[str]:
+    """A caller's jurisdiction as it is signed and sent: trimmed, exactly two ASCII letters, upper-cased. None = none
+    (the v1 message). Anything else raises ValueError — refused here, never sent. The ASCII check comes BEFORE
+    upper-casing, because "ß".upper() is "SS"."""
+    if value is None:
+        return None
+    trimmed = value.strip() if isinstance(value, str) else ""
+    if not (len(trimmed) == 2 and trimmed.isascii() and trimmed.isalpha()):
+        raise ValueError(f"jurisdiction must be an ISO 3166-1 alpha-2 country code (two letters), got {str(value)[:16]!r}")
+    return trimmed.upper()
 
 
 # --------------------------------------------------------------------------------------
@@ -484,6 +521,13 @@ class Verdict:
         """True only for the dispositions that permit execution. Fail closed on anything else."""
         return self.decision in PERMITTING_DECISIONS
 
+    @property
+    def jurisdiction_refused(self) -> bool:
+        """True when the gate refused on jurisdiction (0.6.0, MAGP §8.3.12): `JURISDICTION_REQUIRED`,
+        `JURISDICTION_NOT_ALLOWED` or `JURISDICTION_MISMATCH` (a registered payee's country differs from
+        the signed one). None of them is retryable by resending the same request."""
+        return self.reason_code in JURISDICTION_REASON_CODES
+
     @classmethod
     def from_response(cls, body: Mapping[str, Any]) -> "Verdict":
         data = body.get("data") or {}
@@ -573,11 +617,20 @@ class Outcome:
 
 @dataclass(frozen=True)
 class SettlementResult:
-    """The gate's answer to a capture or a void. `ok` is False for a refusal (`message` says why)."""
+    """The gate's answer to a capture or a void. `ok` is False for a refusal, and `reason_code` says why.
+
+    Branch on `reason_code` — the stable code (MAGP §8.7.8), e.g. `COUNTERPARTY_MISMATCH`, `NOT_HELD`,
+    `AUTHORIZATION_NOT_FOUND` — never on `detail`, which is a sentence for people and may change. A refused
+    call's `message` is that same bare code; the one exception is a void of a hold that is already settled or
+    released, which the gate answers `200` with the message `Not voided (NOT_HELD)` and `reason_code` `NOT_HELD`
+    (usually an earlier void landed — read `outcome()`)."""
 
     ok: bool
     message: str = ""
     raw: Mapping[str, Any] = field(default_factory=dict)
+    # Added in 0.5.3 (after `raw`, so positional construction is unchanged). Empty on success.
+    reason_code: str = ""
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -810,7 +863,7 @@ class _LocalKeySigner:
         self._key = key
 
     def sign_authorize(self, fields: Mapping[str, Any]) -> bytes:
-        message = canonical_message(fields["agentDid"], fields["action"], fields["amount"], fields["currency"], fields.get("merchant"), fields["nonce"], fields["issuedAt"], resource=fields.get("resource"))
+        message = canonical_message(fields["agentDid"], fields["action"], fields["amount"], fields["currency"], fields.get("merchant"), fields["nonce"], fields["issuedAt"], resource=fields.get("resource"), jurisdiction=fields.get("jurisdiction"))
         return self._key.sign(message.encode("utf-8"))
 
     def sign_payload_binding(self, fields: Mapping[str, Any]) -> bytes:
@@ -829,20 +882,28 @@ class _DaemonSigner:
         self._socket_path = socket_path
         self._connect_timeout = connect_timeout
 
-    def _request(self, op: str, fields: Mapping[str, Any]) -> bytes:
+    def _call(self, op: str, fields: Mapping[str, Any]) -> Mapping[str, Any]:
         # A field this client treats as "absent" is `None` (Python has no separate undefined); the daemon's own
         # validation treats a PRESENT-but-non-string field as malformed and an ABSENT one as fine (JS `undefined`),
         # so an optional field genuinely absent — no merchant, no resource, no authorizationId — must be dropped
         # from `params` entirely rather than sent as JSON `null`, or the daemon refuses it as an invalid string.
         params = {k: v for k, v in fields.items() if v is not None}
         result = _daemon_request(self._socket_path, op, params, self._connect_timeout)
-        signature = result.get("signature")
-        if not isinstance(signature, str):
+        if not isinstance(result.get("signature"), str):
             raise DaemonError("DAEMON_MALFORMED_RESPONSE", f"{op} response carried no signature")
-        return bytes.fromhex(signature)
+        return result
+
+    def _request(self, op: str, fields: Mapping[str, Any]) -> bytes:
+        return bytes.fromhex(self._call(op, fields)["signature"])
 
     def sign_authorize(self, fields: Mapping[str, Any]) -> bytes:
-        return self._request("sign-authorize", fields)
+        result = self._call("sign-authorize", fields)
+        jurisdiction = fields.get("jurisdiction")
+        # A daemon older than agentsafe-signer 0.18.0 ignores `jurisdiction` and signs the v1 message; the gate would refuse
+        # that request SIGNATURE_INVALID. A current daemon echoes the jurisdiction it signed, so anything else is caught here.
+        if jurisdiction is not None and result.get("jurisdiction") != jurisdiction:
+            raise DaemonError("JURISDICTION_SIGNING_UNSUPPORTED", "the agentsafe-signer daemon cannot sign a jurisdiction (it predates signer 0.18.0); upgrade it, or omit `jurisdiction`")
+        return bytes.fromhex(result["signature"])
 
     def sign_payload_binding(self, fields: Mapping[str, Any]) -> bytes:
         try:
@@ -899,8 +960,13 @@ class MetaMyndClient:
         resource: Optional[str] = None,
         authorization_id: Optional[str] = None,
         payload: Any = NO_PAYLOAD,
+        jurisdiction: Optional[str] = None,
     ) -> SignedRequest:
         """Sign a request WITHOUT sending it to the gate.
+
+        `jurisdiction` (0.6.0, optional): ISO 3166-1 alpha-2, e.g. "SG". Normalised (trimmed,
+        upper-cased), SIGNED (the v2 message, MAGP §8.3.12) and sent as a top-level field; a
+        malformed one raises ValueError. Omitted = the v1 message, exactly as before.
 
         `authorize()` uses this. Call it yourself when you need a fresh signed request for a
         service that re-verifies — most usefully after a human approved a held action: the
@@ -919,6 +985,7 @@ class MetaMyndClient:
         datetime, a lone surrogate) raises `PayloadNotCanonicalizable` — it is never silently
         sent unbound.
         """
+        signed_jurisdiction = normalize_jurisdiction(jurisdiction)  # raises before anything is signed
         nonce = secrets.token_hex(16)  # §8.2 — 8-128 chars, single use
         # Formatted ONCE and reused in both the signed message and the body (§8.3.5).
         # Two calls to the clock is the intermittent-SIGNATURE_INVALID bug.
@@ -926,7 +993,10 @@ class MetaMyndClient:
         # `self._signer` builds the exact same canonical message from these fields whether it
         # signs locally or asks the daemon to (§8.3.9's "the daemon builds the message itself"
         # property extends here: this file never hands EITHER signer a pre-built string).
+        # `jurisdiction` is a key only when it is also sent (below), so signed and sent cannot differ.
         auth_fields = {"agentDid": self.agent_did, "action": action, "amount": amount, "currency": currency, "merchant": merchant, "resource": resource, "nonce": nonce, "issuedAt": issued_at}
+        if signed_jurisdiction is not None:
+            auth_fields["jurisdiction"] = signed_jurisdiction
 
         body: dict[str, Any] = {
             "agentDid": self.agent_did,
@@ -945,6 +1015,9 @@ class MetaMyndClient:
         # where it is unsigned and, worse, silently ignored.
         if resource:
             body["resource"] = resource
+        # The signed jurisdiction (§8.3.12) — top-level, exactly the value in the signed message.
+        if signed_jurisdiction is not None:
+            body["jurisdiction"] = signed_jurisdiction
         if context:
             body["itinerary"] = dict(context)
         if payload is not NO_PAYLOAD:
@@ -964,13 +1037,20 @@ class MetaMyndClient:
         context: Optional[Mapping[str, Any]] = None,
         resource: Optional[str] = None,
         payload: Any = NO_PAYLOAD,
+        jurisdiction: Optional[str] = None,
     ) -> Verdict:
         """Ask the gate whether this action may proceed (MAGP §8.1-§8.3).
 
         `context` carries the request context the Standard/SOP rules read — `tool`,
-        `jurisdiction`, `riskLevel` and so on. Which fields your assigned rules need is
+        `riskLevel` and so on. Which fields your assigned rules need is
         discoverable: each atom at GET /standards/atoms lists its `requiredContext`. Send an
         honest `riskLevel`: a request with none is escalated, not allowed (MAGP §6.3).
+
+        `jurisdiction` is NOT context: pass it here (ISO 3166-1 alpha-2) and it is signed
+        (MAGP §8.3.12); the gate ignores a jurisdiction in `context`. A registered payee's
+        country wins over it. Refusals: `JURISDICTION_REQUIRED`, `JURISDICTION_NOT_ALLOWED`,
+        `JURISDICTION_MISMATCH` (`JURISDICTION_REASON_CODES`). A malformed value raises
+        ValueError before anything is sent.
 
         `resource` is what this specific action touches (a signed field, checked against the
         mandate's resource scope).
@@ -983,7 +1063,7 @@ class MetaMyndClient:
         A permit carries `verdict.signed` — the request exactly as signed, with the
         `authorizationId` the gate issued — for a gateway or MCP server that re-verifies it.
         """
-        signed = self.sign_request(action, amount, currency, merchant, context, resource, payload=payload)
+        signed = self.sign_request(action, amount, currency, merchant, context, resource, payload=payload, jurisdiction=jurisdiction)
         # The gate is sent the request; the authorizationId only exists once it answers.
         verdict = Verdict.from_response(self._post("/policy/mandate/authorize", dict(signed.body)))
         if "payloadDigest" in signed.body and verdict.decision in ("allow", "observe", "escalate") and verdict.raw.get("payloadDigest") != signed.body["payloadDigest"]:
@@ -1094,7 +1174,10 @@ class MetaMyndClient:
         Normally the SERVICE that executed the action does this, not the agent. The gate accepts
         an agent's capture at the FULL authorized amount, and refuses a LOWER amount once a
         service has claimed the hold (it would let an agent take its budget back after the
-        purchase happened). A refusal comes back as `ok=False` with the gate's `message`.
+        purchase happened: `403 COUNTERPARTY_MISMATCH`). A refusal comes back as `ok=False` with its
+        `reason_code` — e.g. `NOT_HELD` (409: already settled or released, usually an earlier capture
+        landed; read `outcome()` before retrying), `AUTHORIZATION_EXPIRED`, `AMOUNT_EXCEEDS_AUTHORIZED`,
+        `AUTHORIZATION_NOT_FOUND` (404). The full table is MAGP §8.7.8.
 
         `pay_to` is the account the service paid (a Hedera account id or an EVM address). A
         settlement BELOW the authorization needs it when the owner lists the merchant's accounts
@@ -1113,8 +1196,10 @@ class MetaMyndClient:
     def void(self, authorization_id: str, reason: Optional[str] = None) -> SettlementResult:
         """Release a hold nobody has claimed, returning its amount to the budget.
 
-        Refused (`ok=False`) once a service has claimed the hold: only that service can release
-        it, because it may already have executed the action.
+        Refused (`ok=False`, `reason_code` `COUNTERPARTY_MISMATCH`) once a service has claimed the
+        hold: only that service can release it, because it may already have executed the action.
+        A hold already settled or released is `ok=False` with `reason_code` `NOT_HELD` — not an
+        error, usually an earlier void landed.
         """
         body: dict[str, Any] = {}
         if reason:
@@ -1144,8 +1229,12 @@ class MetaMyndClient:
         # be wrong here: the outcome is unknown, and `outcome()` is how to find out.
         payload = self._post(path, body, unreachable="the outcome is UNKNOWN — it may have been applied; check client.outcome() before retrying")
         data = payload.get("data") or {}
+        ok = payload.get("success") is True
         message = str(payload.get("message") or data.get("reasonCode") or "")
-        return SettlementResult(ok=payload.get("success") is True, message=message, raw=data)
+        # The code, never the sentence: `data.reasonCode` first (the one field every refusal carries, and the only place
+        # the code is on a 200 NOT_HELD void), then the bare-code `message` of the standard refusal body (MAGP §8.7.8).
+        reason_code = "" if ok else str(data.get("reasonCode") or payload.get("message") or "REFUSED")
+        return SettlementResult(ok=ok, message=message, raw=data, reason_code=reason_code, detail=str(data.get("detail") or ""))
 
     def _get_data(self, path: str) -> Mapping[str, Any]:
         """GET a public gate endpoint and return its `data`, with the same failure rules as authorize."""
@@ -1269,7 +1358,7 @@ def guard_tool(
     path stops being the easy one.
 
     `map_args` turns your tool's arguments into the gate's inputs
-    (`amount`, `currency`, `merchant`, `resource`, `context`). Without it the call is
+    (`amount`, `currency`, `merchant`, `resource`, `jurisdiction`, `context`). Without it the call is
     authorized with no amount, which is right for a tool that moves no money and wrong for
     one that does — so pass it whenever there is a value at stake. Put an honest `riskLevel`
     in `context`; a call with none is escalated (MAGP §6.3), and this function never invents one.
@@ -1320,6 +1409,7 @@ def guard_tool(
             context=payload.get("context", {}),
             resource=payload.get("resource"),
             payload=payload.get("payload", NO_PAYLOAD),
+            jurisdiction=payload.get("jurisdiction"),
         )
         if not verdict.permitted:
             # Fail closed, loudly, and before the tool is touched.
@@ -1439,10 +1529,11 @@ def _demo() -> None:
     client = MetaMyndClient.from_env()
     print(f"\nMetaMynd gate, from Python — agent {client.agent_did[:38]}…\n")
 
-    flight = {"tool": "book-flight", "jurisdiction": "SG", "riskLevel": "low"}
-    _show("$150 flight, low risk", client.authorize("flight-purchase", 150, merchant="skyward-air", context=flight))
-    _show("$600 flight, over the SOP cap", client.authorize("flight-purchase", 600, merchant="skyward-air", context=flight))
-    held = client.authorize("flight-purchase", 150, merchant="skyward-air", context={**flight, "riskLevel": "high"})
+    # The jurisdiction is SIGNED (a top-level argument, MAGP §8.3.12) — never context, which the gate ignores for it.
+    flight = {"tool": "book-flight", "riskLevel": "low"}
+    _show("$150 flight, low risk", client.authorize("flight-purchase", 150, merchant="skyward-air", context=flight, jurisdiction="SG"))
+    _show("$600 flight, over the SOP cap", client.authorize("flight-purchase", 600, merchant="skyward-air", context=flight, jurisdiction="SG"))
+    held = client.authorize("flight-purchase", 150, merchant="skyward-air", context={**flight, "riskLevel": "high"}, jurisdiction="SG")
     _show("$150 flight, high risk", held)
     # ESCALATE is a HOLD, not a denial. Follow it up rather than stopping here — this is
     # the one verdict a naive integration mishandles, usually by treating it as failure.
@@ -1452,7 +1543,7 @@ def _demo() -> None:
               f"{' — may proceed' if state.may_proceed else ''}")
     _show(
         "$150 flight, unapproved tool",
-        client.authorize("flight-purchase", 150, merchant="skyward-air", context={**flight, "tool": "wire-transfer"}),
+        client.authorize("flight-purchase", 150, merchant="skyward-air", context={**flight, "tool": "wire-transfer"}, jurisdiction="SG"),
     )
 
     # Tamper check: sign one amount, send another. The gate reconstructs the message from
@@ -1542,6 +1633,18 @@ def _selftest() -> None:
     msg_escaped = canonical_message("did:x", "act", 150.0, "USD", "a|b\\c", "n0nce", stamp)
     assert msg_escaped == f"did:x|act|150|USD|a\\|b\\\\c||n0nce|{stamp}", msg_escaped
 
+    # §8.3.12 — a signed jurisdiction appends the version tag and the value (the v2 message); none is v1 exactly.
+    msg_v2 = canonical_message("did:x", "act", 150.0, "USD", None, "n0nce", stamp, jurisdiction="SG")
+    assert msg_v2 == f"did:x|act|150|USD|||n0nce|{stamp}|MAGP-AUTH-v2|SG", msg_v2
+    assert canonical_message("did:x", "act", 150.0, "USD", None, "n0nce", stamp, jurisdiction=None) == msg
+    assert normalize_jurisdiction(" sg ") == "SG" and normalize_jurisdiction(None) is None
+    for bad_jurisdiction in ("", "S", "SGP", "S1", "ß", "é1", "EU-1"):
+        try:
+            normalize_jurisdiction(bad_jurisdiction)
+            raise AssertionError(f"{bad_jurisdiction!r} should have been rejected")
+        except ValueError:
+            pass
+
     # guard_tool must be invisible to a framework building a tool schema. This is not a
     # style assertion: without it the OpenAI Agents SDK rejects the tool and blames Pydantic.
     import inspect as _inspect
@@ -1559,7 +1662,7 @@ def _selftest() -> None:
     _selftest_gate()
 
     print(
-        "selftest ok — key encodings, number stringification, timestamp shape, canonical join, tool signature, "
+        "selftest ok — key encodings, number stringification, timestamp shape, canonical join (v1 + v2), tool signature, "
         "signed handoff, escalation wait, settlement, outcome, sync + async guard_tool"
     )
 
@@ -1596,7 +1699,10 @@ def _selftest_gate() -> None:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
             seen.append((self.path, dict(body), self.headers.get("User-Agent")))
             if self.path == "/policy/mandate/authorize":
-                message = "|".join([body["agentDid"], body["action"], js_number_to_string(body["amount"]), body["currency"], body.get("merchant", ""), body.get("resource", ""), body["nonce"], body["issuedAt"]])
+                parts = [body["agentDid"], body["action"], js_number_to_string(body["amount"]), body["currency"], body.get("merchant", ""), body.get("resource", ""), body["nonce"], body["issuedAt"]]
+                if "jurisdiction" in body:  # the v2 message (§8.3.12): chosen by the field's presence, never tried both ways
+                    parts += ["MAGP-AUTH-v2", body["jurisdiction"]]
+                message = "|".join(parts)
                 try:
                     pub.verify(bytes.fromhex(body["signature"]), message.encode("utf-8"))
                 except Exception:  # a wrong message: refuse it the way the real gate does, so the assert below names the cause
@@ -1606,13 +1712,25 @@ def _selftest_gate() -> None:
                 if body["action"] == "deny":
                     return self._send(403, {"success": False, "data": {"decision": "block", "reasonCode": "SOP_SPEND_CAP"}})
                 return self._send(200, {"success": True, "data": {"decision": "allow", "reasonCode": "AUTHORIZED", "authorizationId": f"auth-{int(body['amount'])}"}})
+            # Settlement refusals in the gate's one refusal shape (MAGP §8.7.8): the bare code as `message`, the sentence in
+            # `data.detail`, and the status the code always has.
+            def refusal(status: int, flag: str, code: str, detail: str) -> None:
+                auth_id = self.path.split("/")[-2]
+                self._send(status, {"success": False, "message": code, "data": {flag: False, "authorizationId": auth_id, "reasonCode": code, "detail": f"{code}: {detail}"}})
+
             if self.path.endswith("/capture"):
+                if "/missing/" in self.path:
+                    return refusal(404, "captured", "AUTHORIZATION_NOT_FOUND", "no authorization with this id")
+                if "/settled-1/" in self.path:
+                    return refusal(409, "captured", "NOT_HELD", "this hold is already settled or released")
                 if body.get("amountCharged") == 100:
                     return self._send(200, {"success": True, "message": "Captured", "data": {"captured": True}})
-                return self._send(400, {"success": False, "message": "amountCharged (0) is below the claimed hold (100)", "data": None})
+                return refusal(403, "captured", "COUNTERPARTY_MISMATCH", "only the claimer of this hold may settle it below the authorized amount")
             if self.path.endswith("/void"):
                 if "claimed-1" in self.path:
-                    return self._send(400, {"success": False, "message": "Authorization has been claimed for execution", "data": None})
+                    return refusal(403, "voided", "COUNTERPARTY_MISMATCH", "only the claimer of this hold may release it")
+                if "settled-1" in self.path:  # repeating a void that already happened is a 200, not an error
+                    return self._send(200, {"success": False, "message": "Not voided (NOT_HELD)", "data": {"voided": False, "authorizationId": "settled-1", "status": "captured", "reasonCode": "NOT_HELD"}})
                 return self._send(200, {"success": True, "message": "Hold voided", "data": {"voided": True}})
             return self._send(404, {"success": False, "message": "no such route", "data": None})
 
@@ -1627,7 +1745,10 @@ def _selftest_gate() -> None:
                 return self._send(200, {"success": True, "data": {"outcome": "settled", "nothingExecuted": False, "retrySafe": False, "claimed": True, "authorizedAmount": 250, "settledAmount": 100, "settlementEvidence": "independently_confirmed", "currency": "USD"}})
             if self.path.endswith("/auth-weird/effect"):  # flags that are not literally `true` must read as NOT safe
                 return self._send(200, {"success": True, "data": {"outcome": "expired", "nothingExecuted": "yes", "retrySafe": 1}})
-            return self._send(404, {"success": False, "message": "Not found", "data": None})
+            if self.path.endswith("/effect"):  # an unknown id: 404 AUTHORIZATION_NOT_FOUND in the refusal shape, no outcome
+                auth_id = self.path.split("/")[-2]
+                return self._send(404, {"success": False, "message": "AUTHORIZATION_NOT_FOUND", "data": {"authorizationId": auth_id, "reasonCode": "AUTHORIZATION_NOT_FOUND", "detail": "AUTHORIZATION_NOT_FOUND: no authorization with this id"}})
+            return self._send(404, {"success": False, "message": "no such route", "data": None})
 
     # The stub is on loopback, but urllib sends even 127.0.0.1 through HTTP(S)_PROXY unless NO_PROXY says
     # otherwise — so the selftest (and the publish gate that runs it) died behind a corporate proxy with
@@ -1659,6 +1780,20 @@ def _selftest_gate() -> None:
         wire = client.authorize("flight-purchase", 5, merchant="Café ✓").signed
         wire.header_value().encode("ascii")
 
+        # jurisdiction: normalised, sent top-level, and signed as the v2 message (the stub verifies it that way).
+        vj = client.authorize("flight-purchase", 100, merchant="skyward-air", context={"riskLevel": "low"}, jurisdiction=" sg ")
+        assert vj.permitted, vj
+        sent_j = seen[-1][1]
+        assert sent_j["jurisdiction"] == "SG" and "jurisdiction" not in sent_j["itinerary"], sent_j
+        assert "jurisdiction" not in sent, "no jurisdiction given, none sent: the v1 message, as before"
+        before_bad = len(seen)
+        try:
+            client.authorize("flight-purchase", 100, jurisdiction="SGP")
+            raise AssertionError("a malformed jurisdiction must be refused locally")
+        except ValueError:
+            pass
+        assert len(seen) == before_bad, "a malformed jurisdiction must never reach the gate"
+
         # sign_request signs WITHOUT calling the gate, and can attach an authorizationId (post-approval).
         before = len(seen)
         again = client.sign_request("flight-purchase", 100, merchant="skyward-air", authorization_id="auth-approved")
@@ -1679,12 +1814,22 @@ def _selftest_gate() -> None:
         pending = client.wait_for_escalation("esc-1", timeout=0, _sleep=sleeps.append)
         assert not pending.resolved and not pending.may_proceed, "a hold nobody has decided is a hold"
 
-        # settlement: full-amount capture ok; a lower one is REFUSED and says why; void of a claimed hold is refused.
-        assert client.capture("auth-100", 100, booking_ref="PNR1").ok
+        # settlement: full-amount capture ok; a lower one is REFUSED with its code; void of a claimed hold is refused.
+        captured = client.capture("auth-100", 100, booking_ref="PNR1")
+        assert captured.ok and captured.reason_code == "" and captured.detail == "", captured
         refused = client.capture("auth-100", 0)
-        assert not refused.ok and "below the claimed hold" in refused.message, refused
-        assert client.void("auth-9").ok and not client.void("claimed-1").ok
+        assert not refused.ok and refused.reason_code == "COUNTERPARTY_MISMATCH" and refused.message == "COUNTERPARTY_MISMATCH", refused
+        assert refused.detail.startswith("COUNTERPARTY_MISMATCH: "), refused
+        again_captured = client.capture("settled-1", 100)
+        assert not again_captured.ok and again_captured.reason_code == "NOT_HELD", "a repeat capture is 409 NOT_HELD — read outcome()"
+        assert client.capture("missing", 100).reason_code == "AUTHORIZATION_NOT_FOUND"
+        assert client.void("auth-9").ok
+        claimed = client.void("claimed-1")
+        assert not claimed.ok and claimed.reason_code == "COUNTERPARTY_MISMATCH", claimed
         assert seen[-1][1] == {} or "reason" not in seen[-1][1]
+        # a void of a hold already settled is a 200 with success false: the code is in data.reasonCode, not the message
+        not_held = client.void("settled-1")
+        assert not not_held.ok and not_held.reason_code == "NOT_HELD" and not_held.message == "Not voided (NOT_HELD)", not_held
 
         # outcome: read tolerantly, but a safety flag is True ONLY when the gate said literally true.
         out = client.outcome("auth-100")

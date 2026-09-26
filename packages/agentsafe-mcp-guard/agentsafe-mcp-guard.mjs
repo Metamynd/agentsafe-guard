@@ -12,8 +12,23 @@
 // Dependencies are the two generated, zero-external-dependency bundles:
 //   policy-core.mjs (deterministic evaluator) and magp-did.mjs (key-in-DID verify).
 import crypto from 'node:crypto';
-import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, maxRisk, normalizeRiskLevel } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
+
+/**
+ * The jurisdiction refusals the issuer's gate can answer (spec §8.3.12), all hard blocks: JURISDICTION_REQUIRED (the
+ * mandate or an enforced rule needs one and none was signed), JURISDICTION_NOT_ALLOWED (signed value outside the
+ * mandate's list), JURISDICTION_MISMATCH (the payee's registered country differs from the signed one). A verdict from
+ * verifyRequest / the claim can carry any of them.
+ */
+export const JURISDICTION_REASON_CODES = Object.freeze(['JURISDICTION_REQUIRED', 'JURISDICTION_NOT_ALLOWED', 'JURISDICTION_MISMATCH']);
+
+/** An agent's unsigned itinerary with its jurisdiction claims removed — the gate never reads them, so neither do we. */
+function withoutUnsignedJurisdiction(itinerary) {
+  if (!itinerary || !['jurisdiction', 'mm:jurisdiction'].some((k) => Object.prototype.hasOwnProperty.call(itinerary, k))) return itinerary;
+  const { jurisdiction: _j, 'mm:jurisdiction': _mj, ...rest } = itinerary;
+  return rest;
+}
 import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 import { verifyBundle } from './magp-policy.mjs';
 import { resolveKeyProvider } from './key-providers.mjs';
@@ -202,6 +217,15 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   }
   /** The settlement helpers never throw: a signing failure is reported like any other refusal. */
   const signingFailed = (err) => ({ ok: false, reasonCode: 'SERVICE_SIGNING_FAILED', error: String(err?.message ?? err) });
+  /**
+   * The code of an issuer refusal (MAGP §8.7.8): `data.reasonCode` first — every refusal carries it, and it is the only
+   * place the code is on a 200 `NOT_HELD` void, whose message is "Not voided (NOT_HELD)" — then `message`, which on the
+   * standard refusal body is the same bare code. An issuer before v1.69.2 put a sentence in `message` for many refusals,
+   * so reading `data.reasonCode` first also yields the code there whenever it sent one. Branch on this, never on `detail`.
+   */
+  const refusalCode = (body, fallback) => body?.data?.reasonCode ?? body?.message ?? fallback;
+  /** The sentence for people that the standard refusal body carries in `data.detail` — for logs only, never to branch on. */
+  const refusalDetail = (body) => (typeof body?.data?.detail === 'string' ? { detail: body.data.detail } : {});
 
   /**
    * Claim the authorization, retrying ONCE when the answer is lost.
@@ -248,7 +272,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         // "an overlapping attempt of yours is mid-claim, ask again", which is not a refusal.
         const ambiguous = res.status >= 500 || (res.status === 409 && body?.message === 'EFFECT_TRANSITION_CONTENDED');
         if (ambiguous && attempt < attempts) { lastError = `HTTP ${res.status}`; await sleep(150); continue; }
-        if (!res.ok) return { claimed: false, reasonCode: body?.message ?? body?.data?.reasonCode ?? `AUTHORIZATION_CLAIM_HTTP_${res.status}` };
+        if (!res.ok) return { claimed: false, reasonCode: refusalCode(body, `AUTHORIZATION_CLAIM_HTTP_${res.status}`) };
         return {
           claimed: true,
           agentDid: body?.data?.agentDid,
@@ -300,7 +324,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     try {
       const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect`);
       const body = await res.json().catch(() => null);
-      if (!res.ok || !body?.data) return { ok: false, status: res.status, reasonCode: body?.message ?? `OUTCOME_HTTP_${res.status}` };
+      if (!res.ok || !body?.data) return { ok: false, status: res.status, reasonCode: refusalCode(body, `OUTCOME_HTTP_${res.status}`) };
       return { ok: true, ...body.data };
     } catch (err) {
       return { ok: false, reasonCode: 'ISSUER_UNREACHABLE', error: String(err?.message ?? err) };
@@ -330,15 +354,24 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * capture's `settlementEvidence`/`amountCharged`/`authorizedAmount`) is both kept at `.data` (unchanged, for any
    * existing caller) AND spread onto the top level — same convention `lookupOutcome` already used — so a caller can
    * read `result.settlementEvidence` directly instead of reaching into `.data` for it.
+   *
+   * A refusal is `{ ok: false, status, reasonCode, detail? }`. The issuer answers every refused capture / void / refund
+   * with the bare reason code and one HTTP status per code (MAGP §8.7.8): state conflicts are 409 (`NOT_HELD`,
+   * `AUTHORIZATION_EXPIRED`, `HOLD_STATE_CHANGED`, `EFFECT_NOT_CAPTURABLE`, `EFFECT_NOT_VOIDABLE`, `CLAIMED`,
+   * `HOLD_UNDER_RECONCILIATION`, `NOT_CAPTURED`, `ALREADY_REFUNDED`, and on an unclaimed hold `MANDATE_REVOKED` /
+   * `DELEGATION_CHAIN_BROKEN`), `COUNTERPARTY_MISMATCH` is 403, an unknown id is 404 `AUTHORIZATION_NOT_FOUND`, and
+   * observer, payee, amount, passport and validation refusals are 400. Branch on `reasonCode`, never on `status` alone
+   * or on `detail`. A capture refused `NOT_HELD` usually means an earlier capture landed: read `lookupOutcome` first.
    */
   async function issuerPost(path, body, extraHeaders = {}) {
     if (!base) return { ok: false, reasonCode: 'ISSUER_API_REQUIRED' };
     try {
       const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...extraHeaders }, body: JSON.stringify(body ?? {}) });
       const payload = await res.json().catch(() => null);
-      if (!res.ok) return { ok: false, status: res.status, reasonCode: payload?.message ?? payload?.data?.reasonCode ?? `ISSUER_HTTP_${res.status}` };
-      // void answers 200 with success:false when the hold was not voidable (e.g. already settled)
-      if (payload?.success === false) return { ok: false, status: res.status, reasonCode: payload?.data?.reasonCode ?? payload?.message ?? 'NOT_APPLIED', data: payload?.data ?? null };
+      if (!res.ok) return { ok: false, status: res.status, reasonCode: refusalCode(payload, `ISSUER_HTTP_${res.status}`), ...refusalDetail(payload) };
+      // void answers 200 with success:false when the hold was already settled or released (`NOT_HELD`, message
+      // "Not voided (NOT_HELD)") — the code is in data.reasonCode, which refusalCode reads first.
+      if (payload?.success === false) return { ok: false, status: res.status, reasonCode: refusalCode(payload, 'NOT_APPLIED'), ...refusalDetail(payload), data: payload?.data ?? null };
       const data = payload?.data ?? null;
       return { ok: true, status: res.status, ...(data && typeof data === 'object' ? data : {}), data };
     } catch (err) {
@@ -408,7 +441,10 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    *   issuer checks a refund as a `void` and refuses this signature (401 COUNTERPARTY_SIGNATURE_INVALID).
    *
    * Best-effort and non-throwing, like the other settlement helpers: `{ ok: true, refundAmount, remainingCaptured }` on
-   * success, `{ ok: false, status?, reasonCode }` otherwise (e.g. `Only a captured (settled) authorization can be refunded`).
+   * success, `{ ok: false, status?, reasonCode, detail? }` otherwise, where `reasonCode` is the issuer's stable code (MAGP
+   * §8.7.8) — `409 NOT_CAPTURED` (the hold is not captured), `409 ALREADY_REFUNDED` (nothing remains), `409
+   * HOLD_STATE_CHANGED` (a lost race; nothing was applied), `400 AMOUNT_EXCEEDS_REFUNDABLE`, `400 AMOUNT_INVALID`, `403
+   * COUNTERPARTY_MISMATCH`, `404 AUTHORIZATION_NOT_FOUND` — and `detail` is a sentence for logs, never to branch on.
    * @param {{ authorizationId: string, amount?: number, reason?: string, claimToken?: string }} p
    */
   async function refundAuthorization({ authorizationId, amount, reason, claimToken } = {}) {
@@ -444,7 +480,12 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * under whatever the agent claims, exactly as at the issuer's gate (spec §6.4.3).
    */
   function verdictFromBundle(bundle, req, trustedContext) {
-    const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, itinerary = {}, cumulativeSpend = amount, now } = req;
+    const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, cumulativeSpend = amount, now } = req;
+    // The jurisdiction the rules and the mandate term judge is the SIGNED one (spec §8.3.12, verified with the v2 message
+    // in verifyRequest), upper-cased — never the itinerary's unsigned `jurisdiction` / `mm:jurisdiction`, dropped here as
+    // the gate drops it. (A payee's registered country is the issuer's to apply: JURISDICTION_MISMATCH is the gate's.)
+    const jurisdiction = typeof req.jurisdiction === 'string' ? req.jurisdiction.toUpperCase() : undefined;
+    const itinerary = withoutUnsignedJurisdiction(req.itinerary ?? {});
     const mandates = bundle.mandates ?? [];
     const mandate = mandates.find((m) => m.action === action)?.document;
     // No mandate covers this action at all — refuse outright, matching mandate.service.ts's
@@ -456,9 +497,11 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     if (!mandate) {
       return { decision: 'block', reasonCode: mandates.length > 0 ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE', authorizationId: null, remaining: null, proofRef: null };
     }
-    return evaluate({
-      standards: (bundle.standards ?? []).map((s) => ({ standardKey: s.key, document: s.document })),
-      sops: (bundle.sops ?? []).map((s) => ({ standardKey: `sop:${s.id}`, document: s.document })),
+    const standards = (bundle.standards ?? []).map((s) => ({ standardKey: s.key, document: s.document }));
+    const sops = (bundle.sops ?? []).map((s) => ({ standardKey: `sop:${s.id}`, document: s.document }));
+    const verdict = evaluate({
+      standards,
+      sops,
       mandate,
       // currency/merchant/resource are signed fields, same as action/agentDid/amount above —
       // omitting them here (found live: they were) means a currency-scoped amount-over/
@@ -467,7 +510,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // at all. Mirrors mandate.service.ts's ruleCtx (PR #588), the parity target for this.
       context: buildRuleContext({
         unsigned: itinerary,
-        signed: { action, agentDid, amount, currency, merchant, resource },
+        signed: { action, agentDid, amount, currency, merchant, resource, ...(jurisdiction ? { jurisdiction } : {}) },
         gatewayDerived: trustedContext,
         riskFloor: riskFloorFor(mandate, action),
       }),
@@ -487,10 +530,22 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
               // Unprefixed `resource` (not `mm:resource`) to match the constraint's own
               // leftOperand (ResourceService.scopeConstraint()) — mirrors mandate.service.ts.
               resource,
+              // The allowed-jurisdictions term: with none signed it fails JURISDICTION_REQUIRED, as at the gate.
+              'mm:jurisdiction': jurisdiction,
+              jurisdiction,
             }),
           }
         : undefined,
     });
+    // An enforced jurisdiction rule with nothing signed: the gate refuses JURISDICTION_REQUIRED (a hard block that
+    // outranks an escalate), because the atom does not fire on a missing value. A jurisdiction THIS service derived
+    // (trustedContext) is judged by the rule itself and satisfies it.
+    const hardStop = verdict.decision === 'block' || verdict.decision === 'suspend' || verdict.decision === 'quarantine';
+    const derivedJurisdiction = trustedContext && typeof trustedContext.jurisdiction === 'string' && trustedContext.jurisdiction !== '';
+    if (!jurisdiction && !derivedJurisdiction && !hardStop && [...standards, ...sops].some((s) => documentEnforcesJurisdiction(s.document))) {
+      return { decision: 'block', reasonCode: 'JURISDICTION_REQUIRED', authorizationId: null, remaining: null, proofRef: null };
+    }
+    return verdict;
   }
 
   /**
@@ -507,14 +562,19 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, x402 = false } = {}) {
     try {
       assertTrustedContext(trustedContext); // a broken deriver is a refused request (GUARD_ERROR), never a quiet downgrade
-      const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature } = signed;
+      const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature, jurisdiction } = signed;
       if (!agentDid || !action || !nonce || !issuedAt || !signature) {
+        return { decision: 'block', reasonCode: 'MALFORMED_REQUEST' };
+      }
+      // A signed jurisdiction (spec §8.3.12) is two ASCII letters, exactly as the gate accepts it; null reads as absent.
+      if (jurisdiction !== undefined && jurisdiction !== null && (typeof jurisdiction !== 'string' || !/^[A-Za-z]{2}$/.test(jurisdiction))) {
         return { decision: 'block', reasonCode: 'MALFORMED_REQUEST' };
       }
       // 1. Signature over the canonical message (§7.3), verified via key-in-DID (§4.1.2).
       // `resource` MUST be included — it's the 8th signed field (canonical.ts); omitting it
       // here (found live: it was) rejects every genuinely-valid resource-bearing signature.
-      const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, resource, nonce, issuedAt });
+      // `jurisdiction` present → the v2 message, absent → v1; the shape follows the request and never falls back.
+      const message = buildAuthMessage({ agentDid, action, amount, currency, merchant, resource, nonce, issuedAt, jurisdiction });
       if (!verifyDidSignature(agentDid, message, signature)) {
         return { decision: 'block', reasonCode: 'SIGNATURE_INVALID' };
       }

@@ -94,6 +94,23 @@ export interface StandardRuleResult {
   standardKey: string | null;
   /** Present when the winning molecule could not trust the context it judged: the fields it could not. */
   unverifiableContext?: string[];
+  /**
+   * Present (true) when any evaluated document carries an ENFORCED jurisdiction rule (see documentEnforcesJurisdiction):
+   * the gate then refuses a request with no signed jurisdiction (JURISDICTION_REQUIRED), because the allow-list atom
+   * does not fire on a missing value. Absent otherwise, so every existing result is unchanged.
+   */
+  jurisdictionRequired?: true;
+}
+
+/** The atom whose field the gate supplies only from the SIGNED jurisdiction (spec §8.3.12). */
+export const JURISDICTION_ATOM = 'jurisdiction-not-allowed';
+
+/**
+ * Whether a document enforces a jurisdiction rule: a molecule that can refuse (any decision but `observe`) with a
+ * `jurisdiction-not-allowed` atom. An observe-only molecule permits either way, so it requires nothing.
+ */
+export function documentEnforcesJurisdiction(doc: StandardDocument | null | undefined): boolean {
+  return (doc?.molecules ?? []).some((m) => m?.decision !== 'observe' && (m?.atoms ?? []).some((a) => a?.predicate === JURISDICTION_ATOM));
 }
 
 /**
@@ -230,7 +247,7 @@ export function evaluateBoundStandards(
     const r = evaluateStandardRules(s.document?.molecules, ctx, s.standardKey);
     if (PRECEDENCE[r.decision] > PRECEDENCE[best.decision]) best = r;
   }
-  return best;
+  return standards.some((s) => documentEnforcesJurisdiction(s.document)) ? { ...best, jurisdictionRequired: true } : best;
 }
 
 // --- Authoring-time validation (also used to validate AI-drafted rules) ---

@@ -461,7 +461,8 @@ const gatedBookFlight = guard.guardTool(
     amount: a.amount,
     currency: 'USD',
     merchant: a.merchant,
-    context: { tool: 'book-flight', jurisdiction: a.jurisdiction, riskLevel: a.riskLevel },
+    jurisdiction: a.jurisdiction,    // SIGNED (0.16.0) — never put it in `context`
+    context: { tool: 'book-flight', riskLevel: a.riskLevel },
   }),
 );
 ```
@@ -472,9 +473,10 @@ const gatedBookFlight = guard.guardTool(
   checked against a mandate's `{leftOperand:'resource'}` constraint the same way `merchant` is
   checked against its own allow-list, and just as much a SIGNED field (tampering with it after
   signing fails the request with `SIGNATURE_INVALID`, not a silent bypass).
-- **`context`** is what the Standard/SOP atoms read (jurisdiction, model, tool, PII, risk, …). Each
+- **`context`** is what the Standard/SOP atoms read (model, tool, PII, risk, …). Each
   atom declares what it needs — fetch the catalog at `GET /api/v1/standards/atoms` to see the exact
-  fields (`requiredContext`) for the rules your agent is bound to.
+  fields (`requiredContext`) for the rules your agent is bound to. The one exception is `jurisdiction`:
+  see [Jurisdiction](#jurisdiction-signed-since-0160) below.
 - For **payment** tools (x402, §7a): after `authorize` allows, the Service returns a 402 bound to
   your `authorizationId`. Call `guard.preparePayment(requirements, authorizationId)` — it refuses an
   unbound or mismatched 402 — pay via x402, then reconcile the hold with
@@ -489,6 +491,31 @@ const gatedBookFlight = guard.guardTool(
   `serviceDid`, or with the `claimToken` its claim returned), or the owner does. An agent that needs to follow the
   outcome polls `guard.effectStatus(authorizationId)`. The export stays so existing imports keep working; remove the
   call from your code.
+
+### Jurisdiction (signed, since 0.16.0)
+
+Pass `jurisdiction` (ISO 3166-1 alpha-2, e.g. `'SG'`) to `authorize()`, `buildSignedRequest()`, `guardTool`'s
+`mapArgs`, or `evaluateLocally`'s `request`:
+
+```js
+await guard.authorize({ action: 'flight-purchase', amount: 150, merchant: 'skyward-air', jurisdiction: 'sg', context: { riskLevel: 'low' } });
+```
+
+- It is trimmed, checked to be two ASCII letters and upper-cased; anything else is refused locally
+  (`authorize()` returns `block`/`MALFORMED_REQUEST`, `buildSignedRequest()` throws) and nothing is sent.
+- It is sent as a top-level field and **signed**: the v2 message (MAGP §8.3.12) is the eight fields, then
+  `MAGP-AUTH-v2`, then the jurisdiction. Without one the request is the v1 message, byte for byte as before.
+- A `jurisdiction` inside `context` is unsigned and **ignored** by the gate (and by `evaluateLocally`); it is never
+  promoted to the signed field.
+- **A registered payee's country wins.** When the mandate's owner registered the merchant with a country, that country
+  is the effective jurisdiction; a signed value that differs is refused.
+- The gate's jurisdiction refusals (all hard blocks, exported as `JURISDICTION_REASON_CODES`):
+  `JURISDICTION_REQUIRED` (the mandate restricts jurisdictions, or an enforced rule reads one, and none was signed),
+  `JURISDICTION_NOT_ALLOWED` (the signed value is outside the mandate's list), `JURISDICTION_MISMATCH` (the payee's
+  registered country differs from the signed one — decided by the gate only; the local pre-check cannot see the
+  registry).
+- With `keyProvider: 'daemon'`, the signer must be `@metamynd/agentsafe-signer` ≥ 0.18.0; an older daemon cannot sign
+  the field and the request is refused `JURISDICTION_SIGNING_UNSUPPORTED` before it is sent.
 
 ## 4. Evaluate locally (no network)
 

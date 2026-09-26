@@ -295,6 +295,14 @@ could neither settle below the hold nor release one after an upstream failure. N
   `PAYEE_NOT_REGISTERED`, and the settlement observer only counts a credit to the account you name. Since backend
   v1.68.2 a refused release (the owner forced the hold into reconciliation, or a claim landed first) is an HTTP 409;
   the returned `{ ok: false, reasonCode }` is the same as before.
+  **0.15.1** — a refusal is `{ ok: false, status?, reasonCode, detail? }`, and `reasonCode` is always the issuer's stable
+  code: it is read from `data.reasonCode` first, then `message`. Every refused capture / release / refund now answers
+  the bare code with one HTTP status per code (MAGP §8.7.8): state conflicts are 409 (`NOT_HELD`,
+  `AUTHORIZATION_EXPIRED`, `HOLD_STATE_CHANGED`, `EFFECT_NOT_CAPTURABLE`, `NOT_CAPTURED`, `ALREADY_REFUNDED`, and
+  `MANDATE_REVOKED` / `DELEGATION_CHAIN_BROKEN` on an unclaimed hold), `COUNTERPARTY_MISMATCH` is 403, and an unknown
+  id is `404 AUTHORIZATION_NOT_FOUND` (on `lookupOutcome` too). `detail` is the issuer's sentence for people — log it,
+  never branch on it. A capture refused `NOT_HELD` usually means an earlier capture landed: call `lookupOutcome` before
+  retrying. A release of a hold that is already settled or released stays a 200 with `ok: false, reasonCode: 'NOT_HELD'`.
 - `guardIncomingTool(action, handler, { settle: true })` settles a handler that returns (at the
   authorized amount) and parks one that throws as **UNKNOWN** — it never *releases* on a throw, because a
   throw does not prove nothing was executed. Off by default: an existing embed is unchanged.
@@ -422,6 +430,22 @@ cd integrations\agentsafe-mcp-guard
 node mcp-guard.smoke.mjs             # PASS when every case matches
 node claim-authorization.smoke.mjs   # requireAuthorization: replay, mismatch, fail-closed
 ```
+
+### Jurisdiction (signed, since 0.16.0)
+
+A request may carry a top-level `jurisdiction` (ISO 3166-1 alpha-2) that the agent **signed** — the v2 message
+(MAGP §8.3.12): the eight fields, then `MAGP-AUTH-v2`, then the jurisdiction. `verifyRequest` rebuilds v2 when the
+field is present and v1 when it is absent, never the other: a jurisdiction stripped, changed or added in transit is
+`SIGNATURE_INVALID`, and one that is not two ASCII letters is `MALFORMED_REQUEST`. Agents send it with
+`@metamynd/agentsafe-guard` ≥ 0.16.0 (`jurisdiction: 'SG'`) or `metamynd-client` ≥ 0.6.0 (`jurisdiction="SG"`).
+
+- The mandate's allowed-jurisdictions term and the `jurisdiction-not-allowed` atom are judged on the **signed** value
+  only. An itinerary `jurisdiction` / `mm:jurisdiction` is the agent's unsigned word and is dropped; a jurisdiction
+  THIS service derived (`trustedContext.jurisdiction`) is judged by the rule as `gateway_derived`.
+- Refusals (hard blocks, exported as `JURISDICTION_REASON_CODES`): `JURISDICTION_REQUIRED` (the mandate or an
+  enforced rule needs one and none was signed), `JURISDICTION_NOT_ALLOWED` (outside the mandate's list), and — from
+  the issuer's gate only, at authorize or claim — `JURISDICTION_MISMATCH`: **a registered payee's country wins**, and a
+  signed value that differs is refused.
 
 ## 3. Payment binding (x402, §7a)
 

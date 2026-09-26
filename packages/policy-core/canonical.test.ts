@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildAuthMessage } from './canonical.js';
+import { AUTH_MESSAGE_V2_TAG, buildAuthMessage } from './canonical.js';
 
 const base = {
   agentDid: 'did:key:zAgent',
@@ -75,5 +75,31 @@ describe('buildAuthMessage', () => {
     const a = buildAuthMessage({ ...base, currency: 'USD', merchant: 'A|1000|USD|EVIL' });
     const b = buildAuthMessage({ ...base, currency: 'USD|A', merchant: '1000|USD|EVIL' });
     expect(a).not.toBe(b);
+  });
+});
+
+describe('buildAuthMessage v2 — the signed jurisdiction (§8.3.12)', () => {
+  it('absent (undefined or null) is the v1 eight-field message, byte for byte', () => {
+    const v1 = 'did:key:zAgent|flight-purchase|100|USD|skyward-air||n-1|2026-01-01T00:00:00.000Z';
+    expect(buildAuthMessage(base)).toBe(v1);
+    expect(buildAuthMessage({ ...base, jurisdiction: undefined })).toBe(v1);
+    expect(buildAuthMessage({ ...base, jurisdiction: null })).toBe(v1);
+  });
+
+  it('present appends the version tag and the literal value: ten fields', () => {
+    expect(AUTH_MESSAGE_V2_TAG).toBe('MAGP-AUTH-v2');
+    expect(buildAuthMessage({ ...base, jurisdiction: 'SG' })).toBe('did:key:zAgent|flight-purchase|100|USD|skyward-air||n-1|2026-01-01T00:00:00.000Z|MAGP-AUTH-v2|SG');
+    expect(buildAuthMessage({ ...base, resource: 'db', jurisdiction: 'DE' })).toBe('did:key:zAgent|flight-purchase|100|USD|skyward-air|db|n-1|2026-01-01T00:00:00.000Z|MAGP-AUTH-v2|DE');
+  });
+
+  it('is signed as transmitted (no case folding in the message) and differs per value', () => {
+    expect(buildAuthMessage({ ...base, jurisdiction: 'sg' })).not.toBe(buildAuthMessage({ ...base, jurisdiction: 'SG' }));
+    expect(buildAuthMessage({ ...base, jurisdiction: 'SG' })).not.toBe(buildAuthMessage({ ...base, jurisdiction: 'DE' }));
+  });
+
+  it('a v2 message can never equal a v1 one: a delimiter smuggled into issuedAt is escaped, not a field boundary', () => {
+    const smuggled = buildAuthMessage({ ...base, issuedAt: '2026-01-01T00:00:00.000Z|MAGP-AUTH-v2|SG' });
+    expect(smuggled).not.toBe(buildAuthMessage({ ...base, jurisdiction: 'SG' }));
+    expect(smuggled).toContain('\\|MAGP-AUTH-v2\\|SG');
   });
 });

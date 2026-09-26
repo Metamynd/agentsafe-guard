@@ -201,7 +201,7 @@ class FakeGate:
             auth_id = path.split("/")[-2]
             h = self.holds.get(auth_id)
             if not h:
-                return 404, {"success": False, "message": "Not found", "data": None}
+                return 404, {"success": False, "message": "AUTHORIZATION_NOT_FOUND", "data": {"authorizationId": auth_id, "reasonCode": "AUTHORIZATION_NOT_FOUND", "detail": "AUTHORIZATION_NOT_FOUND: no authorization with this id"}}
             settled = h["state"] == "captured"
             return 200, {"success": True, "data": {
                 "authorizationId": auth_id, "outcome": "settled" if settled else ("not_executed" if h["state"] == "voided" else "not_started"),
@@ -264,14 +264,29 @@ class FakeGate:
         self.escalations[esc_id] = {"status": "pending", "authorizationId": str(uuid.uuid4())}
         return 403, {"success": False, "data": {"decision": "escalate", "reasonCode": code, "escalationId": esc_id, **self._ack(digest)}}
 
+    @staticmethod
+    def _settlement_refusal(status: int, flag: str, auth_id: str, code: str, detail: str) -> "tuple[int, Any]":
+        """The gate's one settlement-refusal shape (MAGP 8.7.8): the bare code as `message`, the sentence in `data.detail`,
+        and the HTTP status the code always has."""
+        return status, {"success": False, "message": code, "data": {flag: False, "authorizationId": auth_id, "reasonCode": code, "detail": f"{code}: {detail}"}}
+
     def _settle(self, verb: str, auth_id: str, body: Mapping[str, Any]) -> "tuple[int, Any]":
+        flag = {"capture": "captured", "void": "voided"}.get(verb, "refunded")
         h = self.holds.get(auth_id)
         if not h:
-            flag = {"capture": "captured", "void": "voided"}.get(verb, "refunded")
-            return 404, {"success": False, "message": "AUTHORIZATION_NOT_FOUND", "data": {flag: False, "authorizationId": auth_id, "reasonCode": "AUTHORIZATION_NOT_FOUND", "detail": "AUTHORIZATION_NOT_FOUND: no authorization with this id"}}
+            return self._settlement_refusal(404, flag, auth_id, "AUTHORIZATION_NOT_FOUND", "no authorization with this id")
+        if h["state"] != "held":
+            if verb == "void":  # repeating a void that already happened (or voiding a settled hold) is a 200, not an error
+                return 200, {"success": False, "message": "Not voided (NOT_HELD)", "data": {"voided": False, "authorizationId": auth_id, "status": h["state"], "reasonCode": "NOT_HELD"}}
+            return self._settlement_refusal(409, flag, auth_id, "NOT_HELD", "this hold is already settled or released — read GET .../effect")
         if verb == "capture":
-            if float(body.get("amountCharged", -1)) != h["amount"]:
-                return 400, {"success": False, "message": "amountCharged is below the claimed hold", "data": None}
+            charged = float(body.get("amountCharged", -1))
+            if charged > h["amount"]:
+                return self._settlement_refusal(400, flag, auth_id, "AMOUNT_EXCEEDS_AUTHORIZED", "amountCharged is more than the authorized hold")
+            if charged != h["amount"]:
+                # This double treats every hold as claimed by a service, so an agent settling it below the authorization is
+                # refused exactly as the real gate refuses a non-claimer's lowered capture.
+                return self._settlement_refusal(403, flag, auth_id, "COUNTERPARTY_MISMATCH", "only the claimer of this hold may settle it below the authorized amount")
             h["state"] = "captured"
             return 200, {"success": True, "message": "Captured", "data": {"captured": True}}
         h["state"] = "voided"

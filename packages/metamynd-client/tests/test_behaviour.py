@@ -79,6 +79,46 @@ class GateFailures(_Base):
         self.assertNotIn("/../", self.gate.paths[-1], "the id is one path segment, escaped")
 
 
+class SettlementRefusals(_Base):
+    """0.5.3: a refusal carries the gate's stable code (MAGP 8.7.8) in `reason_code`, never a sentence to parse."""
+
+    def _hold(self) -> str:
+        verdict = self.client.authorize("flight-purchase", 100, merchant="skyward-air", context={"riskLevel": "low"})
+        self.assertTrue(verdict.permitted, verdict)
+        return verdict.authorization_id
+
+    def test_a_refusal_is_its_code_with_the_sentence_only_in_detail(self) -> None:
+        auth = self._hold()
+        lowered = self.client.capture(auth, 40)
+        self.assertFalse(lowered.ok)
+        self.assertEqual(lowered.reason_code, "COUNTERPARTY_MISMATCH")
+        self.assertEqual(lowered.message, "COUNTERPARTY_MISMATCH", "the message of a refusal is the bare code")
+        self.assertTrue(lowered.detail.startswith("COUNTERPARTY_MISMATCH: "), lowered.detail)
+        self.assertEqual(self.client.capture(auth, 500).reason_code, "AMOUNT_EXCEEDS_AUTHORIZED")
+
+    def test_a_repeat_capture_is_not_held_and_a_repeat_void_is_not_an_error(self) -> None:
+        auth = self._hold()
+        first = self.client.capture(auth, 100)
+        self.assertTrue(first.ok)
+        self.assertEqual((first.reason_code, first.detail), ("", ""))
+        again = self.client.capture(auth, 100)
+        self.assertFalse(again.ok)
+        self.assertEqual(again.reason_code, "NOT_HELD", "409 NOT_HELD: the first capture landed — read outcome()")
+        self.assertEqual(self.client.outcome(auth).outcome, "settled")
+        void = self.client.void(auth)
+        self.assertFalse(void.ok)
+        self.assertEqual(void.reason_code, "NOT_HELD", "a 200 NOT_HELD void carries its code in data.reasonCode, not the message")
+
+    def test_an_unknown_id_is_authorization_not_found_and_its_outcome_fails_closed(self) -> None:
+        missing = "00000000-0000-4000-8000-00000000dead"
+        self.assertEqual(self.client.capture(missing, 1).reason_code, "AUTHORIZATION_NOT_FOUND")
+        self.assertEqual(self.client.void(missing).reason_code, "AUTHORIZATION_NOT_FOUND")
+        out = self.client.outcome(missing)
+        self.assertEqual(out.outcome, "unknown")
+        self.assertFalse(out.retry_safe)
+        self.assertEqual(out.raw.get("reasonCode"), "AUTHORIZATION_NOT_FOUND")
+
+
 class GuardedAsyncTools(_Base):
     def test_an_object_with_an_async_call_hands_off_the_signed_request(self) -> None:
         seen: list = []

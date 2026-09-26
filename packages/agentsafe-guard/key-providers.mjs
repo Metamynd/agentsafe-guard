@@ -19,12 +19,22 @@ import { buildPayloadBindingMessage, buildPayloadRebindMessage } from './payload
  * do" for the confidentiality tradeoff that implies). Builds each canonical message locally with
  * the same policy-core/governance-envelope functions the backend verifies against, then signs.
  */
+/**
+ * The authorize fields, picked by name — exactly what buildAuthMessage reads, nothing spread through. `jurisdiction` is
+ * included only when it is a real value: present → the v2 message (spec §8.3.12), absent/null → v1. The guard hands a
+ * provider `jurisdiction` if and only if it also sends it (agentsafe-guard.mjs authFieldsFor), so signed = sent.
+ */
+export function authorizeFieldsOf(fields) {
+  const { agentDid, action, amount, currency, merchant, resource, nonce, issuedAt, jurisdiction } = fields;
+  return { agentDid, action, amount, currency, merchant, resource, nonce, issuedAt, ...(jurisdiction === undefined || jurisdiction === null ? {} : { jurisdiction }) };
+}
+
 export function createStaticKeyProvider(agentKeyHex) {
   const privateKey = crypto.createPrivateKey({ key: Buffer.from(agentKeyHex, 'hex'), format: 'der', type: 'pkcs8' });
   const rawSign = (message) => crypto.sign(null, Buffer.from(message, 'utf8'), privateKey).toString('hex');
   return {
     async signAuthorize(fields) {
-      return rawSign(buildAuthMessage(fields));
+      return rawSign(buildAuthMessage(authorizeFieldsOf(fields)));
     },
     async signEnvelope(fields) {
       return rawSign(envelopeHashFor({ ...fields, signature: '' }));
@@ -117,8 +127,15 @@ export function createDaemonKeyProvider({ socketPath }) {
   if (!socketPath) throw new Error('createDaemonKeyProvider requires { socketPath }');
   return {
     async signAuthorize(fields) {
-      const { signature } = await daemonRequest(socketPath, 'sign-authorize', fields);
-      return signature;
+      const params = authorizeFieldsOf(fields);
+      const result = await daemonRequest(socketPath, 'sign-authorize', params);
+      // A daemon that predates the signed jurisdiction (signer < 0.18.0) ignores the field and signs the v1 message; the
+      // gate would then refuse the request SIGNATURE_INVALID. It is caught here instead: a current daemon echoes the
+      // jurisdiction it signed, and anything else is refused before the request is sent.
+      if (params.jurisdiction !== undefined && result?.jurisdiction !== params.jurisdiction) {
+        throw Object.assign(new Error('the agentsafe-signer daemon cannot sign a jurisdiction (it predates signer 0.18.0); upgrade it, or omit `jurisdiction`'), { code: 'JURISDICTION_SIGNING_UNSUPPORTED' });
+      }
+      return result.signature;
     },
     async signEnvelope(fields) {
       const { envelopeSignature } = await daemonRequest(socketPath, 'sign-envelope', fields);

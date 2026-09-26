@@ -34,7 +34,8 @@ async function runCases(sopDocument, cases) {
   const mandate = harnessMandate({ scope: SCOPE, financial: false, merchants: [] });
   const rules = JSON.parse(harnessRulesFile(mandate, sopDocument));
   let ran = 0;
-  const tool = guard.guardToolLocal(SCOPE, async () => { ran++; return { ok: true }; }, (a) => ({ context: a }), () => rules);
+  // The generated index.mjs's mapping: `jurisdiction` is the SIGNED top-level field (MAGP 8.3.12), everything else is context.
+  const tool = guard.guardToolLocal(SCOPE, async () => { ran++; return { ok: true }; }, ({ jurisdiction, ...context }) => ({ jurisdiction, context }), () => rules);
   const out = [];
   for (const c of cases) {
     const before = ran;
@@ -132,7 +133,7 @@ await check('two evidence-requirement rules: the passing request carries the UNI
   assert.deepEqual([...cases[0].context.evidenceTypes].sort(), ['audit', 'kyc']);
 });
 
-await check('two allow-lists on one field: the passing request uses a value on BOTH, or leaves the field absent', async () => {
+await check('two allow-lists on one field: the passing request uses a value on BOTH; for the SIGNED jurisdiction, none on both stages nothing', async () => {
   const both = await assertAllCasesHold([
     mol('a', 'SG only', 'all', [{ predicate: 'jurisdiction-not-allowed', config: { allowed: ['SG'] } }], 'escalate', 'A'),
     mol('b', 'US or SG', 'all', [{ predicate: 'jurisdiction-not-allowed', config: { allowed: ['US', 'SG'] } }], 'block', 'B'),
@@ -142,7 +143,27 @@ await check('two allow-lists on one field: the passing request uses a value on B
     mol('a', 'GB only', 'all', [{ predicate: 'jurisdiction-not-allowed', config: { allowed: ['GB'] } }], 'escalate', 'A'),
     mol('b', 'US only', 'all', [{ predicate: 'jurisdiction-not-allowed', config: { allowed: ['US'] } }], 'block', 'B'),
   ]);
-  assert.equal(disjoint.cases[0].context.jurisdiction, undefined, 'no value satisfies both, so none is supplied (absent never trips an allow-list)');
+  // A jurisdiction rule makes the field required (JURISDICTION_REQUIRED when none is signed), so with no code on both
+  // lists no request can pass: nothing is staged, and each rule says why.
+  assert.equal(disjoint.cases.length, 0, 'no passing request exists');
+  assert.equal(disjoint.notDemonstrated.length, 2);
+  assert.match(disjoint.notDemonstrated[0].why, /JURISDICTION_REQUIRED/);
+  // Another allow-list field keeps the old behaviour: absent never trips it.
+  const models = await assertAllCasesHold([
+    mol('a', 'M1 only', 'all', [{ predicate: 'model-not-allowed', config: { allowed: ['m1'] } }], 'escalate', 'A'),
+    mol('b', 'M2 only', 'all', [{ predicate: 'model-not-allowed', config: { allowed: ['m2'] } }], 'block', 'B'),
+  ]);
+  assert.equal(models.cases[0].context.model, undefined, 'no value satisfies both, so none is supplied (absent never trips an allow-list)');
+  // A jurisdiction list whose only entries are not two-letter codes cannot be satisfied by a signed value either.
+  assert.equal(buildPolicyCases([mol('a', 'Named region', 'all', [{ predicate: 'jurisdiction-not-allowed', config: { allowed: ['Singapore'] } }], 'block', 'A')]).cases.length, 0);
+});
+
+await check('the fired jurisdiction is a real two-letter code off the list (a signed value must be one)', async () => {
+  const { cases } = await assertAllCasesHold([
+    mol('a', 'ZZ and SG', 'all', [{ predicate: 'jurisdiction-not-allowed', config: { allowed: ['ZZ', 'SG'] } }], 'block', 'A'),
+  ]);
+  assert.equal(cases[0].context.jurisdiction, 'ZZ');
+  assert.equal(cases[1].context.jurisdiction, 'XX', 'ZZ is on the list, so the next user-assigned code is used');
 });
 
 await check('overlapping risk tiers (high -> escalate, medium -> block) are reported, never mislabelled', async () => {

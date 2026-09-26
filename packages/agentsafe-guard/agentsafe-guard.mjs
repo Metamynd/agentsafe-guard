@@ -11,12 +11,44 @@
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, maxRisk, normalizeRiskLevel } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
 import { resolveKeyProvider, decryptAgentKeyWithPassword } from './key-providers.mjs';
+
+/**
+ * The jurisdiction refusals the gate can answer (spec §8.3.12), all hard blocks:
+ *   - JURISDICTION_REQUIRED    the mandate restricts jurisdictions (or an enforced SOP/Standard rule reads one) and the
+ *                              request signed none (and the payee has no registered country);
+ *   - JURISDICTION_NOT_ALLOWED the signed jurisdiction is not on the mandate's allow-list;
+ *   - JURISDICTION_MISMATCH    the payee's REGISTERED country differs from the signed one (the registry wins).
+ */
+export const JURISDICTION_REASON_CODES = Object.freeze(['JURISDICTION_REQUIRED', 'JURISDICTION_NOT_ALLOWED', 'JURISDICTION_MISMATCH']);
+
+/**
+ * Normalise a caller's `jurisdiction` (ISO 3166-1 alpha-2): trimmed, checked to be exactly two ASCII letters, upper-cased.
+ * `undefined`/`null` = none (the request signs the v1 message). Anything else throws (`code: 'MALFORMED_REQUEST'`) — it is
+ * refused here, never sent. The ASCII check runs BEFORE upper-casing: `'ß'.toUpperCase()` is `'SS'`.
+ */
+export function normalizeJurisdiction(value) {
+  if (value === undefined || value === null) return undefined;
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!/^[A-Za-z]{2}$/.test(trimmed)) {
+    throw Object.assign(new Error(`jurisdiction must be an ISO 3166-1 alpha-2 country code (two letters), got ${JSON.stringify(String(value).slice(0, 16))}`), { code: 'MALFORMED_REQUEST' });
+  }
+  return trimmed.toUpperCase();
+}
+
+/** The keys an unsigned context could name a jurisdiction under — the gate never reads them, so neither does local eval. */
+const UNSIGNED_JURISDICTION_KEYS = ['jurisdiction', 'mm:jurisdiction'];
+function withoutUnsignedJurisdiction(context) {
+  if (!context || !UNSIGNED_JURISDICTION_KEYS.some((k) => Object.prototype.hasOwnProperty.call(context, k))) return context;
+  const out = { ...context };
+  for (const k of UNSIGNED_JURISDICTION_KEYS) delete out[k];
+  return out;
+}
 
 /**
  * Replay a Merkle sibling chain and report whether it reconstructs `root`.
@@ -278,7 +310,10 @@ export function createGuard(opts = {}) {
    * agent's authorization trustlessly against the agent's policy bundle (§9.3). Same shape
    * `authorize()` posts to the gate; a fresh nonce each call.
    */
-  async function buildSignedRequest({ action, amount, currency, merchant, resource, context = {}, trace, materiality, payload }) {
+  async function buildSignedRequest({ action, amount, currency, merchant, resource, jurisdiction, context = {}, trace, materiality, payload }) {
+    // Signed jurisdiction (spec §8.3.12): normalised once; the SAME value is signed (v2 message) and sent top-level. A
+    // malformed one throws here. Absent → the v1 message and no `jurisdiction` on the wire, byte for byte as before.
+    const signedJurisdiction = normalizeJurisdiction(jurisdiction);
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
     // This object is presented to a COUNTERPARTY (spec §9.3) — but its own docstring also
@@ -308,11 +343,23 @@ export function createGuard(opts = {}) {
     // to just one side would break Tier-1 envelope-hash verification for any resource-
     // declaring request. A coordinated backend+guard follow-up, not something to do half here.
     const [signature, envelopeSignature, binding] = await Promise.all([
-      keyProvider.signAuthorize({ agentDid, action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt }),
+      keyProvider.signAuthorize(authFieldsFor({ action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt, jurisdiction: signedJurisdiction })),
       envelopeSignatureFor({ action, amount: wireAmount, currency: wireCurrency, merchant, context, trace, materiality, nonce, issuedAt }),
       payloadBindingFor({ action, nonce, issuedAt, payload }),
     ]);
-    return { agentDid, action, amount: wireAmount, currency: wireCurrency, merchant, resource, itinerary: context, trace, materiality, nonce, issuedAt, signature, envelopeSignature, ...binding };
+    return { agentDid, action, amount: wireAmount, currency: wireCurrency, merchant, resource, ...jurisdictionField(signedJurisdiction), itinerary: context, trace, materiality, nonce, issuedAt, signature, envelopeSignature, ...binding };
+  }
+
+  /**
+   * The exact fields handed to keyProvider.signAuthorize — ONE builder for both signing paths, and `jurisdiction` is a
+   * key only when it is also sent (jurisdictionField). A provider that spreads what it is given into buildAuthMessage
+   * therefore can never sign a v2 message for a request that goes out without the field (or the reverse).
+   */
+  function authFieldsFor({ action, amount, currency, merchant, resource, nonce, issuedAt, jurisdiction }) {
+    return { agentDid, action, amount, currency, merchant, resource, nonce, issuedAt, ...jurisdictionField(jurisdiction) };
+  }
+  function jurisdictionField(jurisdiction) {
+    return jurisdiction === undefined ? {} : { jurisdiction };
   }
 
   /**
@@ -320,7 +367,13 @@ export function createGuard(opts = {}) {
    * returns { decision:'allow'|'block'|'escalate', reasonCode, authorizationId, remaining }.
    * A network/gate failure returns a fail-CLOSED block so the agent can't proceed blind.
    */
-  async function authorize({ action, amount, currency, merchant, resource, context = {}, trace, materiality, payload }) {
+  async function authorize({ action, amount, currency, merchant, resource, jurisdiction, context = {}, trace, materiality, payload }) {
+    let signedJurisdiction;
+    try {
+      signedJurisdiction = normalizeJurisdiction(jurisdiction);
+    } catch (err) {
+      return { decision: 'block', reasonCode: 'MALFORMED_REQUEST', authorizationId: null, error: String(err.message) }; // refused locally, never sent
+    }
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
     try {
@@ -342,7 +395,7 @@ export function createGuard(opts = {}) {
       // `resource` deliberately NOT passed to envelopeSignatureFor — see buildSignedRequest's
       // own comment on why (backend governance-envelope.ts doesn't include it yet either).
       const [signature, envelopeSignature, binding] = await Promise.all([
-        keyProvider.signAuthorize({ agentDid, action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt }),
+        keyProvider.signAuthorize(authFieldsFor({ action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt, jurisdiction: signedJurisdiction })),
         envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }),
         payloadBindingFor({ action, nonce, issuedAt, payload }),
       ]);
@@ -353,7 +406,7 @@ export function createGuard(opts = {}) {
         // as unsigned-message metadata; JSON.stringify drops them when undefined, so an
         // agent that omits them (or leaves signContext off) sends the legacy body.
         body: JSON.stringify({
-          agentDid, action, amount, currency, merchant, resource, itinerary: context, trace, materiality, nonce, issuedAt,
+          agentDid, action, amount, currency, merchant, resource, ...jurisdictionField(signedJurisdiction), itinerary: context, trace, materiality, nonce, issuedAt,
           signature,
           envelopeSignature,
           ...binding, // payloadDigest + payloadSignature, or nothing for an unbound request
@@ -374,7 +427,7 @@ export function createGuard(opts = {}) {
     } catch (err) {
       // A payload binding that was asked for and cannot be produced is its own answer — NOT a gate outage, and never a
       // reason to send the request unbound. Fail closed with the real cause.
-      if (err?.code === 'PAYLOAD_NOT_CANONICALIZABLE' || err?.code === 'PAYLOAD_BINDING_UNSUPPORTED') {
+      if (err?.code === 'PAYLOAD_NOT_CANONICALIZABLE' || err?.code === 'PAYLOAD_BINDING_UNSUPPORTED' || err?.code === 'JURISDICTION_SIGNING_UNSUPPORTED') {
         return { decision: 'block', reasonCode: err.code, error: String(err.message) };
       }
       // A daemon-backed keyProvider can fail before the gate is ever reached (the signer, not
@@ -411,7 +464,7 @@ export function createGuard(opts = {}) {
    * @param {Array<{standardKey:string,document:object}>} [p.standards] enforced Standards bound to the agent
    * @param {Array<{standardKey:string,document:object}>} [p.sops]      active SOPs assigned to the agent
    * @param {object} [p.mandate]  the ODRL mandate document (omit to skip the mandate layer)
-   * @param {{action:string,amount?:number,currency?:string,merchant?:string,resource?:string,context?:object,cumulativeSpend?:number,now?:string}} p.request
+   * @param {{action:string,amount?:number,currency?:string,merchant?:string,resource?:string,jurisdiction?:string,context?:object,cumulativeSpend?:number,now?:string}} p.request
    * @returns {{decision:'allow'|'block'|'escalate',reasonCode:string|null,authorizationId:null,remaining:null,proofRef:null}}
    */
   function evaluateLocally({ contained = null, operatingMode = null, standards = [], sops = [], mandate, request }) {
@@ -424,7 +477,12 @@ export function createGuard(opts = {}) {
       const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
       return { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
     }
-    const { action, amount = 0, currency = 'USD', merchant = '', resource = null, context = {}, cumulativeSpend = amount, now } = request;
+    const { action, amount = 0, currency = 'USD', merchant = '', resource = null, cumulativeSpend = amount, now } = request;
+    // The jurisdiction the rules and the mandate term judge is the SIGNED one only (spec §8.3.12), exactly as at the gate:
+    // a context `jurisdiction` / `mm:jurisdiction` is the agent's unsigned word and is dropped. (A payee's registered
+    // country, which the gate prefers, is not in the bundle — the gate stays the authority on JURISDICTION_MISMATCH.)
+    const jurisdiction = normalizeJurisdiction(request.jurisdiction);
+    const context = withoutUnsignedJurisdiction(request.context ?? {});
     // Operating-mode autonomy ladder (Phase 2.5b): the trust-driven posture rides as a
     // SIBLING (like `contained`) and biases the edge verdict identically to the gate.
     // READ_ONLY denies a value-bearing action up-front; SUPERVISED/RESTRICTED only
@@ -446,7 +504,7 @@ export function createGuard(opts = {}) {
       // omitting them here means a currency-scoped amount-over/cumulative-over Standards/SOP
       // atom always sees currency as absent and fires closed. Mirrors mandate.service.ts's
       // ruleCtx (PR #588) and the same fix in agentsafe-mcp-guard.mjs's verdictFromBundle.
-      context: buildRuleContext({ unsigned: context, signed: { action, agentDid, amount, currency, merchant, resource }, riskFloor: riskFloorFor(mandate, action) }),
+      context: buildRuleContext({ unsigned: context, signed: { action, agentDid, amount, currency, merchant, resource, ...(jurisdiction ? { jurisdiction } : {}) }, riskFloor: riskFloorFor(mandate, action) }),
       mandateRequest: mandate
         ? {
             target: action,
@@ -464,10 +522,19 @@ export function createGuard(opts = {}) {
               // Unprefixed `resource` (not `mm:resource`) to match the constraint's own
               // leftOperand (ResourceService.scopeConstraint()) — mirrors mandate.service.ts.
               resource,
+              // The allowed-jurisdictions term: with none signed it fails JURISDICTION_REQUIRED, as at the gate.
+              'mm:jurisdiction': jurisdiction,
+              jurisdiction,
             }),
           }
         : undefined,
     });
+    // An enforced jurisdiction rule with nothing signed: the atom does not fire on a missing value, so the gate refuses
+    // JURISDICTION_REQUIRED — a hard block that outranks an escalate. Mirrored here so the local pre-check agrees.
+    const hardStop = verdict.decision === 'block' || verdict.decision === 'suspend' || verdict.decision === 'quarantine';
+    if (!jurisdiction && !hardStop && [...standards, ...sops].some((s) => documentEnforcesJurisdiction(s?.document))) {
+      return { decision: 'block', reasonCode: 'JURISDICTION_REQUIRED', authorizationId: null, remaining: null, proofRef: null };
+    }
     // Mode ESCALATE floor: only lifts an otherwise-PERMIT (allow or observe) to human
     // review (never softens a stricter verdict) — most-restrictive-wins, mirroring the
     // backend gate exactly (escalate outranks observe, so a flag never masks it).
@@ -594,6 +661,11 @@ export function createGuard(opts = {}) {
    */
   async function authorizeLocal(input) {
     const { action, amount = 0 } = input;
+    try {
+      normalizeJurisdiction(input.jurisdiction);
+    } catch (err) {
+      return { decision: 'block', reasonCode: 'MALFORMED_REQUEST', authorizationId: null, error: String(err.message) }; // as authorize() would
+    }
     let b;
     try {
       b = await loadBundle();
@@ -716,9 +788,9 @@ export function createGuard(opts = {}) {
     return async (args) => {
       let decision;
       try {
-        const { amount, currency, merchant, context } = mapArgs(args);
+        const { amount, currency, merchant, jurisdiction, context } = mapArgs(args);
         const bundle = typeof getBundle === 'function' ? await getBundle(args) : getBundle;
-        decision = evaluateLocally({ ...bundle, request: { action, amount, currency, merchant, context } });
+        decision = evaluateLocally({ ...bundle, request: { action, amount, currency, merchant, jurisdiction, context } });
       } catch (err) {
         decision = { decision: 'block', reasonCode: 'LOCAL_EVAL_ERROR', error: String(err?.message ?? err) };
       }
@@ -746,8 +818,9 @@ export function createGuard(opts = {}) {
    *
    * @param {string} action  the governed action (must match a mandate scope, e.g. 'flight-purchase')
    * @param {(args:any, decision:any)=>any} handler  the real tool implementation
-   * @param {(args:any)=>{amount?:number,currency?:string,merchant?:string,context?:object}} mapArgs
-   *   maps the tool's call args to the gate inputs (amount/merchant + the context the rules need)
+   * @param {(args:any)=>{amount?:number,currency?:string,merchant?:string,resource?:string,jurisdiction?:string,context?:object}} mapArgs
+   *   maps the tool's call args to the gate inputs (amount/merchant, the signed `jurisdiction` if any, + the context the
+   *   rules need)
    */
   function guardTool(action, handler, mapArgs = (a) => a, toolOpts = {}) {
     const adapter = toolOpts.executionAdapter ?? defaultExecutionAdapter;

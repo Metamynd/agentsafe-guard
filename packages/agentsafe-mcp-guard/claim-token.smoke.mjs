@@ -56,6 +56,15 @@ function mockIssuer(respond) {
 
 const claimOk = (extra = {}) => ({ status: 200, body: { success: true, data: { ok: true, effectState: 'dispatching', agentDid: agent.did, action: 'flight-purchase', amount: 250, currency: 'USD', merchant: 'skyward-air', ...extra } } });
 const ok = (data = {}) => ({ status: 200, body: { success: true, data } });
+/**
+ * An issuer refusal in the one shape every settlement / effect route answers with (MAGP 8.7.8): the bare reason code as
+ * `message`, `data: { captured|voided|refunded: false, authorizationId, reasonCode, detail }` (no flag on the effect routes),
+ * and the HTTP status the code always has.
+ */
+const refusal = (status, flag, reasonCode, sentence, authorizationId = 'a') => ({
+  status,
+  body: { success: false, message: reasonCode, data: { ...(flag ? { [flag]: false } : {}), authorizationId, reasonCode, detail: `${reasonCode}: ${sentence}` } },
+});
 const router = (over = {}) => (path) => {
   if (path.endsWith('/effect/dispatching')) return over.claim ?? claimOk({ claimToken: TOKEN });
   if (path.endsWith('/capture')) return over.capture ?? ok({ captured: true });
@@ -168,7 +177,7 @@ test('captureAuthorization sends payTo when given (a lowered settlement needs it
 });
 
 test('a void the issuer REFUSES with 409 (hold under reconciliation) reads as not applied, with the bare reason code', async () => {
-  const m = mockIssuer(router({ void: { status: 409, body: { success: false, message: 'HOLD_UNDER_RECONCILIATION', data: { voided: false, reasonCode: 'HOLD_UNDER_RECONCILIATION' } } } }));
+  const m = mockIssuer(router({ void: refusal(409, 'voided', 'HOLD_UNDER_RECONCILIATION', 'the owner has put this hold into reconciliation', 'auth-1') }));
   try {
     const r = await mk().releaseAuthorization({ authorizationId: 'auth-1', claimToken: TOKEN, reason: 'x' });
     assert.equal(r.ok, false);
@@ -178,11 +187,11 @@ test('a void the issuer REFUSES with 409 (hold under reconciliation) reads as no
 });
 
 test('the settlement helpers never throw: refusals, void-not-applied, and an unreachable issuer are reported', async () => {
-  let m = mockIssuer(router({ capture: { status: 400, body: { success: false, message: 'amountCharged (0) is below the claimed hold (250)' } }, void: { status: 200, body: { success: false, message: 'Not voided (NOT_HELD)', data: { voided: false, reasonCode: 'NOT_HELD' } } } }));
+  let m = mockIssuer(router({ capture: refusal(403, 'captured', 'COUNTERPARTY_MISMATCH', 'only the claimer of this hold may settle it below the authorized amount'), void: { status: 200, body: { success: false, message: 'Not voided (NOT_HELD)', data: { voided: false, authorizationId: 'a', status: 'captured', reasonCode: 'NOT_HELD' } } } }));
   try {
     const g = mk();
     const cap = await g.captureAuthorization({ authorizationId: 'a', amountCharged: 0 });
-    assert.equal(cap.ok, false); assert.match(cap.reasonCode, /below the claimed hold/);
+    assert.deepEqual(cap, { ok: false, status: 403, reasonCode: 'COUNTERPARTY_MISMATCH', detail: 'COUNTERPARTY_MISMATCH: only the claimer of this hold may settle it below the authorized amount' });
     const rel = await g.releaseAuthorization({ authorizationId: 'a', claimToken: TOKEN });
     assert.equal(rel.ok, false); assert.equal(rel.reasonCode, 'NOT_HELD');
   } finally { m.restore(); }
@@ -192,6 +201,54 @@ test('the settlement helpers never throw: refusals, void-not-applied, and an unr
     const r = await mk().releaseAuthorization({ authorizationId: 'a', claimToken: TOKEN });
     assert.equal(r.ok, false); assert.equal(r.reasonCode, 'ISSUER_UNREACHABLE');
   } finally { globalThis.fetch = real; }
+});
+
+test('every settlement refusal reads as its stable code and the status that code always has (MAGP 8.7.8)', async () => {
+  const cases = [
+    ['capture', 409, 'captured', 'NOT_HELD'],
+    ['capture', 409, 'captured', 'AUTHORIZATION_EXPIRED'],
+    ['capture', 409, 'captured', 'HOLD_STATE_CHANGED'],
+    ['capture', 409, 'captured', 'EFFECT_NOT_CAPTURABLE'],
+    ['capture', 409, 'captured', 'MANDATE_REVOKED'],
+    ['capture', 409, 'captured', 'DELEGATION_CHAIN_BROKEN'],
+    ['capture', 404, 'captured', 'AUTHORIZATION_NOT_FOUND'],
+    ['capture', 400, 'captured', 'AMOUNT_EXCEEDS_AUTHORIZED'],
+    ['void', 409, 'voided', 'EFFECT_NOT_VOIDABLE'],
+    ['void', 409, 'voided', 'CLAIMED'],
+    ['void', 403, 'voided', 'COUNTERPARTY_MISMATCH'],
+    ['refund', 409, 'refunded', 'ALREADY_REFUNDED'],
+    ['refund', 409, 'refunded', 'HOLD_STATE_CHANGED'],
+    ['refund', 400, 'refunded', 'AMOUNT_EXCEEDS_REFUNDABLE'],
+  ];
+  for (const [call, status, flag, code] of cases) {
+    const m = mockIssuer(() => refusal(status, flag, code, 'a sentence for people'));
+    try {
+      const g = mk();
+      const r = call === 'capture' ? await g.captureAuthorization({ authorizationId: 'a', claimToken: TOKEN, amountCharged: 250 })
+        : call === 'void' ? await g.releaseAuthorization({ authorizationId: 'a', claimToken: TOKEN })
+          : await g.refundAuthorization({ authorizationId: 'a' });
+      assert.deepEqual(r, { ok: false, status, reasonCode: code, detail: `${code}: a sentence for people` }, `${call} ${code}`);
+    } finally { m.restore(); }
+  }
+});
+
+test('the code comes from data.reasonCode first — so an older issuer that put a sentence in `message` still reads as its code', async () => {
+  // Before v1.69.2 a refused capture carried the sentence as `message` and the code only in data.reasonCode.
+  let m = mockIssuer(() => ({ status: 400, body: { success: false, message: 'Authorization already settled', data: { reasonCode: 'NOT_HELD' } } }));
+  try {
+    const r = await mk().captureAuthorization({ authorizationId: 'a', claimToken: TOKEN, amountCharged: 250 });
+    assert.deepEqual(r, { ok: false, status: 400, reasonCode: 'NOT_HELD' });
+  } finally { m.restore(); }
+  // …and one that sent no data at all still surfaces what it did say rather than inventing a code.
+  m = mockIssuer(() => ({ status: 400, body: { success: false, message: 'Authorization not found', data: null } }));
+  try { assert.equal((await mk().captureAuthorization({ authorizationId: 'a', amountCharged: 1 })).reasonCode, 'Authorization not found'); } finally { m.restore(); }
+  // A claim refusal reads the same way.
+  m = mockIssuer(() => refusal(409, null, 'MANDATE_REVOKED', 'the mandate was revoked', 'auth-1'));
+  try {
+    const r = await mk().verifyRequest(signedRequest());
+    assert.equal(r.decision, 'block');
+    assert.equal(r.reasonCode, 'MANDATE_REVOKED');
+  } finally { m.restore(); }
 });
 
 test('the helpers validate their input instead of calling the issuer', async () => {
@@ -429,8 +486,9 @@ test('lookupOutcome reads the public effect status and never signs or throws', a
     assert.equal(m.calls[0].path, '/policy/mandate/authorize/auth-1/effect');
     assert.ok(!('x-magp-service-did' in (m.headers[0] ?? {})), 'a public read is not signed');
   } finally { m.restore(); }
-  m = mockIssuer(() => ({ status: 404, body: { success: false, message: 'Not found' } }));
-  try { assert.deepEqual(await mk().lookupOutcome({ authorizationId: 'nope' }), { ok: false, status: 404, reasonCode: 'Not found' }); } finally { m.restore(); }
+  // An unknown id: 404 AUTHORIZATION_NOT_FOUND in the standard refusal shape (MAGP 8.7.8) — `data` is present but carries no outcome.
+  m = mockIssuer(() => refusal(404, null, 'AUTHORIZATION_NOT_FOUND', 'no authorization with this id', 'nope'));
+  try { assert.deepEqual(await mk().lookupOutcome({ authorizationId: 'nope' }), { ok: false, status: 404, reasonCode: 'AUTHORIZATION_NOT_FOUND' }); } finally { m.restore(); }
   m = mockIssuer(() => 'DROP');
   try { assert.equal((await mk().lookupOutcome({ authorizationId: 'a' })).reasonCode, 'ISSUER_UNREACHABLE'); } finally { m.restore(); }
   assert.equal((await mk().lookupOutcome({})).reasonCode, 'AUTHORIZATION_REQUIRED');
@@ -478,14 +536,14 @@ test('a signed Service signs its refund under the dedicated "refund" action over
 });
 
 test('refundAuthorization refuses bad input locally and reports issuer refusals without throwing', async () => {
-  const m = mockIssuer(() => ({ status: 400, body: { success: false, message: 'Only a captured (settled) authorization can be refunded' } }));
+  const m = mockIssuer(() => refusal(409, 'refunded', 'NOT_CAPTURED', 'only a captured (settled) authorization can be refunded', 'a9'));
   try {
     const g = mk();
     assert.equal((await g.refundAuthorization({})).reasonCode, 'AUTHORIZATION_REQUIRED');
     for (const amount of [0, -5, 'abc', Number.NaN]) assert.equal((await g.refundAuthorization({ authorizationId: 'a9', amount })).reasonCode, 'REFUND_AMOUNT_INVALID', String(amount));
     assert.equal(m.calls.length, 0, 'nothing invalid reaches the issuer');
     const r = await g.refundAuthorization({ authorizationId: 'a9' });
-    assert.deepEqual(r, { ok: false, status: 400, reasonCode: 'Only a captured (settled) authorization can be refunded' });
+    assert.deepEqual(r, { ok: false, status: 409, reasonCode: 'NOT_CAPTURED', detail: 'NOT_CAPTURED: only a captured (settled) authorization can be refunded' });
   } finally { m.restore(); }
   const d = mockIssuer(() => 'DROP');
   try { assert.equal((await mk().refundAuthorization({ authorizationId: 'a9' })).reasonCode, 'ISSUER_UNREACHABLE'); } finally { d.restore(); }

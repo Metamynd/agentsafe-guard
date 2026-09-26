@@ -411,6 +411,10 @@ function requiredContextFor(predicates) {
 
 // src/policy-core/standards-rules.ts
 var CONTEXT_UNVERIFIABLE = "CONTEXT_UNVERIFIABLE";
+var JURISDICTION_ATOM = "jurisdiction-not-allowed";
+function documentEnforcesJurisdiction(doc) {
+  return (doc?.molecules ?? []).some((m) => m?.decision !== "observe" && (m?.atoms ?? []).some((a) => a?.predicate === JURISDICTION_ATOM));
+}
 var PRECEDENCE = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
 function atomFires(atom, ctx) {
   const pred = ATOM_REGISTRY[atom.predicate];
@@ -489,7 +493,7 @@ function evaluateBoundStandards(standards, ctx) {
     const r = evaluateStandardRules(s.document?.molecules, ctx, s.standardKey);
     if (PRECEDENCE[r.decision] > PRECEDENCE[best.decision]) best = r;
   }
-  return best;
+  return standards.some((s) => documentEnforcesJurisdiction(s.document)) ? { ...best, jurisdictionRequired: true } : best;
 }
 function configValueValid(field, value) {
   switch (field.type) {
@@ -587,11 +591,16 @@ var REASON_BY_OPERAND = {
   "mm:counterparty": "COUNTERPARTY_NOT_ALLOWED"
 };
 var AMOUNT_OPERANDS = /* @__PURE__ */ new Set(["mm:payAmount", "mm:cumulativeSpend"]);
+var JURISDICTION_OPERANDS = /* @__PURE__ */ new Set(["mm:jurisdiction", "jurisdiction"]);
 function reasonFor(constraint, req) {
   if (!constraint) return "CONSTRAINT_FAILED";
   const { leftOperand } = constraint;
   if (AMOUNT_OPERANDS.has(leftOperand) && !Object.prototype.hasOwnProperty.call(req.values, leftOperand)) {
     return "AMOUNT_NOT_DETERMINABLE";
+  }
+  if (JURISDICTION_OPERANDS.has(leftOperand)) {
+    const v = req.values[leftOperand];
+    return v === void 0 || v === null || v === "" ? "JURISDICTION_REQUIRED" : "JURISDICTION_NOT_ALLOWED";
   }
   return REASON_BY_OPERAND[leftOperand] ?? `CONSTRAINT_FAILED:${leftOperand}`;
 }
@@ -703,11 +712,14 @@ function evaluate(input) {
 }
 
 // src/policy-core/canonical.ts
+var AUTH_MESSAGE_V2_TAG = "MAGP-AUTH-v2";
 function escapeField(v) {
   return v.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
 }
 function buildAuthMessage(f) {
-  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.resource ?? "", f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+  const v1 = [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.resource ?? "", f.nonce, f.issuedAt];
+  const fields = f.jurisdiction === void 0 || f.jurisdiction === null ? v1 : [...v1, AUTH_MESSAGE_V2_TAG, f.jurisdiction];
+  return fields.map((v) => escapeField(String(v))).join("|");
 }
 function buildLegacyAuthMessageV1(f) {
   return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
@@ -768,8 +780,10 @@ export {
   ATOM_DEFAULT_REQUIRED_CONTEXT,
   ATOM_REGISTRY,
   ATOM_SPECS,
+  AUTH_MESSAGE_V2_TAG,
   CATALOGUED_ATOMS,
   CONTEXT_UNVERIFIABLE,
+  JURISDICTION_ATOM,
   MODES_BY_RANK,
   MODE_RANK,
   PROVENANCE_KEY,
@@ -789,6 +803,7 @@ export {
   buildRuleContext,
   canAuthorize,
   contextFieldProblem,
+  documentEnforcesJurisdiction,
   evaluate,
   evaluateBoundStandards,
   evaluateMandate,

@@ -56,11 +56,20 @@ const REASON_BY_OPERAND: Record<string, string> = {
  *  operator a cap fired when really no amount was ever available to compare against it. */
 const AMOUNT_OPERANDS = new Set(['mm:payAmount', 'mm:cumulativeSpend']);
 
+/** The allowed-jurisdictions term's operands (the stored `mm:jurisdiction`, and the unprefixed alias). A failed one
+ *  with NO value is "the request never established a jurisdiction" (JURISDICTION_REQUIRED), not "it named a
+ *  jurisdiction outside the list" (JURISDICTION_NOT_ALLOWED) — the same split as AMOUNT_OPERANDS above. */
+const JURISDICTION_OPERANDS = new Set(['mm:jurisdiction', 'jurisdiction']);
+
 function reasonFor(constraint: Constraint | undefined, req: MandateRequest): string {
   if (!constraint) return 'CONSTRAINT_FAILED';
   const { leftOperand } = constraint;
   if (AMOUNT_OPERANDS.has(leftOperand) && !Object.prototype.hasOwnProperty.call(req.values, leftOperand)) {
     return 'AMOUNT_NOT_DETERMINABLE';
+  }
+  if (JURISDICTION_OPERANDS.has(leftOperand)) {
+    const v = req.values[leftOperand];
+    return v === undefined || v === null || v === '' ? 'JURISDICTION_REQUIRED' : 'JURISDICTION_NOT_ALLOWED';
   }
   return REASON_BY_OPERAND[leftOperand] ?? `CONSTRAINT_FAILED:${leftOperand}`;
 }
