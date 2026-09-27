@@ -101,6 +101,26 @@ class RealGuardConformance(unittest.TestCase):
         for name in ("amount swapped", "resource swapped", "seven-field signature"):
             self.assertEqual((r[name]["decision"], r[name]["reasonCode"]), ("block", "SIGNATURE_INVALID"), f"{name}: {r[name]}")
 
+    def test_the_default_context_signature_verifies_and_an_altered_context_is_refused(self) -> None:
+        """0.7.0 signs the context by default (MAGP 8.3.13): the real mcp-guard verifies it, and refuses a rewritten itinerary."""
+        c = self.client
+        signed = dict(c.sign_request("flight-purchase", 100, merchant="skyward-air", context={"riskLevel": "high"}).body)
+        self.assertIn("envelopeSignature", signed)
+        tiny = dict(c.sign_request("flight-purchase", 1.5e-7, merchant="skyward-air", context={"riskLevel": "low", "n": [2**60 + 1, 0.00005, "Zoë \U0001F600"]}).body)
+        rewritten = {**signed, "itinerary": {"riskLevel": "low"}}
+        plain = dict(MetaMyndClient("http://127.0.0.1:1", self.did, self.seed, sign_context=False).sign_request("flight-purchase", 100, merchant="skyward-air", context={"riskLevel": "low"}).body)
+        self.assertNotIn("envelopeSignature", plain)
+        r = self._verify([
+            self._guard("context signed", signed),
+            self._guard("awkward values signed", tiny),
+            self._guard("context rewritten", rewritten),
+            self._guard("opted out", plain),
+        ])
+        self.assertEqual((r["context signed"]["decision"], r["context signed"]["reasonCode"]), ("escalate", "RISK_REVIEW"), r["context signed"])
+        self.assertEqual(r["awkward values signed"]["decision"], "allow", r["awkward values signed"])
+        self.assertEqual((r["context rewritten"]["decision"], r["context rewritten"]["reasonCode"]), ("block", "CONTEXT_SIGNATURE_INVALID"), r["context rewritten"])
+        self.assertEqual(r["opted out"]["decision"], "allow", r["opted out"])
+
     def test_a_signed_jurisdiction_verifies_as_v2_and_is_the_only_one_judged(self) -> None:
         """MAGP §8.3.12 against the real guard: the v2 message verifies, the mandate's allowed-jurisdictions term judges
         the SIGNED value, a context jurisdiction stands in for nothing, and stripping the field breaks the signature."""

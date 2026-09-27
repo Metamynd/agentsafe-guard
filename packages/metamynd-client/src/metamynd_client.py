@@ -133,6 +133,7 @@ __all__ = [
     "payload_digest",
     "payload_binding_message",
     "payload_rebind_message",
+    "envelope_hash",
     "NO_PAYLOAD",
     "BindResult",
     "PayloadNotCanonicalizable",
@@ -143,7 +144,7 @@ __all__ = [
     "GovernanceBlocked",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -442,6 +443,40 @@ def canonical_payload(value: Any) -> str:
 def payload_digest(value: Any) -> str:
     """`sha256:` + the hex SHA-256 of the canonical text — what the agent signs and the executing service compares."""
     return PAYLOAD_DIGEST_PREFIX + hashlib.sha256(canonical_payload(value).encode("utf-8")).hexdigest()
+
+
+ENVELOPE_VERSION = "1.0"
+
+
+def envelope_hash(request: Mapping[str, Any]) -> str:
+    """The envelope hash a context signature covers (MAGP §8.3.13) — byte-for-byte the gate's `envelopeHashFor`.
+
+    `request` is the wire request (the dict this client sends): the GovernanceEnvelope is built from it exactly as the gate
+    builds it — no defaults applied, `context` = the `itinerary` when present (an empty dict included), `merchant` null when
+    absent — then serialised with object keys sorted by UTF-16 code unit and ECMAScript number/string forms, which for JSON
+    values is the gate's `stableStringify` and RFC 8785 alike, and hashed: lower-case hex SHA-256. Checked against
+    docs/protocol/context-signature-vectors.json (tests/test_context_signature.py). A value JSON cannot carry raises
+    `PayloadNotCanonicalizable`.
+    """
+    nonce = request["nonce"]
+    action: dict[str, Any] = {"actionId": f"act:{nonce}", "actionType": request["action"], "merchant": request.get("merchant")}
+    for key in ("amount", "currency"):
+        if request.get(key) is not None:
+            action[key] = request[key]
+    if request.get("materiality") is not None:
+        action["materiality"] = request["materiality"]
+    envelope: dict[str, Any] = {
+        "envelopeId": f"env:{nonce}",
+        "version": ENVELOPE_VERSION,
+        "createdAt": request["issuedAt"],
+        "agent": {"did": request["agentDid"]},
+        "action": action,
+    }
+    if request.get("trace") is not None:
+        envelope["trace"] = request["trace"]
+    if request.get("itinerary") is not None:
+        envelope["context"] = request["itinerary"]
+    return hashlib.sha256(_canonical(envelope, 0, "$").encode("utf-8")).hexdigest()
 
 
 def payload_binding_message(agent_did: str, action: str, nonce: str, issued_at: str, digest: str) -> str:
@@ -874,6 +909,9 @@ class _LocalKeySigner:
             message = payload_rebind_message(fields["agentDid"], fields["action"], authorization_id, fields["nonce"], fields["issuedAt"], fields["payloadDigest"])
         return self._key.sign(message.encode("utf-8"))
 
+    def sign_envelope(self, fields: Mapping[str, Any]) -> bytes:
+        return self._key.sign(envelope_hash(fields).encode("utf-8"))
+
 
 class _DaemonSigner:
     """Signs by asking `agentsafe-signer` — the key never enters this process."""
@@ -913,6 +951,21 @@ class _DaemonSigner:
                 raise DaemonError("PAYLOAD_BINDING_UNSUPPORTED", "the agentsafe-signer daemon predates payload binding (sign-payload, signer 0.15.0); upgrade it, or omit `payload`") from exc
             raise
 
+    def sign_envelope(self, fields: Mapping[str, Any]) -> bytes:
+        # The daemon builds the envelope itself from these fields (`sign-envelope`, every signer version). This client always
+        # sends amount and currency, so even a daemon older than signer 0.19.0 (which defaulted an omitted currency) hashes
+        # the same envelope the gate does. Fails closed: no signature → an error, never an unsigned context.
+        params = {k: v for k, v in fields.items() if v is not None}
+        try:
+            result = _daemon_request(self._socket_path, "sign-envelope", params, self._connect_timeout)
+        except DaemonError as exc:
+            if exc.code == "DAEMON_UNKNOWN_OPERATION":
+                raise DaemonError("CONTEXT_SIGNING_UNSUPPORTED", "the agentsafe-signer daemon cannot sign the context (no sign-envelope); upgrade it, or pass sign_context=False") from exc
+            raise
+        if not isinstance(result.get("envelopeSignature"), str):
+            raise DaemonError("CONTEXT_SIGNING_UNSUPPORTED", "the agentsafe-signer daemon returned no envelopeSignature; upgrade it, or pass sign_context=False")
+        return bytes.fromhex(result["envelopeSignature"])
+
 
 # --------------------------------------------------------------------------------------
 # Client
@@ -922,16 +975,22 @@ class _DaemonSigner:
 class MetaMyndClient:
     """Signs and submits authorize requests to the MetaMynd gate."""
 
-    def __init__(self, api: str, agent_did: str, agent_key: Optional[str] = None, timeout: float = 15.0, *, daemon_socket: Optional[str] = None):
+    def __init__(self, api: str, agent_did: str, agent_key: Optional[str] = None, timeout: float = 15.0, *, daemon_socket: Optional[str] = None, sign_context: bool = True):
         """Exactly one of `agent_key` (the key lives in THIS process) or `daemon_socket` — a path
         to an `agentsafe-signer` daemon's socket (0.5.0) — must be given; the daemon signs without
         ever handing the key to this process. Everything else about the client is identical either
         way: every signing call already goes through `self._signer`, so nothing downstream needs
         to know or care which one is in use.
+
+        `sign_context` (0.7.0, default True): every request also carries `envelopeSignature`, this
+        agent's signature over its context (MAGP §8.3.13), so the gate and any re-verifying service
+        refuse a context altered in transit (`CONTEXT_SIGNATURE_INVALID`). `False` sends the request
+        exactly as 0.6.x did. Services that predate it ignore the field.
         """
         self.api = api.rstrip("/")
         self.agent_did = agent_did
         self.timeout = timeout
+        self.sign_context = sign_context
         if bool(agent_key) == bool(daemon_socket):
             raise ValueError("MetaMyndClient needs exactly one of agent_key or daemon_socket")
         self._signer = _LocalKeySigner(load_key(agent_key)) if agent_key else _DaemonSigner(daemon_socket)
@@ -946,9 +1005,11 @@ class MetaMyndClient:
         if not agent_did or not (agent_key or daemon_socket):
             raise RuntimeError("set AGENT_DID and (AGENT_KEY or AGENT_DAEMON_SOCKET) (see the provisioning docs)")
         api = os.environ.get("METAMYND_API", DEFAULT_API)
+        # METAMYND_SIGN_CONTEXT=false opts out of context signing (0.7.0; on by default).
+        sign_context = os.environ.get("METAMYND_SIGN_CONTEXT", "true").strip().lower() not in ("false", "0", "no", "off")
         if agent_key:
-            return cls(api, agent_did, agent_key)
-        return cls(api, agent_did, daemon_socket=daemon_socket)
+            return cls(api, agent_did, agent_key, sign_context=sign_context)
+        return cls(api, agent_did, daemon_socket=daemon_socket, sign_context=sign_context)
 
     def sign_request(
         self,
@@ -1024,6 +1085,11 @@ class MetaMyndClient:
             digest = payload_digest(payload)
             body["payloadDigest"] = digest
             body["payloadSignature"] = self._signer.sign_payload_binding({"agentDid": self.agent_did, "action": action, "nonce": nonce, "issuedAt": issued_at, "payloadDigest": digest}).hex()
+        if self.sign_context:
+            # MAGP §8.3.13 (0.7.0, on by default): sign the envelope built from exactly the fields sent, so the gate's
+            # envelopeHashFor over the received body is the hash signed. Fails closed — an error, never an unsigned context.
+            envelope_fields = {k: body.get(k) for k in ("agentDid", "action", "amount", "currency", "merchant", "itinerary", "nonce", "issuedAt")}
+            body["envelopeSignature"] = self._signer.sign_envelope(envelope_fields).hex()
         if authorization_id:
             body["authorizationId"] = authorization_id
         return SignedRequest(body)

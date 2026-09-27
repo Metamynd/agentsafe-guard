@@ -427,6 +427,19 @@ jurisdiction in the itinerary is ignored, and one stripped or changed in transit
 payee's country wins at the issuer (`JURISDICTION_MISMATCH`); the other refusals are `JURISDICTION_REQUIRED` and
 `JURISDICTION_NOT_ALLOWED`. Nothing to configure.
 
+## The agent's context signature — since 0.15.0
+
+Depends on `@metamynd/agentsafe-mcp-guard` ^0.17.0, which verifies the agent's `envelopeSignature` (its signature over
+the itinerary, `trace` and `materiality`, MAGP §8.3.13; sent by default by agentsafe-guard ≥ 0.17.0) before judging the
+context. A request whose itinerary was altered after the agent signed it — by anything between the agent and this
+gateway — is `403 CONTEXT_SIGNATURE_INVALID` and never forwarded (0.14.0 judged the altered context and forwarded it).
+A request without the signature is judged as before, unless you require it:
+
+- `createHttpGateway({ ..., requireContextSignature: true })`, or `route.requireContextSignature` per route (a route's
+  value wins, `false` included) → `403 CONTEXT_SIGNATURE_REQUIRED` for a request that carries none. Unset → the
+  guard's own setting (`createMcpGuard({ requireContextSignature })`, off by default).
+- `server.mjs`: `AGENTSAFE_REQUIRE_CONTEXT_SIGNATURE=true`.
+
 ## Embed the core
 
 ```js

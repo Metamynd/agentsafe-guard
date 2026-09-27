@@ -447,6 +447,33 @@ field is present and v1 when it is absent, never the other: a jurisdiction strip
   the issuer's gate only, at authorize or claim — `JURISDICTION_MISMATCH`: **a registered payee's country wins**, and a
   signed value that differs is refused.
 
+### The agent's context signature (`envelopeSignature`, `requireContextSignature`) — since 0.17.0
+
+The itinerary (and `trace` / `materiality`) is not in the signed message, so anything between the agent and this
+Service — a proxy, a message bus, an orchestrator relaying the request — could rewrite what your rules judge: a
+blocked `tool` into an allowed one, `riskLevel: 'high'` into `'low'`. An agent that signs its context sends
+`envelopeSignature`, its Ed25519 signature over the request's envelope hash (MAGP §8.3.13; sent by default by
+agentsafe-guard ≥ 0.17.0 and metamynd-client ≥ 0.7.0). `verifyRequest` / `guardIncomingTool` now check it the way the issuer's gate
+does, right after the request signature and before any rule:
+
+- **Present** → verified with the agent's key (the key in its DID, as for `signature`) over `envelopeHashFor` — the
+  gate's own function, bundled as `governance-envelope.mjs` — computed over the request as received and the very
+  `itinerary` the rules then read. A mismatch (the context altered after signing, or signed by another key; an empty or
+  non-string value too) is `block` / `CONTEXT_SIGNATURE_INVALID`. Before 0.17.0 the signature was ignored and the
+  altered context was judged.
+- **Absent** → judged exactly as before: the signature is optional.
+- **`requireContextSignature: true`** (on `createMcpGuard`, or per call on `verifyRequest` / `guardIncomingTool`, which
+  overrides it) refuses an absent one with `block` / `CONTEXT_SIGNATURE_REQUIRED`. A relay can strip the signature as
+  easily as rewrite the context, so turn this on where the agent's context drives a decision and your agents sign it.
+  `CONTEXT_SIGNATURE_REQUIRED` is receiver-only (the gate has no such option).
+
+```js
+const guard = createMcpGuard({ serviceDid, serviceKey, issuerApi, policyPublicKey, requireContextSignature: true });
+```
+
+Both codes are exported as `CONTEXT_SIGNATURE_REASON_CODES`. The context signature attributes the context to the agent;
+it does not make it true — keep deriving what you can (`trustedContext`).
+
 ## 3. Payment binding (x402, §7a)
 
 MAGP authorizes and reserves budget; it never custodies funds (§7a.5). Value moves over

@@ -145,7 +145,8 @@ const guard = createGuard({ api: 'http://unused.local/api/v1', agentDid, agentKe
     const realFetch = globalThis.fetch; let sent = false;
     globalThis.fetch = async () => { sent = true; return { status: 200, json: async () => ({ data: { decision: 'allow' } }) }; };
     try {
-      const g = createGuard({ api: 'http://unused.local/api/v1', agentDid, keyProvider: old });
+      // signContext: false isolates the payload refusal (this stand-in's envelope signature is not a real one).
+      const g = createGuard({ api: 'http://unused.local/api/v1', agentDid, keyProvider: old, signContext: false });
       const r = await g.authorize({ ...base, payload: PAYLOAD });
       check(r.decision === 'block' && r.reasonCode === 'PAYLOAD_BINDING_UNSUPPORTED' && !sent, 'authorize() with payload against an old daemon blocks PAYLOAD_BINDING_UNSUPPORTED and sends nothing');
     } finally { globalThis.fetch = realFetch; }

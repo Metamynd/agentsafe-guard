@@ -163,6 +163,9 @@ async function main() {
     // rewritten policy bundle; without it over plain http a value-bearing call is refused (POLICY_BUNDLE_UNVERIFIED).
     policyPublicKey: process.env.AGENTSAFE_POLICY_PUBLIC_KEY || undefined,
     allowUnverifiedBundle: process.env.AGENTSAFE_ALLOW_UNVERIFIED_BUNDLE === 'true',
+    // Refuse a request whose context (itinerary/trace/materiality) the agent did not sign (CONTEXT_SIGNATURE_REQUIRED).
+    // Off by default — agentsafe-guard >= 0.17.0 signs it unless `signContext: false`, older agents do not; a present one is always checked.
+    requireContextSignature: process.env.AGENTSAFE_REQUIRE_CONTEXT_SIGNATURE === 'true',
   });
   const routes = loadRoutes();
   if (!DENY_BY_DEFAULT) {

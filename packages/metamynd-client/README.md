@@ -66,6 +66,22 @@ too.
 - With `daemon_socket=`, the daemon must be `agentsafe-signer` ≥ 0.18.0; an older one raises
   `DaemonError("JURISDICTION_SIGNING_UNSUPPORTED")` instead of signing the wrong message.
 
+### The context is signed too (0.7.0, on by default, MAGP §8.3.13)
+
+Every request also carries `envelopeSignature`: this agent's signature over the request's envelope hash, which covers
+the `context` (sent as `itinerary`). The gate — and a Service running agentsafe-mcp-guard ≥ 0.17.0, agentsafe-a2a-guard
+≥ 0.12.0 or agentsafe-http-gateway ≥ 0.15.0 — refuses a context altered after signing (`CONTEXT_SIGNATURE_INVALID`);
+older Services ignore the field. `envelope_hash(request)` is the hash, byte-for-byte the gate's (checked against the
+shared vectors in `docs/protocol/context-signature-vectors.json`). To opt out:
+
+```python
+client = MetaMyndClient(api, agent_did, agent_key, sign_context=False)   # or METAMYND_SIGN_CONTEXT=false for from_env()
+```
+
+The context must be JSON (a value JSON cannot carry raises `PayloadNotCanonicalizable` before anything is sent). With
+`daemon_socket=`, the daemon signs it (`sign-envelope`, every signer version); one without it raises
+`DaemonError("CONTEXT_SIGNING_UNSUPPORTED")` — the request is never sent with its context unsigned.
+
 ## Guard a tool
 
 ```python

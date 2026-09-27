@@ -517,6 +517,32 @@ await guard.authorize({ action: 'flight-purchase', amount: 150, merchant: 'skywa
 - With `keyProvider: 'daemon'`, the signer must be `@metamynd/agentsafe-signer` ≥ 0.18.0; an older daemon cannot sign
   the field and the request is refused `JURISDICTION_SIGNING_UNSUPPORTED` before it is sent.
 
+### The context is signed too (`signContext`) — on by default since 0.17.0
+
+The `context` you pass (sent as `itinerary`), `trace` and `materiality` are not in the signed message: anything
+between this agent and the gate or a Service could rewrite them. So every request also carries `envelopeSignature`,
+this agent's signature (same key) over the request's envelope hash (MAGP §8.3.13) — `authorize()`,
+`buildSignedRequest()`, `guardTool` and agentsafe-a2a-guard's `buildA2AEnvelope` all sign it. To opt out:
+
+```js
+const guard = createGuard({ api, agentDid, agentKey, signContext: false }); // or "signContext": false in the guard config file
+```
+
+- **Who checks it.** The gate refuses a context altered after signing (`CONTEXT_SIGNATURE_INVALID`), and so do Services
+  running `@metamynd/agentsafe-mcp-guard` ≥ 0.17.0, `@metamynd/agentsafe-a2a-guard` ≥ 0.12.0 or
+  `@metamynd/agentsafe-http-gateway` ≥ 0.15.0 — which can also be set to refuse a request that carries none
+  (`requireContextSignature`, `CONTEXT_SIGNATURE_REQUIRED`). Older Services ignore the field.
+- **What is signed is what is sent.** The context, trace and materiality are sent as their JSON (a `Date` becomes its
+  string), and `trace` keeps only the keys the gate accepts (`workflowId`, `workflowStep`, `parentActionId`,
+  `toolCalls`, `dataSources`, `checksPerformed`, `upstreamEvidenceRefs`) — the gate strips any other before it hashes.
+- **Fails closed.** When the key provider cannot produce the signature the request is refused before it is sent —
+  `authorize()` returns `block` / `CONTEXT_SIGNING_UNSUPPORTED`, `buildSignedRequest()` throws with that `code` — rather
+  than going out unsigned: a custom `keyProvider` without `signEnvelope`, or, with `keyProvider: 'daemon'`, an
+  `@metamynd/agentsafe-signer` older than **0.19.0** for a request whose amount or currency is omitted (it refuses an
+  omitted amount and hashes an omitted currency as `USD`; the guard checks the daemon's signature against the hash it
+  sends). Upgrade the signer, or pass `signContext: false`.
+- Cost: one extra Ed25519 signature per request.
+
 ## 4. Evaluate locally (no network)
 
 For low-latency, cooperative-mode governance the guard can evaluate a **policy bundle** locally with
