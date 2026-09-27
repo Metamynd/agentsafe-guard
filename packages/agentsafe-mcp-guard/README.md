@@ -530,6 +530,21 @@ transaction** — the host reconstructs the tx and verifies MetaMynd's signature
 `checkCapabilityBinding` from `magp-bind`), so "authorize $150, execute $5,000" is rejected in the
 prod guard, not just the demo gateway. No verifier configured → opt-in (unchanged).
 
+Bind the capability to the **agent** too: pass the DID the guard already authenticated
+(`signed.agentDid`) as `agentDid`, so a capability lifted from another agent is refused with
+`CAPABILITY_AGENT_MISMATCH` (a v1 capability with no subject fails closed the same way):
+
+```js
+import { checkCapabilityBinding } from 'magp-bind'; // magp-zk's ./bind — not published to npm
+// capabilityPubkey: fetched once from GET /magp/capability/pubkey
+const verifyCapability = async (signed) => checkCapabilityBinding(signed.capability, capabilityPubkey, {
+  tx: rebuildTx(signed),          // YOUR reconstruction of the booking being executed
+  saltHex: openingSalt(signed),   // the commitment opening (salt) the agent sent with it
+  agentDid: signed.agentDid,      // → CAPABILITY_AGENT_MISMATCH if it was issued to someone else
+  // optional, same fail-closed rule: mandateId, action, currency → CAPABILITY_SCOPE_MISMATCH
+});
+```
+
 Presenting a capability is otherwise the **caller's** choice: an agent can simply omit
 `signed.capability` and the check above never runs, verifier configured or not. Set
 `requireCapability: true` to close that omission — a PERMIT with no capability is then blocked
