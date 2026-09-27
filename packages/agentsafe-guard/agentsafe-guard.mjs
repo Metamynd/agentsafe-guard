@@ -41,6 +41,17 @@ export function normalizeJurisdiction(value) {
   return trimmed.toUpperCase();
 }
 
+/** The `trace` keys the gate's authorize schema keeps (mandate.controller.ts TraceSchema); it strips any other. */
+const TRACE_KEYS = ['workflowId', 'workflowStep', 'parentActionId', 'toolCalls', 'dataSources', 'checksPerformed', 'upstreamEvidenceRefs'];
+
+/**
+ * Refusals this guard answers before a request is sent when the context cannot be signed (signContext, on by default):
+ * CONTEXT_SIGNING_UNSUPPORTED — the key provider cannot produce a context signature the gate would verify (a custom
+ * provider without signEnvelope; an agentsafe-signer daemon older than 0.19.0 for a request whose amount/currency is
+ * omitted). Upgrade the signer, or pass `signContext: false`.
+ */
+export const CONTEXT_SIGNING_REASON_CODES = Object.freeze(['CONTEXT_SIGNING_UNSUPPORTED']);
+
 /** The keys an unsigned context could name a jurisdiction under — the gate never reads them, so neither does local eval. */
 const UNSIGNED_JURISDICTION_KEYS = ['jurisdiction', 'mm:jurisdiction'];
 function withoutUnsignedJurisdiction(context) {
@@ -202,17 +213,38 @@ export function createGuard(opts = {}) {
   // four methods instead — see key-providers.mjs for why there are four, not one.
   const keyProvider = resolveKeyProvider(opts, cfg);
 
-  // Tier 1 context-claim binding (opt-in, docs/design/context-claim-binding.md): when
-  // on, sign the GovernanceEnvelope hash too, so a counterparty/gate can prove the
-  // agent's OWN key attested to the context it submitted — not just the signed action
-  // subset. Off by default: a bare request stays a valid degenerate envelope, exactly
-  // like today, and the wire body carries no envelopeSignature field at all.
-  const signContext = opts.signContext ?? cfg?.signContext ?? false;
+  // Context-claim binding (MAGP §8.3.13, docs/design/context-claim-binding.md): sign the GovernanceEnvelope hash too, so
+  // the gate and every counterparty can prove the agent's OWN key attested to the context it submitted (itinerary, trace,
+  // materiality) — not just the signed action subset — and refuse one rewritten in transit (CONTEXT_SIGNATURE_INVALID).
+  // ON by default since 0.17.0; `signContext: false` (option or config file) opts out, and the wire body then carries no
+  // envelopeSignature field at all, exactly as before. Receivers that predate it ignore the field.
+  //
+  // Fails CLOSED: a key provider that cannot produce the signature (a custom provider without signEnvelope, a daemon whose
+  // signature does not match the hash sent) refuses the request with CONTEXT_SIGNING_UNSUPPORTED — it never quietly sends
+  // the context unsigned, which a receiver requiring the signature would refuse anyway and which is exactly what a relay
+  // stripping the field looks like. The remedy is named in the error: upgrade the signer, or pass signContext: false.
+  const signContext = (opts.signContext ?? cfg?.signContext ?? true) !== false;
   async function envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }) {
     if (!signContext) return undefined;
+    if (typeof keyProvider.signEnvelope !== 'function') {
+      throw Object.assign(new Error('this keyProvider cannot sign the context (no signEnvelope); add it, or pass signContext: false'), { code: 'CONTEXT_SIGNING_UNSUPPORTED' });
+    }
     // The hash is independent of `signature` (excluded from what it commits to — see
     // governance-envelope.ts), so an empty placeholder here is exact, not approximate.
     return keyProvider.signEnvelope({ agentDid, action, amount, currency, merchant, itinerary: context, trace, materiality, nonce, issuedAt });
+  }
+  /**
+   * The context fields exactly as a verifier will see them, so the hash signed is the hash it recomputes: each value as it
+   * survives JSON (a Date becomes its string, an undefined member disappears), and `trace` reduced to the keys the gate's
+   * schema keeps (it strips any other key before hashing, so signing one would fail CONTEXT_SIGNATURE_INVALID). Applied
+   * only when the context is signed; with signContext: false the fields are sent as given, as before.
+   */
+  function contextOnWire({ context, trace, materiality }) {
+    if (!signContext) return { context, trace, materiality };
+    const asJson = (v) => { const s = JSON.stringify(v); return s === undefined ? undefined : JSON.parse(s); };
+    let t = asJson(trace);
+    if (t && typeof t === 'object' && !Array.isArray(t)) t = Object.fromEntries(Object.entries(t).filter(([k]) => TRACE_KEYS.includes(k)));
+    return { context: asJson(context), trace: t, materiality: asJson(materiality) };
   }
 
   // Payload binding (spec §8.3.9): sign a digest of the COMPLETE payload the caller will execute, bound to THIS authorization
@@ -342,6 +374,7 @@ export function createGuard(opts = {}) {
     // action fields don't include it yet either (only amount/currency/merchant) — adding it
     // to just one side would break Tier-1 envelope-hash verification for any resource-
     // declaring request. A coordinated backend+guard follow-up, not something to do half here.
+    ({ context, trace, materiality } = contextOnWire({ context, trace, materiality }));
     const [signature, envelopeSignature, binding] = await Promise.all([
       keyProvider.signAuthorize(authFieldsFor({ action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt, jurisdiction: signedJurisdiction })),
       envelopeSignatureFor({ action, amount: wireAmount, currency: wireCurrency, merchant, context, trace, materiality, nonce, issuedAt }),
@@ -394,6 +427,7 @@ export function createGuard(opts = {}) {
       // see key-providers.mjs for why callers pass structured fields, not a pre-built string.
       // `resource` deliberately NOT passed to envelopeSignatureFor — see buildSignedRequest's
       // own comment on why (backend governance-envelope.ts doesn't include it yet either).
+      ({ context, trace, materiality } = contextOnWire({ context, trace, materiality }));
       const [signature, envelopeSignature, binding] = await Promise.all([
         keyProvider.signAuthorize(authFieldsFor({ action, amount: signedAmount, currency: signedCurrency, merchant, resource, nonce, issuedAt, jurisdiction: signedJurisdiction })),
         envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }),
@@ -402,9 +436,9 @@ export function createGuard(opts = {}) {
       const res = await fetch(`${base}/policy/mandate/authorize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // trace/materiality (SAFR §5 envelope) and envelopeSignature (Tier 1, opt-in) ride
+        // trace/materiality (SAFR §5 envelope) and envelopeSignature (context signature, on by default) ride
         // as unsigned-message metadata; JSON.stringify drops them when undefined, so an
-        // agent that omits them (or leaves signContext off) sends the legacy body.
+        // agent that omits them (or sets signContext: false) sends the legacy body.
         body: JSON.stringify({
           agentDid, action, amount, currency, merchant, resource, ...jurisdictionField(signedJurisdiction), itinerary: context, trace, materiality, nonce, issuedAt,
           signature,
@@ -427,7 +461,7 @@ export function createGuard(opts = {}) {
     } catch (err) {
       // A payload binding that was asked for and cannot be produced is its own answer — NOT a gate outage, and never a
       // reason to send the request unbound. Fail closed with the real cause.
-      if (err?.code === 'PAYLOAD_NOT_CANONICALIZABLE' || err?.code === 'PAYLOAD_BINDING_UNSUPPORTED' || err?.code === 'JURISDICTION_SIGNING_UNSUPPORTED') {
+      if (err?.code === 'PAYLOAD_NOT_CANONICALIZABLE' || err?.code === 'PAYLOAD_BINDING_UNSUPPORTED' || err?.code === 'JURISDICTION_SIGNING_UNSUPPORTED' || err?.code === 'CONTEXT_SIGNING_UNSUPPORTED') {
         return { decision: 'block', reasonCode: err.code, error: String(err.message) };
       }
       // A daemon-backed keyProvider can fail before the gate is ever reached (the signer, not

@@ -403,10 +403,17 @@ function withHeader(headers, name, value) {
  * which relied on every upstream rejecting an unauthenticated call. A route that needs no
  * credential sets `route.credential: false` and the hook is not called for it.
  *
+ * requireContextSignature — OPTIONAL (needs agentsafe-mcp-guard >= 0.17.0): true refuses a governed request that
+ * carries no `envelopeSignature` (the agent's own signature over its itinerary/trace/materiality — context-claim
+ * binding) with `403 CONTEXT_SIGNATURE_REQUIRED`, before any rule is evaluated; `route.requireContextSignature`
+ * overrides it per route. Unset (the default) → the guard's own `requireContextSignature` (off unless the guard was
+ * built with it). A PRESENT `envelopeSignature` is always verified by the guard either way — one that does not verify
+ * over the request as it reached this gateway is `403 CONTEXT_SIGNATURE_INVALID`.
+ *
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
  */
-export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false } = {}) {
+export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false, requireContextSignature } = {}) {
   if (typeof forward !== 'function') throw new Error('createHttpGateway requires a forward(req) function');
 
   /**
@@ -583,7 +590,9 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       // agent's word, which is exactly what the deriver was there to avoid.
       if (configured) assertTrustedContext(trustedContext, route);
       // What is passed on is only what is set, so a guard that predates an option is called exactly as it always was.
+      const requireContext = route.requireContextSignature ?? requireContextSignature;
       const verifyOptions = {
+        ...(typeof requireContext === 'boolean' ? { requireContextSignature: requireContext } : {}),
         ...(trustedContext !== undefined ? { trustedContext } : {}),
         ...(payloadDigest !== undefined ? { payloadDigest } : {}),
         ...(requireBinding ? { requirePayloadBinding: true } : {}),

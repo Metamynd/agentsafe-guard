@@ -29,6 +29,33 @@ function withoutUnsignedJurisdiction(itinerary) {
   const { jurisdiction: _j, 'mm:jurisdiction': _mj, ...rest } = itinerary;
   return rest;
 }
+
+/**
+ * The context-signature refusals (context-claim binding, docs/design/context-claim-binding.md), both hard blocks returned
+ * before any rule is evaluated: CONTEXT_SIGNATURE_INVALID (an `envelopeSignature` is present and does not verify — the
+ * same code the issuer's gate answers) and CONTEXT_SIGNATURE_REQUIRED (none, on a guard with `requireContextSignature`;
+ * receiver-only, the gate has no such option).
+ */
+export const CONTEXT_SIGNATURE_REASON_CODES = Object.freeze(['CONTEXT_SIGNATURE_INVALID', 'CONTEXT_SIGNATURE_REQUIRED']);
+
+/**
+ * The agent's context signature, checked the way the issuer's gate checks it: an Ed25519 signature by the agent's key (the
+ * key in its DID, as for the request signature) over `envelopeHashFor` — the backend's own function, generated into
+ * governance-envelope.mjs — computed over the WIRE fields (no defaults), and over `itinerary`, the exact object this guard
+ * then evaluates. It commits to the itinerary, trace and materiality. Present but not a verifying string (empty included:
+ * a signature is never read as absent) → CONTEXT_SIGNATURE_INVALID. Absent (undefined / null) → CONTEXT_SIGNATURE_REQUIRED
+ * when required, otherwise nothing to check.
+ * @returns {string|null} the refusal's reason code, or null to carry on
+ */
+function contextSignatureRefusal(signed, itinerary, required) {
+  const sig = signed.envelopeSignature;
+  if (sig === undefined || sig === null) return required ? 'CONTEXT_SIGNATURE_REQUIRED' : null;
+  if (typeof sig !== 'string' || sig === '') return 'CONTEXT_SIGNATURE_INVALID';
+  const { agentDid, action, amount, currency, merchant, trace, materiality, nonce, issuedAt } = signed;
+  const hash = envelopeHashFor({ agentDid, action, amount, currency, merchant, itinerary, trace, materiality, nonce, issuedAt, signature: '' });
+  return verifyDidSignature(agentDid, hash, sig) ? null : 'CONTEXT_SIGNATURE_INVALID';
+}
+import { envelopeHashFor } from './governance-envelope.mjs';
 import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 import { verifyBundle } from './magp-policy.mjs';
 import { resolveKeyProvider } from './key-providers.mjs';
@@ -111,8 +138,14 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   never runs at all, since it only fires when the field is present. Off by default (an existing
  *   integrator's un-capability-aware callers must keep working); set true on any Service where
  *   capability binding is meant to be mandatory, not opt-in.
+ * @param {boolean} [cfg.requireContextSignature] when true, a request that carries no `envelopeSignature` (the agent's
+ *   own signature over its context — context-claim binding, docs/design/context-claim-binding.md) is refused
+ *   `CONTEXT_SIGNATURE_REQUIRED` before any rule is evaluated. Off by default: the signature is optional (agentsafe-guard
+ *   >= 0.17.0 sends it unless `signContext: false`), and a PRESENT one is always verified either way. Turn it on where the
+ *   agent's context drives a decision and anything can sit between the agent and this Service — without it, a relay can
+ *   strip the signature and rewrite the context. Overridable per call (verifyRequest / guardIncomingTool option).
  */
-export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   // With no policyPublicKey, nothing but the transport vouches for the policy bundle. Over plain http:// nothing does:
@@ -557,9 +590,11 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    *   from the real request (e.g. `{ riskLevel: 'high' }` for a wire-transfer route) — NEVER anything the agent sent.
    *   It outranks the agent's claim and is labelled `gateway_derived`; a risk it states can be raised by the agent
    *   but not lowered. Without it the rules see the agent's own claim, as before.
+   *   `requireContextSignature`: this call's override of the guard's `requireContextSignature` (refuse a request with no
+   *   `envelopeSignature`). A present `envelopeSignature` is verified regardless.
    * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
-  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, x402 = false } = {}) {
+  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, requireContextSignature, x402 = false } = {}) {
     try {
       assertTrustedContext(trustedContext); // a broken deriver is a refused request (GUARD_ERROR), never a quiet downgrade
       const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature, jurisdiction } = signed;
@@ -578,6 +613,11 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       if (!verifyDidSignature(agentDid, message, signature)) {
         return { decision: 'block', reasonCode: 'SIGNATURE_INVALID' };
       }
+      // 1a. The agent's context signature (context-claim binding), in the gate's order: after the request signature, before
+      // payload binding and before any rule. The itinerary is otherwise unsigned, so without this a relay between the agent
+      // and this Service could rewrite what the rules below judge. The object hashed is the one evaluated below.
+      const contextRefusal = contextSignatureRefusal(signed, signed.itinerary, requireContextSignature ?? requireContextSignatureDefault);
+      if (contextRefusal) return { decision: 'block', reasonCode: contextRefusal };
       // 1b. Payload binding (spec 8.3.9). A digest with no valid signature over it binds nothing — refuse it. When THIS Service
       // states the digest of what it is about to execute (`payloadDigest`), it must be the one the agent signed: a mismatch is
       // refused here, before any claim, so it costs no round trip. (The ISSUER re-checks the same thing against the digest it
@@ -702,7 +742,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * agent's signed request must be passed as the first argument. Throws
    * GovernanceBlocked on any non-allow decision.
    */
-  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, requirePayloadBinding = false, x402 = false } = {}) {
+  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, requirePayloadBinding = false, requireContextSignature, x402 = false } = {}) {
     // `requirePayloadBinding` only checks that the AGENT bound something; the comparison with what this tool executes needs a
     // digest of it. Without `bindPayload` there is nothing to compare, so the option would give assurance it does not provide.
     if (requirePayloadBinding && !bindPayload) {
@@ -751,7 +791,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // Configured but yielding nothing usable (a function that returned undefined) is a broken deriver, not "no
       // trusted context": refuse rather than fall back to the agent's word. `undefined` option = not configured.
       if (trustedContext !== undefined) assertTrustedContext(derived === undefined ? null : derived, `"${action}"`);
-      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, x402 });
+      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, requireContextSignature, x402 });
       // allow/observe both PERMIT the tool call; observe is permit-but-flag (SAFR §11).
       if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`MCP guard ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);

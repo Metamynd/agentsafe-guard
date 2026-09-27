@@ -56,7 +56,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // non-USD agent's `npm test` needs.
 // 0.16.0 signs an optional top-level `jurisdiction` (MAGP 8.3.12, the v2 message) — the scaffolded non-financial agent
 // passes a request's jurisdiction that way, since the gate no longer reads one from the unsigned context.
-const GUARD_VERSION = '^0.16.0';
+// 0.17.0 signs the agent's context (envelopeSignature, MAGP 8.3.13) by default; the scaffolded agent gets it with no template
+// change (signContext: false opts out). A daemon-custody agent needs agentsafe-signer >= 0.19.0 for its no-amount requests.
+const GUARD_VERSION = '^0.17.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -113,7 +115,9 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // change (the scaffolded gateways don't refund), but the floor must cover the real current version.
 // 0.16.0: verifies a v2 (signed-jurisdiction) request and judges jurisdiction rules on the signed value only. Required:
 // the scaffolded agent now signs jurisdiction, which an older gateway would refuse SIGNATURE_INVALID.
-const MCP_GUARD_VERSION = '^0.16.0';
+// 0.17.0: verifies the agent's context signature (envelopeSignature) before judging its itinerary, and a
+// requireContextSignature option. No template change (the scaffolded agent does not sign its context by default).
+const MCP_GUARD_VERSION = '^0.17.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -129,7 +133,9 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.13.0: a configured resolveCredential that refuses now FAILS CLOSED (502 CREDENTIAL_UNAVAILABLE) instead of forwarding
 // without a credential. No template change (the scaffolded gateway does not use the Credential Vault).
 // 0.14.0: depends on agentsafe-mcp-guard ^0.16.0 (verifies a signed-jurisdiction request). No template change.
-const GATEWAY_VERSION = '^0.14.0';
+// 0.15.0: depends on agentsafe-mcp-guard ^0.17.0 (context signature verified) and a requireContextSignature option.
+// No template change.
+const GATEWAY_VERSION = '^0.15.0';
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -1701,7 +1707,7 @@ function exampleReadme(slug, scope, withGateway, gatewayPort, daemonKey = false)
   const configFileLine = daemonKey
     ? `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
   **Holds no secret key.** Signing goes through your already-running agentsafe-signer daemon
-  (\`daemonSocketPath\`) instead — see \`docs/integration/INSTALL-AGENTSAFE-SIGNER.md\`.${withGateway ? ' Payload binding is on by default and signs through the daemon too, which needs agentsafe-signer 0.15.0 or later.' : ''}`
+  (\`daemonSocketPath\`) instead — see \`docs/integration/INSTALL-AGENTSAFE-SIGNER.md\`. Context signing (on by default) signs through the daemon too; use agentsafe-signer 0.19.0 or later (an older one refuses this agent's no-amount requests with CONTEXT_SIGNING_UNSUPPORTED).${withGateway ? ' Payload binding is on by default and signs through the daemon too, which needs agentsafe-signer 0.15.0 or later.' : ''}`
     : `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
   **Contains the agent's secret key — never commit it.** It is already in \`.gitignore\`.`;
   const gatewaySection = withGateway

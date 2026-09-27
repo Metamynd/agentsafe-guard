@@ -12,6 +12,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { buildAuthMessage, buildLocalDecisionMessage } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
+import { verifyDidSignature } from './magp-did.mjs';
 import { buildPayloadBindingMessage, buildPayloadRebindMessage } from './payload-binding.mjs';
 
 /**
@@ -137,8 +138,25 @@ export function createDaemonKeyProvider({ socketPath }) {
       }
       return result.signature;
     },
+    // Context signing is on by default (agentsafe-guard 0.17.0). Every daemon has `sign-envelope`, but one older than signer
+    // 0.19.0 hashes a different envelope when `currency` is omitted (it defaults it to 'USD', the wire does not) and refuses
+    // an omitted `amount` outright. Neither may reach the wire as an unsigned or wrongly-signed context: the returned
+    // signature is checked here against the hash this guard's own envelopeHashFor gives for the request it will send (the
+    // key is in the DID), and a mismatch or a refusal of an omitted amount is CONTEXT_SIGNING_UNSUPPORTED — fail closed,
+    // naming the fix (upgrade the signer, or signContext: false).
     async signEnvelope(fields) {
-      const { envelopeSignature } = await daemonRequest(socketPath, 'sign-envelope', fields);
+      const unsupported = (why) => Object.assign(new Error(`the agentsafe-signer daemon cannot sign this request's context (${why}); upgrade it to signer >= 0.19.0, or pass signContext: false`), { code: 'CONTEXT_SIGNING_UNSUPPORTED' });
+      let envelopeSignature;
+      try {
+        ({ envelopeSignature } = await daemonRequest(socketPath, 'sign-envelope', fields));
+      } catch (err) {
+        if (err?.code === 'DAEMON_UNKNOWN_OPERATION') throw unsupported('no sign-envelope operation');
+        if (err?.code === 'DAEMON_MALFORMED_REQUEST' && fields.amount === undefined) throw unsupported('it requires an amount');
+        throw err;
+      }
+      if (typeof envelopeSignature !== 'string' || !verifyDidSignature(fields.agentDid, envelopeHashFor({ ...fields, signature: '' }), envelopeSignature)) {
+        throw unsupported('its signature does not verify over the envelope this request sends');
+      }
       return envelopeSignature;
     },
     async signHandshakeNonce(nonce) {
