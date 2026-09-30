@@ -17,6 +17,9 @@ import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
 import { resolveKeyProvider, decryptAgentKeyWithPassword } from './key-providers.mjs';
+// fetch() with a 60 s keep-alive (metamynd.ai sits behind Cloudflare, which strips the Keep-Alive header, so the built-in
+// fetch would drop an idle connection after 4 s) — see keepalive-fetch.mjs.
+import { keepAliveFetch as fetch } from './keepalive-fetch.mjs';
 
 /**
  * The jurisdiction refusals the gate can answer (spec §8.3.12), all hard blocks:

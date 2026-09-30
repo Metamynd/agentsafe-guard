@@ -24,6 +24,9 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createMcpGuard } from '@metamynd/agentsafe-mcp-guard';
 import { createHttpGateway } from './gateway.mjs';
+// fetch() with a 60 s keep-alive (metamynd.ai sits behind Cloudflare, which strips the Keep-Alive header, so the built-in
+// fetch would drop an idle connection after 4 s) — see keepalive-fetch.mjs.
+import { keepAliveFetch as fetch } from './keepalive-fetch.mjs';
 
 // The two packages' canonical signed-message format must match exactly (policy-core's
 // buildAuthMessage) — mismatched versions verify signatures byte-for-byte differently for any

@@ -60,6 +60,9 @@ import { buildPaymentRequirements, checkSettlementBinding } from './x402.mjs';
 import { verifyBundle } from './magp-policy.mjs';
 import { resolveKeyProvider } from './key-providers.mjs';
 import { PAYLOAD_DIGEST_HEADER, buildPayloadBindingMessage, claimDigestField, isPayloadDigest, payloadDigestOf, toWireJson } from './payload-binding.mjs';
+// fetch() with a 60 s keep-alive (metamynd.ai sits behind Cloudflare, which strips the Keep-Alive header, so the built-in
+// fetch would drop an idle connection after 4 s) — see keepalive-fetch.mjs.
+import { keepAliveFetch as fetch } from './keepalive-fetch.mjs';
 
 /**
  * Payload binding helpers (spec 8.3.9), re-exported so a Service that calls `verifyRequest` directly can compute the digest
