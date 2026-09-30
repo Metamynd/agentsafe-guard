@@ -385,6 +385,14 @@ function withHeader(headers, name, value) {
  * marks the effect UNKNOWN so the spend stays committed. Per-route `route.releaseOnStatus`
  * overrides. `settle: false` restores the old behaviour of never touching the hold.
  *
+ * settleInBackground — OPTIONAL (default true, since 0.16.0): the upstream's response is returned to the caller first and
+ * the hold is settled after, so the settlement's round trip to the issuer is no longer part of every governed call. A
+ * transient settlement failure (issuer unreachable, 5xx, 429) is retried after each of `settleRetryDelaysMs` (default
+ * [500, 2000]); a refusal is final and logged. A settlement that never lands (the process killed first) leaves the
+ * claimed hold committed to the cap — over-counting, never under-counting — for the owner to reconcile. On shutdown,
+ * `await handle.drainSettlements(ms)` waits for the ones still running (server.mjs does). `false` settles before
+ * answering, as before.
+ *
  * resolveCredential — OPTIONAL: `({ request, route, decision }) => Promise<{header, value} | null>`,
  * called ONLY on a PERMIT (after the guard already returned allow/observe), right before
  * `forward(req)`. When it resolves a `{header, value}` pair, that header is spliced into a
@@ -413,8 +421,50 @@ function withHeader(headers, name, value) {
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
  */
-export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false, requireContextSignature } = {}) {
+export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false, requireContextSignature, settleInBackground = true, settleRetryDelaysMs = [500, 2000] } = {}) {
   if (typeof forward !== 'function') throw new Error('createHttpGateway requires a forward(req) function');
+
+  /** Hold close-outs running after their response was returned (settleInBackground). */
+  const pendingSettlements = new Set();
+
+  /**
+   * One settlement call to the issuer, retried on a TRANSIENT failure: the issuer unreachable, or a 5xx/429. A refusal
+   * (any other 4xx, or `success: false` — e.g. NOT_HELD because an earlier attempt already landed) is final. The guard
+   * reports failures by RESULT (`{ ok: false, ... }`), not by throwing, so the result is what is judged — a failed
+   * capture used to be dropped here without a trace.
+   */
+  async function settleCall(label, authorizationId, call) {
+    for (let attempt = 0; ; attempt++) {
+      let result;
+      try {
+        result = await call();
+      } catch (err) {
+        result = { ok: false, reasonCode: 'SETTLEMENT_THREW', error: String(err?.message ?? err) };
+      }
+      if (!result || result.ok !== false) return result;
+      const transient = result.reasonCode === 'ISSUER_UNREACHABLE' || result.reasonCode === 'SETTLEMENT_THREW' || result.status === 429 || (typeof result.status === 'number' && result.status >= 500);
+      if (!transient || attempt >= settleRetryDelaysMs.length) {
+        console.warn(`[gateway] ${label} of ${authorizationId} not applied (${result.reasonCode}${result.status ? `, HTTP ${result.status}` : ''}${transient ? `, after ${attempt + 1} attempts` : ''}) — the claimed hold stays committed to the cap`);
+        return result;
+      }
+      await new Promise((r) => setTimeout(r, settleRetryDelaysMs[attempt]));
+    }
+  }
+
+  /**
+   * Close the hold without holding up the caller. The upstream has answered; the settlement is bookkeeping about that
+   * answer and never changes it (closeHold is non-throwing), so waiting for it only added one round trip to the issuer to
+   * every governed call. A settlement that never lands — the process killed first — leaves the claimed hold committed to
+   * the cap (over-counts, never under-counts) for the owner to reconcile; a clean shutdown waits for them
+   * (drainSettlements). `settleInBackground: false` restores settling before the response is returned.
+   */
+  function settleHold(decision, request, route, status) {
+    if (!settleInBackground) return closeHold(decision, request, route, status);
+    const p = closeHold(decision, request, route, status).catch(() => {});
+    pendingSettlements.add(p);
+    p.finally(() => pendingSettlements.delete(p));
+    return undefined;
+  }
 
   /**
    * Close out the hold this request CLAIMED, now that the upstream has answered. The issuer treats a
@@ -444,16 +494,13 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     // agentsafe-mcp-guard >= 0.8.0) — in which case there is no token and every call below is signed instead.
     if (!settle || !decision?.authorizationId || !(decision.claimToken || decision.counterpartyAuthenticated)) return;
     const claim = { authorizationId: decision.authorizationId, claimToken: decision.claimToken };
-    try {
-      if (status >= 200 && status < 300) {
-        if (typeof guard.captureAuthorization === 'function') await guard.captureAuthorization({ ...claim, amountCharged: Number(request.amount ?? 0) });
-      } else if (status !== undefined && (route.releaseOnStatus ?? releaseOnStatus).includes(status)) {
-        if (typeof guard.releaseAuthorization === 'function') await guard.releaseAuthorization({ ...claim, reason: `UPSTREAM_HTTP_${status}` });
-      } else if (typeof guard.markAuthorizationUnknown === 'function') {
-        await guard.markAuthorizationUnknown({ ...claim, reason: status === undefined ? 'UPSTREAM_ERROR' : `UPSTREAM_HTTP_${status}` });
-      }
-    } catch (err) {
-      console.warn('[gateway] could not close the claimed hold (it stays committed to the cap):', err?.message ?? err);
+    const id = decision.authorizationId;
+    if (status >= 200 && status < 300) {
+      if (typeof guard.captureAuthorization === 'function') await settleCall('capture', id, () => guard.captureAuthorization({ ...claim, amountCharged: Number(request.amount ?? 0) }));
+    } else if (status !== undefined && (route.releaseOnStatus ?? releaseOnStatus).includes(status)) {
+      if (typeof guard.releaseAuthorization === 'function') await settleCall('release', id, () => guard.releaseAuthorization({ ...claim, reason: `UPSTREAM_HTTP_${status}` }));
+    } else if (typeof guard.markAuthorizationUnknown === 'function') {
+      await settleCall('mark-unknown', id, () => guard.markAuthorizationUnknown({ ...claim, reason: status === undefined ? 'UPSTREAM_ERROR' : `UPSTREAM_HTTP_${status}` }));
     }
   }
 
@@ -505,7 +552,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     }
   }
 
-  return async function handle(req) {
+  async function handle(req) {
     const route = matchRoute(routes, req.method, req.path);
 
     // Unprotected route → pass through (or fail closed under an allow-list posture).
@@ -650,11 +697,27 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       // A throw does not prove the upstream did nothing (the request may have been sent and the
       // response lost) — park the hold as UNKNOWN rather than releasing it, then let the error
       // propagate exactly as it did before.
-      await closeHold(decision, request, route, undefined);
+      await settleHold(decision, request, route, undefined);
       throw err;
     }
     const upstreamStatus = Number(upstream?.status);
-    await closeHold(decision, request, route, Number.isFinite(upstreamStatus) ? upstreamStatus : undefined);
+    // The caller is answered now; the hold is closed after (settleHold).
+    await settleHold(decision, request, route, Number.isFinite(upstreamStatus) ? upstreamStatus : undefined);
     return { ...upstream, governance: decision };
+  }
+
+  /** How many hold close-outs are still running after their response went back. */
+  handle.pendingSettlements = () => pendingSettlements.size;
+  /**
+   * Wait for background hold close-outs to finish, for at most `timeoutMs`; resolves with how many were still running
+   * when it gave up (0 = all done). Call it on shutdown so a restart does not strand settlements already owed.
+   */
+  handle.drainSettlements = async (timeoutMs = 5000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (pendingSettlements.size > 0 && Date.now() < deadline) {
+      await Promise.race([Promise.allSettled([...pendingSettlements]), new Promise((r) => setTimeout(r, deadline - Date.now()))]);
+    }
+    return pendingSettlements.size;
   };
+  return handle;
 }

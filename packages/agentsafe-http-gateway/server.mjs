@@ -204,6 +204,21 @@ async function main() {
     console.log(`[gateway] AgentSafe HTTP interception gateway on :${PORT} → upstream ${UPSTREAM || '(none)'} (${routes.length} protected route(s))`);
     console.log(`[gateway] resolved @metamynd/agentsafe-mcp-guard@${RESOLVED_MCP_GUARD_VERSION}`);
   });
+
+  // Holds are settled after the response goes back (settleInBackground). On shutdown, stop taking requests and give the
+  // settlements still running a bounded moment to land before exiting; one that does not stays committed to the cap.
+  let stopping = false;
+  const stop = (signal) => {
+    if (stopping) return;
+    stopping = true;
+    server.close();
+    gateway.drainSettlements(5000).then((left) => {
+      if (left > 0) console.warn(`[gateway] ${signal}: ${left} hold settlement(s) still running after 5 s; exiting without them`);
+      process.exit(0);
+    });
+  };
+  process.once('SIGTERM', () => stop('SIGTERM'));
+  process.once('SIGINT', () => stop('SIGINT'));
 }
 
 main().catch((e) => { console.error('[gateway] fatal', e); process.exit(1); });
