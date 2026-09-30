@@ -135,7 +135,21 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.14.0: depends on agentsafe-mcp-guard ^0.16.0 (verifies a signed-jurisdiction request). No template change.
 // 0.15.0: depends on agentsafe-mcp-guard ^0.17.0 (context signature verified) and a requireContextSignature option.
 // No template change.
-const GATEWAY_VERSION = '^0.15.0';
+// 0.16.0: the caller is answered first and the claimed hold is settled after (settleInBackground), retried on a
+// transient failure. Template change: each scaffolded gateway drains settlements on SIGTERM/SIGINT (DRAIN_ON_SHUTDOWN).
+const GATEWAY_VERSION = '^0.16.0';
+
+/** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
+const DRAIN_ON_SHUTDOWN = `
+// The gateway answers first and settles the hold it claimed after (agentsafe-http-gateway 0.16.0). On shutdown, stop
+// taking requests and let the settlements still running land (up to 5 s); one that does not stays committed to the cap.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.once(signal, () => {
+    server.close();
+    gateway.drainSettlements(5000).then(() => process.exit(0));
+  });
+}
+`;
 const DEFAULT_API = 'https://metamynd.ai/api/v1';
 const DEFAULT_GATEWAY_PORT = 4401; // distinct from --harness's dashboard (4400)
 
@@ -1508,7 +1522,7 @@ server.listen(PORT, () => {
   console.log('[gateway] listening on :' + PORT + ' -> the only place performAction() runs.');
   console.log('[gateway] every request is independently re-verified against this agent\\'s own policy.');
 });
-`;
+${DRAIN_ON_SHUTDOWN}`;
 }
 
 function gatewayEnvExampleNeutral() {
@@ -1918,7 +1932,7 @@ server.listen(PORT, () => {
   console.log('[gateway] listening on :' + PORT + ' -> the only place bookFlight() runs.');
   console.log('[gateway] every request is independently re-verified against this agent\\'s own policy.');
 });
-`;
+${DRAIN_ON_SHUTDOWN}`;
 }
 
 function gatewayPackageJson(slug) {
@@ -2523,7 +2537,7 @@ server.listen(PORT, () => {
   console.log('[harness-gateway] listening on :' + PORT + ' — the only place your tools run.');
   console.log('[harness-gateway] re-verifying against ../metamynd-rules.json, independently of index.mjs.');
 });
-`;
+${DRAIN_ON_SHUTDOWN}`;
 }
 
 function harnessGatewayPackageJson(slug) {

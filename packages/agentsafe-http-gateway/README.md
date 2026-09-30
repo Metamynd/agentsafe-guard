@@ -260,6 +260,20 @@ Everything here is best-effort and never changes the response the caller gets. I
 `settle: false`, with a guard older than `@metamynd/agentsafe-mcp-guard` 0.7.0 (no token to relay),
 or when the request made no claim (a value-less action, or `requireAuthorization` off).
 
+**0.16.0 — the caller is answered first; the hold is settled after (`settleInBackground`, default on).** The settlement is a
+round trip to the issuer about a response the caller already has, so waiting for it only made every governed call one round
+trip slower. The upstream's response now goes straight back, and the capture / release / mark-unknown runs after it:
+
+- A **transient** failure — the issuer unreachable, a 5xx or a 429 — is retried after each of `settleRetryDelaysMs`
+  (default `[500, 2000]`). A **refusal** is final (e.g. `NOT_HELD`: an earlier attempt already landed).
+- Every settlement that does not land is now **logged** (`capture of <id> not applied (<reason>…)`). Before, a failed
+  capture reported by the guard as a result rather than a throw was dropped without a trace.
+- A settlement that never lands — the process killed first — leaves the claimed hold **committed to the cap** (it
+  over-counts, never under-counts) for the owner to reconcile. On shutdown, `await gateway.drainSettlements(ms)` waits for
+  the ones still running (`gateway.pendingSettlements()` counts them); the stock `server.mjs` does this on SIGTERM/SIGINT,
+  for up to 5 s.
+- `settleInBackground: false` settles before answering, as before.
+
 **0.11.3 — the default value binder reads the body the way the payload digest does.** The `amount` / `merchant` / `currency`
 comparison used a last-wins `JSON.parse`, so a body with a duplicate key (`{"amount":9000,…,"amount":250}`) could show this gateway
 the signed value while a first-wins upstream read the other one. It now uses the same strict reader as the digest (duplicate keys,
