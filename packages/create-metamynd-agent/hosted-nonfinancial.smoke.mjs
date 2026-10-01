@@ -64,10 +64,47 @@ const bundle = {
   proof: { type: 'none', note: 'stand-in issuer' },
 };
 const provisionBodies = []; // what the hosted CLI actually POSTed to /onboarding/agent
+// The rule-pack catalog the stand-in platform serves, in the shapes a CLI can meet: 'current' (says which
+// packs need spend limits — FA-001 onward), 'legacy' (no requiresSpend: packs apply only with spend
+// limits), 'none' (endpoint unavailable). Molecules mirror backend/src/features/onboarding/rule-packs.ts.
+const PACKS = {
+  comms: {
+    label: 'Communications', requiresSpend: false,
+    molecules: [
+      { id: 'pii', name: 'PII review', combinator: 'any', atoms: [{ id: 'a-pii', predicate: 'pii-present' }], decision: 'escalate', reasonCode: 'PII_REVIEW' },
+      { id: 'content', name: 'Prohibited content', combinator: 'any', atoms: [{ id: 'a-text', predicate: 'text-matches', config: { terms: ['password', 'confidential'] } }], decision: 'escalate', reasonCode: 'CONTENT_REVIEW' },
+      { id: 'risk-high', name: 'High-risk review', combinator: 'any', atoms: [{ id: 'a-risk', predicate: 'risk-at-or-above', config: { level: 'high' } }], decision: 'escalate', reasonCode: 'RISK_REVIEW' },
+    ],
+  },
+  'spend-basic': {
+    label: 'Spend guardrails', requiresSpend: true,
+    molecules: [
+      { id: 'cap', name: 'Per-transaction cap', combinator: 'any', atoms: [{ id: 'a-cap', predicate: 'amount-over', config: { limit: 500, currency: ['USD'] } }], decision: 'block', reasonCode: 'SOP_SPEND_CAP' },
+      { id: 'risk-high', name: 'High-risk review', combinator: 'any', atoms: [{ id: 'a-risk', predicate: 'risk-at-or-above', config: { level: 'high' } }], decision: 'escalate', reasonCode: 'RISK_REVIEW' },
+    ],
+  },
+};
+let catalogMode = 'current';
+function servePacks(req, res) {
+  const url = new URL(req.url, 'http://x');
+  if (catalogMode === 'none') { res.statusCode = 404; return res.end('{}'); }
+  if (url.pathname === '/api/v1/onboarding/rule-packs') {
+    return res.end(JSON.stringify({ success: true, data: Object.entries(PACKS).map(([key, p]) => ({ key, label: p.label, category: 'general', ...(catalogMode === 'current' ? { requiresSpend: p.requiresSpend } : {}) })) }));
+  }
+  const key = decodeURIComponent(url.pathname.split('/')[5] ?? '');
+  const pack = PACKS[key];
+  if (!pack) { res.statusCode = 404; return res.end(JSON.stringify({ success: false, message: 'Unknown rule pack' })); }
+  if (url.searchParams.get('financial') === 'false' && pack.requiresSpend) {
+    res.statusCode = 422;
+    return res.end(JSON.stringify({ success: false, message: 'needs spend', code: 'RULE_PACK_NEEDS_SPEND' }));
+  }
+  return res.end(JSON.stringify({ success: true, data: { molecules: pack.molecules } }));
+}
 let ISSUER = '';
 const issuer = http.createServer((req, res) => {
   res.setHeader('content-type', 'application/json');
   if (req.method === 'GET' && req.url.startsWith('/api/v1/policy/bundle/')) return res.end(JSON.stringify({ data: bundle }));
+  if (req.method === 'GET' && req.url.startsWith('/api/v1/onboarding/rule-packs')) return servePacks(req, res);
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
@@ -341,23 +378,79 @@ try {
     assert.doesNotMatch(r.stdout, /no spend limits supplied/);
   });
 
-  await check('hosted CLI: --non-financial with a rulePack-only file drops the pack and says so (accurately)', async () => {
+  const packFile = (pack) => {
+    const f = join(workdir, `pack-${pack}.json`);
+    writeFileSync(f, JSON.stringify({ name: 'Pack Agent', scope: SCOPE, rulePack: pack }));
+    return f;
+  };
+
+  await check('hosted CLI: --non-financial with a no-spend pack APPLIES it and holds the platform to the shown rules (FA-001)', async () => {
     provisionBodies.length = 0;
-    const packFile = join(workdir, 'pack.json');
-    writeFileSync(packFile, JSON.stringify({ name: 'Pack Agent', scope: SCOPE, rulePack: 'payments-baseline' }));
-    const r = await cli(['--non-financial', '--config', packFile, '--out', join(workdir, 'cli-pack'), '--no-gateway']);
+    catalogMode = 'current';
+    const r = await cli(['--non-financial', '--config', packFile('comms'), '--out', join(workdir, 'cli-pack-comms'), '--no-gateway']);
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stdout, /rule pack "payments-baseline" cannot be applied to a non-financial hosted agent/);
-    assert.ok(!('rulePack' in provisionBodies[0]) && !('perTxnMax' in provisionBodies[0]));
-    assert.match(r.stdout, /derived 2 demo case\(s\)/, 'the default amount-free review is what gets demonstrated');
+    const body = provisionBodies[0];
+    assert.equal(body.rulePack, 'comms');
+    assert.deepEqual(body.reviewedMoleculeIds, ['pii', 'content', 'risk-high']);
+    for (const k of ['currency', 'maxAmount', 'perTxnMax']) assert.ok(!(k in body), `no ${k} for a non-financial agent`);
+    assert.match(r.stdout, /rule pack "Communications": PII review, Prohibited content, High-risk review/);
+    assert.doesNotMatch(r.stdout, /cannot be applied/);
+    assert.doesNotMatch(readFileSync(join(workdir, 'cli-pack-comms', 'index.mjs'), 'utf8'), FINANCIAL_LEAK);
+  });
+
+  await check('hosted CLI: --non-financial with a spend-built pack stops before provisioning and says what would work', async () => {
+    provisionBodies.length = 0;
+    catalogMode = 'current';
+    const r = await cli(['--non-financial', '--config', packFile('spend-basic'), '--out', join(workdir, 'cli-pack-spend'), '--no-gateway']);
+    assert.notEqual(r.status, 0, 'must not scaffold an agent whose chosen pack cannot apply');
+    assert.match(r.stdout + r.stderr, /"spend-basic" is built from spend limits.*\(comms\)/s);
+    assert.equal(provisionBodies.length, 0, 'nothing provisioned');
+  });
+
+  await check('hosted CLI: an unknown pack stops before provisioning and names the packs on offer', async () => {
+    provisionBodies.length = 0;
+    catalogMode = 'current';
+    const r = await cli(['--config', packFile('payments-baseline'), '--out', join(workdir, 'cli-pack-unknown'), '--no-gateway']);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stdout + r.stderr, /Unknown rule pack "payments-baseline"\. This platform offers: comms, spend-basic/);
+    assert.equal(provisionBodies.length, 0, 'nothing provisioned');
+  });
+
+  await check('hosted CLI: on a platform that predates per-pack spend info, --non-financial still drops a pack and says so', async () => {
+    provisionBodies.length = 0;
+    catalogMode = 'legacy';
+    try {
+      const r = await cli(['--non-financial', '--config', packFile('comms'), '--out', join(workdir, 'cli-pack-legacy'), '--no-gateway']);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.match(r.stdout, /rule pack "comms" cannot be applied to a non-financial agent on this platform version/);
+      assert.ok(!('rulePack' in provisionBodies[0]) && !('reviewedMoleculeIds' in provisionBodies[0]));
+      assert.match(r.stdout, /derived 2 demo case\(s\)/, 'the default amount-free review is what gets demonstrated');
+    } finally {
+      catalogMode = 'current';
+    }
   });
 
   await check('hosted CLI: a rulePack-only file WITHOUT --non-financial is never assumed money-free', async () => {
     provisionBodies.length = 0;
-    const r = await cli(['--config', join(workdir, 'pack.json'), '--out', join(workdir, 'cli-pack-fin'), '--no-gateway']);
+    catalogMode = 'current';
+    const r = await cli(['--config', packFile('spend-basic'), '--out', join(workdir, 'cli-pack-fin'), '--no-gateway']);
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.equal(provisionBodies[0].rulePack, 'payments-baseline');
+    assert.equal(provisionBodies[0].rulePack, 'spend-basic');
     assert.equal(provisionBodies[0].perTxnMax, 500);
+    assert.deepEqual(provisionBodies[0].reviewedMoleculeIds, ['cap', 'risk-high']);
+  });
+
+  await check('hosted CLI: with the catalog unavailable, a financial pack is still sent (the platform validates it)', async () => {
+    provisionBodies.length = 0;
+    catalogMode = 'none';
+    try {
+      const r = await cli(['--config', packFile('spend-basic'), '--out', join(workdir, 'cli-pack-nocat'), '--no-gateway']);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.equal(provisionBodies[0].rulePack, 'spend-basic');
+      assert.ok(!('reviewedMoleculeIds' in provisionBodies[0]));
+    } finally {
+      catalogMode = 'current';
+    }
   });
 
   // --sandbox / --request / --claim honour --non-financial too: see modes-nonfinancial.smoke.mjs.
