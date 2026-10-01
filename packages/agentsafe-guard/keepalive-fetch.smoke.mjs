@@ -14,6 +14,13 @@ const server = http.createServer((req, res) => {
     if (req.url === '/redirect-307') return res.writeHead(307, { location: '/echo' }).end();
     if (req.url === '/slow') return setTimeout(() => res.end('late'), 2000);
     if (req.url === '/empty') return res.writeHead(204).end();
+    if (req.url === '/events') {
+      // Like GET /policy/events/:did: a Server-Sent Events stream that never ends.
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(': connected\n\n');
+      setTimeout(() => res.write('event: policy:changed\ndata: {"reason":"agent-contained"}\n\n'), 200);
+      return;
+    }
     res.writeHead(req.url === '/missing' ? 404 : 200, { 'content-type': 'application/json', 'x-multi': ['a', 'b'] });
     res.end(JSON.stringify({ method: req.method, url: req.url, body, contentType: req.headers['content-type'] ?? null, encoding: req.headers['accept-encoding'] }));
   });
@@ -65,6 +72,28 @@ test('redirects: 303 becomes a GET, 307 keeps the method and body; manual return
 test('an AbortSignal aborts; a refused connection throws "fetch failed" with a cause, like fetch', async () => {
   await assert.rejects(fetch(`${base}/slow`, { signal: AbortSignal.timeout(100) }), (e) => e.name === 'TimeoutError' || e.name === 'AbortError');
   await assert.rejects(fetch('http://127.0.0.1:1/'), (e) => e instanceof TypeError && e.message === 'fetch failed' && !!e.cause);
+});
+
+// Regression (0.17.1–0.17.2): the response resolved only when the body ENDED, so a stream that never ends never
+// resolved — agentsafe-guard's watchPolicy() waited forever and no push invalidation ever arrived.
+test('a never-ending Server-Sent Events stream resolves at once and delivers events as they arrive', async () => {
+  const controller = new AbortController();
+  const t0 = Date.now();
+  const res = await fetch(`${base}/events`, { headers: { Accept: 'text/event-stream' }, signal: controller.signal });
+  assert.ok(Date.now() - t0 < 1000, 'resolved on the headers, not the (never-arriving) end');
+  assert.equal(res.headers.get('content-type'), 'text/event-stream');
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let text = '';
+  while (!text.includes('event: policy:changed')) {
+    const { value, done } = await reader.read();
+    assert.equal(done, false, 'stream ended before the event');
+    text += dec.decode(value, { stream: true });
+  }
+  assert.match(text, /data: \{"reason":"agent-contained"\}/);
+  // Aborting mid-stream ends the read with an AbortError, as fetch does.
+  controller.abort();
+  await assert.rejects(reader.read(), (e) => e.name === 'AbortError');
 });
 
 test('a stubbed globalThis.fetch is honoured (the packages\' tests rely on this)', async () => {

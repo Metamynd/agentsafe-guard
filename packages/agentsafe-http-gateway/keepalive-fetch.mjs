@@ -55,6 +55,10 @@ function abortError(signal) {
   return signal?.reason instanceof Error ? signal.reason : Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
 }
 
+// Resolves when the response HEADERS arrive, with the body still streaming (`res`) — as fetch does. It used to resolve
+// only on 'end', so a response that never ends (the guard's Server-Sent Events stream at /policy/events) never
+// resolved at all: watchPolicy() waited forever and no push invalidation ever reached a guard (0.17.1 to 0.17.2).
+// The abort listener stays attached until the body is done, so aborting mid-stream ends the stream as fetch would.
 function once(url, method, headers, bytes, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(abortError(signal));
@@ -62,13 +66,10 @@ function once(url, method, headers, bytes, signal) {
       url,
       { method, headers: { ...headers, ...(bytes ? { 'content-length': String(bytes.length) } : {}) }, agent: agents[url.protocol] },
       (res) => {
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => {
-          signal?.removeEventListener?.('abort', onAbort);
-          resolve({ status: res.statusCode ?? 0, statusText: res.statusMessage ?? '', headers: res.headers, body: Buffer.concat(chunks) });
-        });
-        res.on('error', (e) => reject(fetchFailed(e)));
+        const detach = () => signal?.removeEventListener?.('abort', onAbort);
+        res.once('end', detach);
+        res.once('close', detach);
+        resolve({ status: res.statusCode ?? 0, statusText: res.statusMessage ?? '', headers: res.headers, res });
       },
     );
     const onAbort = () => req.destroy(abortError(signal));
@@ -79,6 +80,30 @@ function once(url, method, headers, bytes, signal) {
     });
     if (bytes) req.write(bytes);
     req.end();
+  });
+}
+
+/** A node response as a web ReadableStream for `new Response(...)`; a stream error surfaces as fetch's "terminated". */
+function webBody(res, signal) {
+  return new ReadableStream({
+    start(controller) {
+      res.on('data', (c) => controller.enqueue(new Uint8Array(c))); // a copy: socket chunks may share pooled memory
+      res.on('end', () => controller.close());
+      res.on('error', (e) => controller.error(signal?.aborted ? abortError(signal) : Object.assign(new TypeError('terminated'), { cause: e })));
+      // Destroyed without 'end' (abort, reset): fail the reader instead of leaving it waiting.
+      res.on('close', () => {
+        if (!res.complete) {
+          try {
+            controller.error(signal?.aborted ? abortError(signal) : new TypeError('terminated'));
+          } catch {
+            /* already closed or errored */
+          }
+        }
+      });
+    },
+    cancel() {
+      res.destroy();
+    },
   });
 }
 
@@ -105,6 +130,7 @@ export async function keepAliveFetch(input, init = {}) {
     const r = await once(url, method, headers, body, init.signal);
     const location = r.headers.location;
     if ([301, 302, 303, 307, 308].includes(r.status) && location && redirect !== 'manual') {
+      r.res.resume(); // drain the redirect's body so its connection goes back to the pool
       if (redirect === 'error') throw fetchFailed(new Error(`unexpected redirect to ${location}`));
       if (hop >= MAX_REDIRECTS) throw fetchFailed(new Error('redirect count exceeded'));
       const next = new URL(location, url);
@@ -124,7 +150,8 @@ export async function keepAliveFetch(input, init = {}) {
       for (const one of Array.isArray(v) ? v : [v]) resHeaders.append(k, one);
     }
     const nullBody = r.status === 204 || r.status === 304 || method === 'HEAD' || (r.status >= 100 && r.status < 200);
-    const response = new Response(nullBody ? null : r.body, { status: r.status, statusText: r.statusText, headers: resHeaders });
+    if (nullBody) r.res.resume();
+    const response = new Response(nullBody ? null : webBody(r.res, init.signal), { status: r.status, statusText: r.statusText, headers: resHeaders });
     Object.defineProperty(response, 'url', { value: url.href });
     return response;
   }
