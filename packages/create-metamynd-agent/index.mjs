@@ -58,7 +58,8 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // passes a request's jurisdiction that way, since the gate no longer reads one from the unsigned context.
 // 0.17.0 signs the agent's context (envelopeSignature, MAGP 8.3.13) by default; the scaffolded agent gets it with no template
 // change (signContext: false opts out). A daemon-custody agent needs agentsafe-signer >= 0.19.0 for its no-amount requests.
-const GUARD_VERSION = '^0.17.0';
+// 0.18.0 exports keepAliveFetch. No template change.
+const GUARD_VERSION = '^0.18.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -117,7 +118,9 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // the scaffolded agent now signs jurisdiction, which an older gateway would refuse SIGNATURE_INVALID.
 // 0.17.0: verifies the agent's context signature (envelopeSignature) before judging its itinerary, and a
 // requireContextSignature option. No template change (the scaffolded agent does not sign its context by default).
-const MCP_GUARD_VERSION = '^0.17.0';
+// 0.18.0: an opt-in bundleCache (push-invalidated by the issuer's events stream) and keepAliveFetch exported. No
+// template change (the scaffolded gateways don't enable the cache).
+const MCP_GUARD_VERSION = '^0.18.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -137,7 +140,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // No template change.
 // 0.16.0: the caller is answered first and the claimed hold is settled after (settleInBackground), retried on a
 // transient failure. Template change: each scaffolded gateway drains settlements on SIGTERM/SIGINT (DRAIN_ON_SHUTDOWN).
-const GATEWAY_VERSION = '^0.16.0';
+// 0.17.0: depends on agentsafe-mcp-guard ^0.18.0 and exports keepAliveFetch. No template change.
+const GATEWAY_VERSION = '^0.17.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `
