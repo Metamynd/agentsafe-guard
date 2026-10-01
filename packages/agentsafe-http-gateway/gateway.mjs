@@ -20,6 +20,8 @@
 
 import { matchRoute } from './route-match.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
+/** A fetch() with a 60 s keep-alive (see keepalive-fetch.mjs) — e.g. for a `forward` that calls the upstream service. */
+export { keepAliveFetch } from './keepalive-fetch.mjs';
 
 /**
  * Parse the JSON body STRICTLY, for digesting. `JSON.parse` is lossy in ways an attacker between the agent and this gateway can

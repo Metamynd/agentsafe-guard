@@ -63,6 +63,13 @@ import { PAYLOAD_DIGEST_HEADER, buildPayloadBindingMessage, claimDigestField, is
 // fetch() with a 60 s keep-alive (metamynd.ai sits behind Cloudflare, which strips the Keep-Alive header, so the built-in
 // fetch would drop an idle connection after 4 s) — see keepalive-fetch.mjs.
 import { keepAliveFetch as fetch } from './keepalive-fetch.mjs';
+import { createBundleCache, DEFAULT_BUNDLE_MAX_AGE_MS, DEFAULT_BUNDLE_MAX_AGENTS } from './bundle-cache.mjs';
+
+/**
+ * The fetch() this guard calls the issuer with — 60 s keep-alive, zero dependencies — exported so the rest of a Service
+ * (its own calls to metamynd.ai, say) can reuse the same warm connections instead of paying a new TLS handshake.
+ */
+export { keepAliveFetch } from './keepalive-fetch.mjs';
 
 /**
  * Payload binding helpers (spec 8.3.9), re-exported so a Service that calls `verifyRequest` directly can compute the digest
@@ -111,7 +118,16 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  * @param {string}  cfg.serviceDid  the MCP's own did:hedera
  * @param {string} [cfg.serviceKey] the MCP's Ed25519 private key (Hedera DER hex) — needed to sign handshakes
  * @param {string} [cfg.issuerApi]  the issuer API base (e.g. https://metamynd.ai/api/v1) to fetch policy bundles
- * @param {(agentDid:string)=>Promise<object>} [cfg.fetchBundle] override bundle loading (tests / caching)
+ * @param {(agentDid:string)=>Promise<object>} [cfg.fetchBundle] override bundle loading (tests, or a bundle source of
+ *   your own). For caching, use `bundleCache` rather than wrapping this.
+ * @param {boolean|{maxAgeMs?:number, maxAgents?:number, watch?:boolean}} [cfg.bundleCache] cache each calling agent's
+ *   policy bundle instead of fetching it on every request (bundle-cache.mjs). Off by default. `true` = defaults:
+ *   `maxAgeMs` 30000 (never more than half the bundle's own maxStaleness), `maxAgents` 1000 (least recently used out
+ *   first), `watch` true — the guard follows each cached agent's `GET /policy/events/:did` stream (needs `issuerApi`)
+ *   and drops that agent's bundle on every push (rule change, revocation, containment, reinstatement, mode change), and
+ *   reuses a cached bundle ONLY while that stream is connected. `watch: false` is a plain TTL cache: a change can go
+ *   unseen here for up to `maxAgeMs`. Every per-request check (signature, staleness, subject, containment) still runs
+ *   on the cached copy. Call `close()` when the Service shuts down; the streams never keep the process alive.
  * @param {string} [cfg.policyPublicKey] MetaMynd's Ed25519 policy-signing key (hex, from
  *   GET /magp/policy/pubkey). When set, the guard VERIFIES the bundle signature + freshness (Phase F,
  *   §5.3.2/§5.3.3) and fails closed for value-bearing actions on an unsigned/tampered/stale bundle —
@@ -148,7 +164,7 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   agent's context drives a decision and anything can sit between the agent and this Service — without it, a relay can
  *   strip the signature and rewrite the context. Overridable per call (verifyRequest / guardIncomingTool option).
  */
-export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   // With no policyPublicKey, nothing but the transport vouches for the policy bundle. Over plain http:// nothing does:
@@ -492,7 +508,25 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     return issuerPost(`/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/refund`, { ...(amount !== undefined ? { amount: Number(amount) } : {}), ...(reason !== undefined ? { reason } : {}), ...(claimToken ? { claimToken } : {}) }, auth);
   }
 
-  async function loadBundle(agentDid) {
+  // Opt-in bundle cache (bundle-cache.mjs): `bundleCache: true` or `{ maxAgeMs, maxAgents, watch }`. Off by default —
+  // every request fetches the agent's bundle, as before. With it on, a bundle is reused until a push on the agent's
+  // /policy/events stream (or its age limit) retires it; with `watch` on, only while that stream is connected.
+  const cacheOpts = bundleCache === true ? {} : bundleCache && typeof bundleCache === 'object' ? bundleCache : null;
+  const cache = cacheOpts
+    ? createBundleCache({
+        load: fetchBundleUncached,
+        eventsUrl: base ? (agentDid) => `${base}/policy/events/${encodeURIComponent(agentDid)}` : null,
+        maxAgeMs: cacheOpts.maxAgeMs ?? DEFAULT_BUNDLE_MAX_AGE_MS,
+        maxAgents: cacheOpts.maxAgents ?? DEFAULT_BUNDLE_MAX_AGENTS,
+        watch: cacheOpts.watch ?? true,
+      })
+    : null;
+
+  function loadBundle(agentDid) {
+    return cache ? cache.get(agentDid) : fetchBundleUncached(agentDid);
+  }
+
+  async function fetchBundleUncached(agentDid) {
     if (typeof fetchBundle === 'function') return fetchBundle(agentDid);
     if (!base) throw new Error('issuerApi (or fetchBundle) is required to load the policy bundle');
     const res = await fetch(`${base}/policy/bundle/${encodeURIComponent(agentDid)}`);
@@ -916,7 +950,17 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     return { settled: true, txHash: result.txHash, reasonCode: 'SETTLED' };
   }
 
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, serviceDid };
+  /** Drop one agent's cached policy bundle (or every agent's) so the next request re-fetches it. No-op without `bundleCache`. */
+  function invalidateBundle(agentDid) {
+    cache?.invalidate(agentDid);
+  }
+
+  /** End the bundle cache's event streams and empty it. Safe to call more than once, and without `bundleCache`. */
+  function close() {
+    cache?.close();
+  }
+
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, invalidateBundle, close, serviceDid };
 }
 
 /**

@@ -375,6 +375,49 @@ used exactly that path to drop the spend cap and run a $5,000 over-cap purchase.
 on (TLS authenticates the issuer). For local development only, `allowUnverifiedBundle: true` restores the old
 behaviour. A custom `fetchBundle` is your own source and is not affected.
 
+### Cache the bundle (`bundleCache`) — since 0.18.0
+
+By default `verifyRequest` fetches the calling agent's bundle on every request: one issuer round trip per governed
+call. `bundleCache` keeps it instead, and retires it the moment it changes:
+
+```js
+const guard = createMcpGuard({ serviceDid, issuerApi, policyPublicKey, bundleCache: true });
+// on shutdown:
+guard.close();
+```
+
+- **Push-invalidated.** For each agent it has cached, the guard follows `GET /policy/events/:did`. The issuer pushes
+  on every rule recompile, mandate revocation, containment (operator or automatic), reinstatement and operating-mode
+  change, and the guard drops that agent's bundle on the spot — a suspended agent is refused on its next request.
+- **Only while the push channel is up.** A cached bundle is reused only while that agent's stream is connected. If
+  the stream drops, or never connects (a proxy that buffers it, say), the cache steps aside for that agent and every
+  request fetches, exactly as without it; the entry is also discarded when the stream (re)opens, since events sent
+  while it was down are not replayed.
+- **Bounded.** An entry never outlives `maxAgeMs` (default 30 s) or half the bundle's own `maxStaleness`, so the
+  per-request staleness check never trips because of the cache. At most `maxAgents` agents (default 1000) are kept,
+  least recently requested out first, each with one stream.
+- **Same checks.** Signature, staleness, subject and containment are still checked on every request, against the
+  cached copy. In-flight fetches are shared; a failed fetch is never cached.
+
+`bundleCache: { maxAgeMs, maxAgents, watch }` tunes it. `watch: false` drops the push channel and makes it a plain TTL
+cache, in which a containment can go unseen here for up to `maxAgeMs` (the issuer still refuses a contained agent's
+claim when `requireAuthorization` is on). `guard.invalidateBundle(agentDid?)` drops one agent's bundle, or all.
+`guard.close()` ends the streams; they never keep the process alive on their own.
+
+This replaces wrapping `fetchBundle` in a cache of your own.
+
+### Connection reuse (`keepAliveFetch`) — exported since 0.18.0
+
+The guard talks to the issuer through a zero-dependency `fetch()` that keeps idle connections for 60 s (Node's
+built-in fetch drops them after 4 s behind Cloudflare). It is exported for the rest of your Service's calls:
+
+```js
+import { keepAliveFetch } from '@metamynd/agentsafe-mcp-guard'; // or '@metamynd/agentsafe-mcp-guard/keepalive-fetch'
+const res = await keepAliveFetch('https://metamynd.ai/api/v1/...');
+```
+
+It is the same function in `@metamynd/agentsafe-guard`, `-a2a-guard` and `-http-gateway`.
+
 ### Replay, cumulative spend, rate limits, breakers, spend anomalies (`requireAuthorization`)
 
 Re-evaluating policy per request (above) proves the request is well-formed and in-policy — it
