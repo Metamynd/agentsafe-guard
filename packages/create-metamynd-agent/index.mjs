@@ -307,8 +307,29 @@ function askHidden(query) {
   });
 }
 
+/** Thrown by fail() to end the run; carries no message of its own (fail() already printed it). */
+class CliExit extends Error {
+  constructor(code) {
+    super('create-metamynd-agent exit');
+    this.exitCode = code;
+  }
+}
+
 function fail(msg) {
   console.error(`\n${c.red('✖')} ${msg}\n`);
+  // Not process.exit(): after a fetch(), its keep-alive socket may still be closing, and exiting then
+  // aborts Node 24 on Windows (libuv "!(handle->flags & UV_HANDLE_CLOSING)", exit 0xC0000409) instead of
+  // exiting 1. Unwind instead and let the event loop drain; the unref'd timer only fires if something
+  // else would keep the process alive.
+  process.exitCode = 1;
+  setTimeout(() => process.exit(1), 5000).unref();
+  throw new CliExit(1);
+}
+
+/** The run's last-resort handler: a CliExit already said why; anything else is a real crash. */
+function onCliError(e) {
+  if (e instanceof CliExit) return;
+  console.error(`\n${c.red('✖')} ${e?.stack || e?.message || String(e)}\n`);
   process.exit(1);
 }
 
@@ -862,6 +883,65 @@ async function apiPost(base, path, body, token) {
     fail(`${path} → HTTP ${res.status}${detail ? `: ${detail}` : ''}`);
   }
   return json;
+}
+
+/** GET a public, read-only endpoint; null on ANY failure (unreachable, non-2xx, non-JSON) — never fatal. */
+async function softGet(base, path) {
+  try {
+    const res = await fetch(`${base}${path}`);
+    if (!res.ok) return { status: res.status, json: await res.json().catch(() => null) };
+    return { status: res.status, json: await res.json() };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decide what to do with a config file's `rulePack` BEFORE provisioning, from the platform's own catalog
+ * (GET /onboarding/rule-packs) and preview (GET /onboarding/rule-packs/:key/preview):
+ *  - an unknown pack fails here, naming the packs the platform offers — the platform refuses it too
+ *    (400 UNKNOWN_RULE_PACK; an older platform silently applied its default rules instead);
+ *  - a pack built from spend limits cannot govern a non-financial agent: fail and say what would work;
+ *  - any other pack is applied as-is, and its rules are sent back as `reviewedMoleculeIds`, so the
+ *    platform provisions exactly the rules shown here or nothing at all.
+ * A platform whose catalog does not say which packs need spend limits (it predates FA-001) only applies a
+ * pack when spend limits are supplied, so for a non-financial agent the pack is dropped and that is said.
+ * Returns { drop: true } or { molecules, reviewedMoleculeIds? }.
+ */
+async function resolveHostedRulePack(base, key, { financial, perTxnMax, maxAmount, currency }) {
+  const catalogRes = await softGet(base, '/onboarding/rule-packs');
+  const catalog = Array.isArray(catalogRes?.json?.data) ? catalogRes.json.data : null;
+  const legacyDrop = () => {
+    console.log(`  ${c.yellow('!')} the rule pack "${key}" cannot be applied to a non-financial agent on this platform version (it applies packs only when spend limits are supplied) — the default (an amount-free high-risk review) applies. List your rules under "rules" to set your own.`);
+    return { drop: true };
+  };
+  if (!catalog) {
+    // Catalog unavailable: send the pack for a financial agent (the platform validates it), keep the old drop otherwise.
+    return financial ? { molecules: null } : legacyDrop();
+  }
+  const entry = catalog.find((p) => p?.key === key);
+  if (!entry) {
+    fail(`Unknown rule pack "${key}". This platform offers: ${catalog.map((p) => p.key).join(', ')}. Fix "rulePack" in the config file, or list your rules under "rules".`);
+  }
+  const knowsSpend = catalog.some((p) => typeof p?.requiresSpend === 'boolean');
+  if (!financial) {
+    if (!knowsSpend) return legacyDrop();
+    if (entry.requiresSpend) {
+      const usable = catalog.filter((p) => p.requiresSpend === false).map((p) => p.key);
+      fail(`The rule pack "${key}" is built from spend limits, and this agent has none (non-financial). Choose a pack that needs no spend limits (${usable.join(', ')}), pass --financial with spend limits, or list your rules under "rules".`);
+    }
+  }
+  const query = financial
+    ? `perTxnMax=${encodeURIComponent(perTxnMax)}&maxAmount=${encodeURIComponent(maxAmount)}&currency=${encodeURIComponent(currency)}`
+    : 'financial=false';
+  const preview = await softGet(base, `/onboarding/rule-packs/${encodeURIComponent(key)}/preview?${query}`);
+  const molecules = Array.isArray(preview?.json?.data?.molecules) ? preview.json.data.molecules : null;
+  if (!molecules) {
+    if (!financial) fail(`Could not read the rules of the rule pack "${key}" from ${base} (HTTP ${preview?.status ?? 'unreachable'}${preview?.json?.message ? ': ' + preview.json.message : ''}) — nothing was provisioned.`);
+    return { molecules: null };
+  }
+  console.log(`  ${c.green('✓')} rule pack "${entry.label ?? key}": ${molecules.map((m) => m.name ?? m.id).join(', ')}`);
+  return { molecules, ...(knowsSpend ? { reviewedMoleculeIds: molecules.map((m) => m.id) } : {}) };
 }
 
 /**
@@ -3837,13 +3917,18 @@ async function main() {
   // (a per-transaction cap + high-risk review), same as before --config existed.
   const sopFields = configFileSopFields(fileConfig);
   if (sopFields.sop) console.log(`  ${c.green('✓')} compiled ${sopFields.sop.documentJson.molecules.length} rule(s) from the config file`);
-  console.log(c.dim(`\n  → provisioning "${name}" (identity + mandate + SOP + Standards) …`));
   // A non-financial agent sends NO spend fields at all (currency/maxAmount/perTxnMax omitted together
-  // is how the backend recognises one). A rule pack is built from spend limits, so it cannot apply.
-  if (!financial && sopFields.rulePack) {
-    console.log(`  ${c.yellow('!')} the rule pack "${sopFields.rulePack}" cannot be applied to a non-financial hosted agent (the platform applies a pack only when spend limits are supplied) — the default (an amount-free high-risk review) applies. List your rules under "rules" to set your own.`);
-    delete sopFields.rulePack;
+  // is how the backend recognises one). Whether a rule pack can govern it is the platform's answer.
+  let packMolecules = null;
+  if (sopFields.rulePack) {
+    const pack = await resolveHostedRulePack(base, sopFields.rulePack, { financial, perTxnMax, maxAmount, currency });
+    if (pack.drop) delete sopFields.rulePack;
+    else {
+      packMolecules = pack.molecules;
+      if (pack.reviewedMoleculeIds) sopFields.reviewedMoleculeIds = pack.reviewedMoleculeIds;
+    }
   }
+  console.log(c.dim(`\n  → provisioning "${name}" (identity + mandate + SOP + Standards) …`));
   const body = {
     name, scope,
     // Explicit, not left to the backend's own eligibility-based default (mainnet for a KYB-verified
@@ -3925,7 +4010,7 @@ async function main() {
   // 4. Scaffold + next steps
   // The demo comes from the rules actually provisioned: the caller's own, else the backend's default
   // for a non-financial agent (the same amount-free review harnessDefaultSopNeutral describes).
-  const demo = financial ? null : buildPolicyCases(sopFields.sop?.documentJson?.molecules ?? harnessDefaultSopNeutral().molecules);
+  const demo = financial ? null : buildPolicyCases(sopFields.sop?.documentJson?.molecules ?? packMolecules ?? harnessDefaultSopNeutral().molecules);
   if (demo) {
     console.log(`  ${c.green('✓')} derived ${demo.cases.length} demo case(s) from your rules`);
     for (const n of demo.notDemonstrated) console.log(`  ${c.yellow('!')} not staged in the demo: ${n.rule} ${c.dim('— ' + n.why + '; still enforced')}`);
@@ -3940,4 +4025,9 @@ export {
   generateAgentKeypair, harnessAgentDid, harnessMandate, harnessRulesFile, harnessDefaultSopNeutral,
   scaffoldProject, defaultNeutralDemo, exampleIndexNeutral, exampleReadmeNeutral, gatewayServerFileNeutral, gatewayReadmeNeutral,
 };
-if (!process.env.CREATE_METAMYND_AGENT_NO_MAIN) main().catch((e) => fail(e?.stack || e?.message || String(e)));
+if (!process.env.CREATE_METAMYND_AGENT_NO_MAIN) {
+  // fail() can also be reached from a callback outside main()'s promise chain (readline, child process).
+  process.on('uncaughtException', onCliError);
+  process.on('unhandledRejection', onCliError);
+  main().catch(onCliError);
+}

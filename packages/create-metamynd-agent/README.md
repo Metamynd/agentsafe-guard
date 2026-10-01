@@ -315,8 +315,15 @@ with the default hosted flow (login + provision):
 - **No spend constraint anywhere.** The mandate carries none and the default SOP has no amount rule
   (an `amount-unknown` block would refuse every action that carries no amount). Hosted: the
   provisioning call sends no `currency` / `maxAmount` / `perTxnMax` at all — the backend treats their
-  absence as a non-financial mandate. A `rulePack` is built from spend limits, so it is ignored (and
-  the CLI says so); list your rules under `rules` instead.
+  absence as a non-financial mandate.
+- **Rule packs (hosted, since 0.14.0).** The CLI checks a `rulePack` against the platform's catalog
+  before provisioning. A pack that needs no spend limits (`comms`, `compliance`, the oversight packs, …)
+  is applied to a non-financial agent as-is, and its rules are printed and sent back as
+  `reviewedMoleculeIds`, so the platform provisions exactly those rules or nothing. A pack built from
+  spend limits (`spend-basic`, …) cannot govern a non-financial agent, and an unknown pack name is
+  refused: either stops the CLI before anything is provisioned, naming what would work. Against a
+  platform version that predates per-pack spend information, a non-financial agent's pack is still
+  dropped (and the CLI says so). `--harness` does not apply packs; list your rules under `rules`.
 - **The demo is derived from your rules.** `npm start` runs one request that satisfies every rule,
   then one per rule that should trip it, then an action nobody delegated. Each step states what it
   expects and flags any surprise, so changing your rules visibly changes the outcome. Rules the demo
