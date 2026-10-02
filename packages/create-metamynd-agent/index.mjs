@@ -225,7 +225,8 @@ ${c.b('Options')}
   --force, -f          Scaffold into a non-empty directory, overwriting existing files
   --api <url>          API base (default ${DEFAULT_API})
   --email <email>      Owner login email
-  --password <pw>      Owner password (prefer the interactive prompt or METAMYND_PASSWORD)
+  --password <pw>      Owner password (prefer the interactive prompt or METAMYND_PASSWORD).
+                       One session per account: logging in signs it out of the dashboard.
   --name <name>        Agent name (e.g. "Support Bot")
   --scope <scope>      Mandate action scope (e.g. flight-purchase)
   --per-txn-max <n>    Per-transaction cap (default 500)
@@ -3764,8 +3765,14 @@ async function authFlow(args) {
   const login = await apiPost(base, '/auth/login', { username: email, password }, null);
   const token = login?.data?.accessToken;
   if (!token) fail('Login succeeded but no access token was returned.');
+  console.log(c.dim(`  ${SESSION_REPLACED_NOTE}`));
   return { base, token, email };
 }
+
+// One session per account: a CLI login replaces the account's dashboard session (the dashboard then answers
+// SESSION_REPLACED and explains). Said up front so it is not a surprise (item 14 of the 2026-10-02 open items).
+const SESSION_REPLACED_NOTE =
+  'Note: an account has one session at a time, so this login signs that account out of the MetaMynd dashboard in your browser. Sign in there again afterwards.';
 
 const REQUEST_STATE_FILE = 'metamynd-request.json';
 
@@ -3971,6 +3978,7 @@ async function main() {
   const token = login?.data?.accessToken;
   if (!token) { rl?.close(); fail('Login succeeded but no access token was returned.'); }
   console.log(`  ${c.green('✓')} authenticated as ${email}`);
+  console.log(c.dim(`    ${SESSION_REPLACED_NOTE}`));
 
   // 2. Agent details — a --config file's fields are the default at every prompt/flag below.
   const name = await pick('name', null, 'Agent name', fileConfig?.name ?? 'Support Bot');
