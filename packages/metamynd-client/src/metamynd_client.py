@@ -164,7 +164,7 @@ __all__ = [
     "GovernanceRefusal",
 ]
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1524,7 +1524,10 @@ def guard_tool(
         returned refusal is just that call's result; the turn completes and the model sees every
         outcome.
       - a callable: `on_refusal(refused: GovernanceBlocked)` is called and its return value is
-        the tool's result (e.g. a string for the model). Whatever it raises propagates.
+        the tool's result (e.g. a string for the model). Whatever it raises propagates. An
+        `async def` handler needs an `async def` tool (it is awaited there); given a SYNC tool it
+        raises TypeError at wrap time (0.8.1) — a sync tool would hand the framework an un-awaited
+        coroutine as its result.
 
     Async tools are supported: pass an `async def` and get an `async def` back. They are the
     better fit for parallel tool calls: a cancelled async call is cancelled (and a hold it had
@@ -1552,6 +1555,16 @@ def guard_tool(
     if not (callable(on_refusal) or on_refusal in _ON_REFUSAL_MODES):
         # Refused at wrap time: a typo here ("retrun") must not silently fall back to either behaviour.
         raise ValueError(f'on_refusal must be "raise", "return" or a callable, not {on_refusal!r}')
+
+    def _is_async_callable(f: "Any") -> bool:
+        return inspect.iscoroutinefunction(f) or inspect.iscoroutinefunction(getattr(f, "__call__", None))
+
+    if callable(on_refusal) and _is_async_callable(on_refusal) and not _is_async_callable(fn):
+        # A sync tool returns the handler's result as-is, so an async handler's coroutine would reach the framework
+        # un-awaited: the model gets "<coroutine object ...>" and Python warns it was never awaited. Refused at wrap time.
+        raise TypeError(
+            "on_refusal is an async function but the tool is sync: pass an async def tool, or a sync on_refusal handler"
+        )
 
     def _refused(refused: "GovernanceBlocked") -> "Any":
         """The tool's result for a governance refusal when it is not raised. The tool has NOT run."""

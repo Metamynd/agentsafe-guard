@@ -134,7 +134,7 @@ in their threads keep going: authorized, run, and their results delivered to nob
 - **`guard_tool(..., on_refusal="return")`.** A refusal is returned as a `GovernanceRefusal` — a JSON-ready dict
   (`refused`, `action`, `decision`, `reasonCode`, `escalationId`, `message`; the full verdict on `.verdict`) — so it
   is just that call's result, the turn completes, and the model sees every outcome. `on_refusal=callable` gets the
-  `GovernanceBlocked` and returns whatever the tool should return instead. Only governance refusals are returned: an
+  `GovernanceBlocked` and returns whatever the tool should return instead. An `async def` handler needs an `async def` tool; with a sync tool it raises `TypeError` when wrapping (0.8.1). Only governance refusals are returned: an
   unreachable gate still raises. Check with `isinstance(result, GovernanceRefusal)`, not truthiness.
 - **LangGraph:** `ToolNode(tools, handle_tool_errors=GovernanceBlocked)` turns the exception into a `ToolMessage`
   (its default re-raises everything except its own invocation errors).
