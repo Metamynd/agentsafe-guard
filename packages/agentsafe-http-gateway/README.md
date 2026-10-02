@@ -73,8 +73,8 @@ node server.mjs   # listens on PORT (default 4000)
 
 `AGENTSAFE_POLICY_PUBLIC_KEY` pins MetaMynd's policy-signing key, so a policy bundle rewritten in flight is refused
 (`POLICY_BUNDLE_SIGNATURE_INVALID`). Fetch it once, out of band, not on every start. Without it, and with `MAGP_API`
-on plain `http://`, value-bearing calls are refused (`POLICY_BUNDLE_UNVERIFIED`, agentsafe-mcp-guard 0.12.0): nothing
-authenticates that bundle. `AGENTSAFE_ALLOW_UNVERIFIED_BUNDLE=true` restores the old behaviour, for local development
+on plain `http://`, every call is refused (`POLICY_BUNDLE_UNVERIFIED`; value-bearing ones since agentsafe-mcp-guard
+0.12.0, amount 0 too since 0.18.3): nothing authenticates that bundle. `AGENTSAFE_ALLOW_UNVERIFIED_BUNDLE=true` restores the old behaviour, for local development
 only.
 
 `denyByDefault: true` (in `createHttpGateway`) switches to an **allow-list** posture — an unmatched

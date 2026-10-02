@@ -1,7 +1,8 @@
 // bundle-authentication.smoke.mjs — D-08 (independent pre-beta eval, 2026-09-20; rerun 2026-09-24): a guard with no
 // policyPublicKey that fetches its policy bundle over plain http:// trusted whatever came back. A proxy on that path
 // dropped the SOP spend cap and a $5,000 over-cap purchase executed. Nothing authenticates such a bundle, so a
-// value-bearing action on it is now refused (POLICY_BUNDLE_UNVERIFIED) unless the integrator opts out explicitly.
+// value-bearing action on it is refused (POLICY_BUNDLE_UNVERIFIED) unless the integrator opts out explicitly — and since
+// 0.18.3 an amount-0 action too: a rewritten bundle can grant `permissions.update` as easily as it can lift a cap.
 //
 //   node bundle-authentication.smoke.mjs   → PASS when every case matches.
 import crypto from 'node:crypto';
@@ -61,12 +62,14 @@ try {
   check('THE D-08 ATTACK: $5,000 on a forged bundle over http → refused', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
 
   v = await unpinned.verifyRequest(signed(0));
-  check('a non-value action is not refused for it (nothing to protect)', v.reasonCode !== 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
+  check('0.18.3: an amount-0 action on the same unauthenticated bundle is refused too (an amount-0 action is not a read)', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
 
   warnings.length = 0;
   const optedOut = createMcpGuard({ serviceDid: service.did, issuerApi, allowUnverifiedBundle: true });
   v = await optedOut.verifyRequest(signed(5000));
   check('allowUnverifiedBundle: true restores the old behaviour (explicit, local dev only)', v.reasonCode !== 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
+  v = await optedOut.verifyRequest(signed(0));
+  check('...for an amount-0 action as well', v.reasonCode !== 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
   check('...and still says so at construction', warnings.some((w) => w.includes('allowUnverifiedBundle is set')));
 
   warnings.length = 0;
@@ -83,5 +86,5 @@ try {
   await new Promise((r) => server.close(r));
 }
 
-console.log(failed === 0 ? '\n  PASS unauthenticated policy bundles cannot move value' : `\n  ${failed} FAILED`);
+console.log(failed === 0 ? '\n  PASS unauthenticated policy bundles govern nothing' : `\n  ${failed} FAILED`);
 process.exitCode = failed === 0 ? 0 : 1;

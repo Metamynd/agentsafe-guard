@@ -182,13 +182,15 @@ function signed() {
 const realWarn = console.warn;
 console.warn = () => {}; // the unpinned-over-http construction warning is expected here
 try {
-  const plain = createMcpGuard({ serviceDid: service.did, issuerApi });
+  // allowUnverifiedBundle: this exercises caching over a local plain-http issuer, not bundle authentication (0.18.3 refuses
+// every action on an unpinned http bundle without it — bundle-authentication.smoke.mjs).
+const plain = createMcpGuard({ serviceDid: service.did, issuerApi, allowUnverifiedBundle: true });
   bundleFetches = 0;
   await plain.verifyRequest(signed());
   await plain.verifyRequest(signed());
   check('without bundleCache: every request fetches the bundle, as before', bundleFetches === 2, bundleFetches);
 
-  const guard = createMcpGuard({ serviceDid: service.did, issuerApi, bundleCache: true });
+  const guard = createMcpGuard({ serviceDid: service.did, issuerApi, bundleCache: true, allowUnverifiedBundle: true });
   bundleFetches = 0;
   let v = await guard.verifyRequest(signed());
   check('a request is allowed on the bundle', v.decision === 'allow', `${v.decision}/${v.reasonCode}`);
@@ -225,7 +227,7 @@ try {
     import { createMcpGuard } from ${JSON.stringify('file://' + here.replace(/\\/g, '/'))};
     import { buildAuthMessage } from ${JSON.stringify('file://' + fileURLToPath(new URL('./policy-core.mjs', import.meta.url)).replace(/\\/g, '/'))};
     console.warn = () => {};
-    const g = createMcpGuard({ serviceDid: ${JSON.stringify(service.did)}, issuerApi: ${JSON.stringify(issuerApi)}, bundleCache: true });
+    const g = createMcpGuard({ serviceDid: ${JSON.stringify(service.did)}, issuerApi: ${JSON.stringify(issuerApi)}, bundleCache: true, allowUnverifiedBundle: true });
     await g.verifyRequest(${JSON.stringify(signed())});
     await new Promise((r) => setTimeout(r, 300)); // the stream is open now; no close()
     console.log('done');`;
