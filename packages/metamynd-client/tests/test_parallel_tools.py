@@ -122,6 +122,21 @@ class OnRefusalReturn(_Base):
         real = GovernanceRefusal(Verdict(decision="block", reason_code="SOP_SPEND_CAP"), "book_flight")
         self.assertIn("Do not retry it with different arguments", real["message"])
 
+    def test_an_async_handler_on_a_sync_tool_is_refused_at_wrap_time(self) -> None:
+        # 0.8.1: a sync tool returns the handler's result as-is, so an async handler would hand the framework an
+        # un-awaited coroutine. Refused when wrapping, before anything is authorized.
+        async def explain_async(refused: GovernanceBlocked) -> str:
+            return "async"
+
+        class AsyncCallable:
+            async def __call__(self, refused: GovernanceBlocked) -> str:
+                return "async"
+
+        for handler in (explain_async, AsyncCallable()):
+            with self.assertRaises(TypeError):
+                guard_tool(self.client, "permissions.update", self.tool, CTX, on_refusal=handler)
+        self.assertEqual(self.ran, [])
+
     def test_an_unknown_mode_is_refused_at_wrap_time(self) -> None:
         with self.assertRaises(ValueError):
             guard_tool(self.client, "flight-purchase", self.tool, CTX, on_refusal="retrun")
