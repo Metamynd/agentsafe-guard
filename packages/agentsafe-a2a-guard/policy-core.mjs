@@ -1,0 +1,835 @@
+// GENERATED from backend/src/policy-core — do not edit. Regenerate: npm run build:a2a-guard-core
+
+// src/policy-core/provenance.ts
+var PROVENANCE_LEVELS = ["agent_asserted", "agent_signed", "gateway_derived", "authoritative", "attested"];
+var PROVENANCE_RANK = {
+  agent_asserted: 0,
+  agent_signed: 1,
+  gateway_derived: 2,
+  authoritative: 3,
+  attested: 4
+};
+function isProvenance(v) {
+  return typeof v === "string" && Object.prototype.hasOwnProperty.call(PROVENANCE_RANK, v);
+}
+var PROVENANCE_KEY = Symbol.for("magp.context.provenance");
+function provenanceOf(ctx, field) {
+  const map = ctx?.[PROVENANCE_KEY];
+  const p = map && typeof map === "object" ? map[field] : void 0;
+  return isProvenance(p) ? p : "agent_asserted";
+}
+function meetsProvenance(actual, minimum) {
+  return PROVENANCE_RANK[actual] >= PROVENANCE_RANK[minimum];
+}
+var RISK_LEVELS = ["low", "medium", "high", "critical"];
+var RISK_ORDER = { low: 0, medium: 1, high: 2, critical: 3 };
+function normalizeRiskLevel(v) {
+  if (typeof v !== "string") return null;
+  const s = v.trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(RISK_ORDER, s) ? s : null;
+}
+function maxRisk(...levels) {
+  let best = null;
+  for (const l of levels) if (l && (best === null || RISK_ORDER[l] > RISK_ORDER[best])) best = l;
+  return best;
+}
+function riskFloorFor(mandate, target) {
+  if (!mandate) return null;
+  let floor = null;
+  for (const p of mandate.permission ?? []) {
+    if (!p || typeof p !== "object") continue;
+    if ((p.target ?? mandate.target) !== target) continue;
+    floor = maxRisk(floor, normalizeRiskLevel(p.riskTier));
+  }
+  return floor;
+}
+function requiresPayloadBindingFor(mandate, target) {
+  if (!mandate) return false;
+  for (const p of mandate.permission ?? []) {
+    if (!p || typeof p !== "object") continue;
+    if ((p.target ?? mandate.target) !== target) continue;
+    if (p.requirePayloadBinding === true) return true;
+  }
+  return false;
+}
+var FIELD_KINDS = {
+  riskLevel: "risk",
+  consent: "boolean",
+  piiPresent: "boolean",
+  amount: "number",
+  cumulativeSpend: "number",
+  callCount: "number",
+  evidenceConfidence: "number",
+  holTrustScore: "number",
+  dataSourceId: "string",
+  jurisdiction: "string",
+  dataResidency: "string",
+  model: "string",
+  tool: "string",
+  currency: "string",
+  action: "string",
+  prompt: "string",
+  output: "string",
+  evidenceTypes: "string[]"
+};
+function contextFieldProblem(ctx, field) {
+  const v = ctx?.[field];
+  if (v === void 0 || v === null) return "missing";
+  if (typeof v === "string" && v.trim() === "") return "missing";
+  switch (FIELD_KINDS[field]) {
+    case "risk":
+      return normalizeRiskLevel(v) === null ? "malformed" : null;
+    case "boolean":
+      return typeof v === "boolean" ? null : "malformed";
+    case "number":
+      return typeof v === "number" && Number.isFinite(v) ? null : "malformed";
+    case "string":
+      return typeof v === "string" ? null : "malformed";
+    case "string[]":
+      return Array.isArray(v) && v.every((x) => typeof x === "string") ? null : "malformed";
+    default:
+      return null;
+  }
+}
+var ATOM_DEFAULT_REQUIRED_CONTEXT = {
+  "risk-at-or-above": ["riskLevel"]
+};
+function buildRuleContext(src) {
+  const ctx = {};
+  const prov = /* @__PURE__ */ Object.create(null);
+  const put = (k, v, level) => {
+    Object.defineProperty(ctx, k, { value: v, enumerable: true, writable: true, configurable: true });
+    prov[k] = level;
+  };
+  const layers = [
+    [src.unsigned, "agent_asserted"],
+    [src.signed, "agent_signed"],
+    [src.gatewayDerived, "gateway_derived"],
+    [src.serverDerived, "authoritative"]
+  ];
+  for (const [layer, level] of layers) {
+    for (const [k, v] of Object.entries(layer ?? {})) {
+      if (k === "riskLevel" && (level === "gateway_derived" || level === "authoritative") && normalizeRiskLevel(v) === null) continue;
+      put(k, v, level);
+    }
+  }
+  const floors = [];
+  const addFloor = (v, source) => {
+    const n = normalizeRiskLevel(v);
+    if (n) floors.push({ level: n, source });
+  };
+  addFloor(src.riskFloor, "authoritative");
+  addFloor(src.gatewayDerived?.riskLevel, "gateway_derived");
+  addFloor(src.serverDerived?.riskLevel, "authoritative");
+  const assertedUnsigned = normalizeRiskLevel(src.unsigned?.riskLevel);
+  const assertedSigned = normalizeRiskLevel(src.signed?.riskLevel);
+  const asserted = maxRisk(assertedUnsigned, assertedSigned);
+  if (floors.length > 0) {
+    put("riskLevel", maxRisk(asserted, ...floors.map((f) => f.level)), floors.reduce((best, f) => PROVENANCE_RANK[f.source] > PROVENANCE_RANK[best] ? f.source : best, "agent_asserted"));
+  } else if (asserted) {
+    put("riskLevel", asserted, assertedSigned ? "agent_signed" : "agent_asserted");
+  }
+  Object.defineProperty(ctx, PROVENANCE_KEY, { value: prov, enumerable: true, writable: false });
+  return ctx;
+}
+
+// src/policy-core/atom-registry.ts
+var RISK_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
+function currencyOutOfScope(ctx, cfgCurrency) {
+  if (cfgCurrency === void 0 || cfgCurrency === null) return false;
+  const allowed = Array.isArray(cfgCurrency) ? cfgCurrency : [cfgCurrency];
+  if (allowed.length === 0) return false;
+  const currency = ctx.currency;
+  const matches = typeof currency === "string" && allowed.some((u) => typeof u === "string" && u.toUpperCase() === currency.toUpperCase());
+  return !matches;
+}
+var ATOM_REGISTRY = {
+  "data-source-not-approved": (c, cfg) => !!c.dataSourceId && !(cfg?.approved ?? []).includes(String(c.dataSourceId)),
+  "consent-missing": (c) => c.consent === false,
+  "risk-at-or-above": (c, cfg) => {
+    const haveLevel = normalizeRiskLevel(c.riskLevel);
+    const have = haveLevel === null ? void 0 : RISK_RANK[haveLevel];
+    const need = RISK_RANK[String(cfg?.level ?? "high")];
+    return have !== void 0 && need !== void 0 && have >= need;
+  },
+  "amount-over": (c, cfg) => {
+    if (typeof c.amount !== "number") return false;
+    if (currencyOutOfScope(c, cfg?.currency)) return true;
+    return c.amount > Number(cfg?.limit ?? 0);
+  },
+  // Deny-by-default primitive for value-moving actions. Fires on ABSENCE (like the
+  // evidence atoms below, and unlike `amount-over`) OR on a NEGATIVE amount: true when
+  // the context carries no usable amount, or one that cannot be trusted for capping —
+  // the gate cannot tell how much value the call would move, so a spend cap authored
+  // next to it would silently never fire. `amount-over` only ever fires on `> limit`,
+  // so a negative amount clears every positive cap by construction, and on a system
+  // that tracks committed spend ADDITIVELY (reserved += amount), a negative claim can
+  // net-reduce what's already committed rather than add to it — the same "cap never
+  // fires" failure as a missing amount, reached from the other side of zero. Zero
+  // itself is NOT covered here: a genuine $0 action (a read, a no-op) is a valid,
+  // known amount, not an unknown one. Author this with BLOCK as the FIRST rule of a
+  // spend policy; the cap that follows then only ever judges a known, non-negative
+  // number. Opt-in: only a rule that keys it runs it, so actions that carry no amount
+  // by nature are unaffected. The public authorize endpoint's own schema already
+  // rejects a negative amount before it reaches this atom (defense in depth, not the
+  // only layer) — this is what closes the same gap for paths that schema doesn't
+  // cover: the local/harness evaluator and the platform's own MCP tool policies.
+  "amount-unknown": (c) => !(typeof c.amount === "number" && Number.isFinite(c.amount) && c.amount >= 0),
+  // Total budget: cumulativeSpend is a SERVER-derived, signed-last context field (never
+  // shadowable by the agent's itinerary), so this compares already-spent + this amount.
+  // See `currencyOutOfScope` above: a configured currency scope that this request's
+  // currency doesn't match fires the cap outright, same fail-closed reasoning as `amount-over`.
+  "cumulative-over": (c, cfg) => {
+    if (currencyOutOfScope(c, cfg?.currency)) return true;
+    return Number(c.cumulativeSpend ?? 0) + Number(c.amount ?? 0) > Number(cfg?.limit ?? 0);
+  },
+  // Fires if any configured term appears in the prompt and/or output text.
+  // Used to govern agent responses on content (prohibited claims, sensitive advice).
+  "text-matches": (c, cfg) => {
+    const hay = `${c.prompt ?? ""}
+${c.output ?? ""}`.toLowerCase();
+    const terms = (cfg?.terms ?? []).map((t) => String(t).toLowerCase());
+    return terms.some((t) => t.length > 0 && hay.includes(t));
+  },
+  // --- Compliance atoms. Allow-list atoms fire when the context field is PRESENT
+  //     and NOT allowed (consistent with data-source-not-approved: a missing field
+  //     does not fire — the atom's requiredContext documents what to supply). ---
+  "jurisdiction-not-allowed": (c, cfg) => notInAllowList(c.jurisdiction, cfg?.allowed),
+  "data-residency-violation": (c, cfg) => notInAllowList(c.dataResidency, cfg?.allowedRegions),
+  "model-not-allowed": (c, cfg) => notInAllowList(c.model, cfg?.allowed),
+  "tool-not-allowed": (c, cfg) => notInAllowList(c.tool, cfg?.allowed),
+  "pii-present": (c) => c.piiPresent === true,
+  "rate-limit-exceeded": (c, cfg) => typeof c.callCount === "number" && c.callCount > Number(cfg?.max ?? 0),
+  // --- Evidence-quality atoms (SAFR §24). Unlike the allow-list atoms, these fire on ABSENCE:
+  //     a REQUIRE semantic — "the action must be backed by this evidence; if it isn't, fire"
+  //     (author with escalate/block). Opt-in: they only run when a rule keys them. ---
+  // Fires when any REQUIRED evidence type is not among the attested `evidenceTypes` (missing
+  // evidence — including none supplied at all → all required missing → fires).
+  "evidence-requirement": (c, cfg) => {
+    const required = (cfg?.required ?? []).map((t) => String(t).toLowerCase().trim()).filter(Boolean);
+    if (required.length === 0) return false;
+    const have = new Set((Array.isArray(c.evidenceTypes) ? c.evidenceTypes : []).map((t) => String(t).toLowerCase().trim()));
+    return required.some((r) => !have.has(r));
+  },
+  // Fires when a required minimum confidence (min > 0) is not met — the attested confidence is
+  // below it, or absent (a required confidence that was never supplied fails the bar). A min of
+  // 0 / unset is no requirement and never fires.
+  "evidence-confidence-below": (c, cfg) => {
+    const min = Number(cfg?.min ?? 0);
+    if (!(min > 0)) return false;
+    return typeof c.evidenceConfidence !== "number" || c.evidenceConfidence < min;
+  },
+  // Trust guidance (MetaMynd Trust Index / HCS-28). Fires when the counterparty's trust score is
+  // below a soft REVIEW line — intended to author an ESCALATE (route to a human), NOT a hard block.
+  // The score is server-derived (signed-last) so the agent's itinerary can't fake it; when no score
+  // is present (e.g. no counterparty resolved) the atom simply does not fire — no guidance.
+  "hol-trust-below-review": (c, cfg) => typeof c.holTrustScore === "number" && c.holTrustScore < Number(cfg?.reviewBelow ?? 60)
+};
+function notInAllowList(value, allowList) {
+  const v = value != null ? String(value).toLowerCase().trim() : "";
+  if (v === "") return false;
+  const allowed = (Array.isArray(allowList) ? allowList : []).map((x) => String(x).toLowerCase().trim());
+  return !allowed.includes(v);
+}
+
+// src/policy-core/atom-catalog.ts
+var ATOM_SPECS = [
+  {
+    predicate: "amount-over",
+    label: "Per-transaction amount over limit",
+    description: "Fires when a single action amount exceeds a configured limit (per-transaction cap).",
+    config: [
+      { key: "limit", type: "number", required: true, description: "Maximum allowed amount for one transaction" },
+      {
+        key: "currency",
+        type: "string[]",
+        required: false,
+        description: `Optional currency scope for the limit (e.g. ['USD'], or ['USD','GBP'] for several). Leave empty to keep the limit currency-blind \u2014 the historical default: the raw number is compared regardless of currency. Once set, a request in a currency outside this list \u2014 or with none supplied at all \u2014 fires this atom regardless of amount (unverifiable is treated as unsafe, not as "smaller"), so the cap can't be cleared by naming a cheaper-looking currency (e.g. 200 JPY vs 200 USD).`
+      }
+    ],
+    // `currency` is NOT listed here even though the executable atom conditionally reads it:
+    // unlike `limit`, the `currency` config is OPTIONAL per atom instance, so whether an agent
+    // needs to supply it depends on how a given molecule configures this atom — something
+    // `requiredContextFor`'s per-predicate (not per-instance) model can't express. Every
+    // authorize request already carries `currency` unconditionally regardless (see
+    // AuthorizeInput), so nothing is actually left unfed by omitting it here — this only
+    // controls the Scenario Bank simulate form / docs "context contract" surfacing, and
+    // forcing it onto every amount-over molecule would spuriously mark scenarios that never
+    // configure a currency scope as unexercised (see cumulative-over-atom.test.ts's sibling
+    // comment below for the same reasoning applied there).
+    requiredContext: ["amount"]
+  },
+  {
+    predicate: "amount-unknown",
+    label: "Amount not determinable",
+    description: "Fires when the action carries no usable amount, or a NEGATIVE one \u2014 the gate cannot trust either for capping. A deny-by-default control for value-moving actions: author it with BLOCK ahead of a spend cap, otherwise an amount that is missing, unparseable, or negative passes the cap untested (amount-over only ever fires above the limit, so a negative amount clears every positive cap). A genuine $0 amount does NOT fire this \u2014 only attach it to actions that must always carry a real, non-negative amount.",
+    config: [],
+    requiredContext: ["amount"]
+  },
+  {
+    predicate: "cumulative-over",
+    label: "Total budget over limit",
+    description: "Fires when cumulative spend (already-spent + this transaction) exceeds a configured total budget.",
+    config: [
+      { key: "limit", type: "number", required: true, description: "Maximum total budget across all transactions" },
+      {
+        key: "currency",
+        type: "string[]",
+        required: false,
+        description: "Optional currency scope for the budget (e.g. ['USD'], or ['USD','GBP'] for several). Leave empty to keep it currency-blind \u2014 the historical default. Once set, a request in a currency outside this list \u2014 or with none supplied at all \u2014 fires this atom regardless of amount, same fail-closed design as amount-over's currency scope."
+      }
+    ],
+    // The executable atom (atom-registry.ts) reads BOTH fields: `cumulativeSpend + amount >
+    // limit`. Omitting `cumulativeSpend` here silently broke two downstream consumers this
+    // catalog is the single source of truth for (see file header): the Scenario Bank's
+    // simulate form never rendered an "already spent" field for any set using this atom —
+    // including its own seeded preset, which supplied `cumulativeSpend` for a form field
+    // that didn't exist — so the control could never actually be exercised from the UI; and
+    // the integration docs' generated "context contract" told real SDK integrators this
+    // atom only needs `amount`, so an agent that never sends `cumulativeSpend` gets it
+    // silently treated as 0 and the total-budget cap never fires in production either.
+    //
+    // `currency`, by contrast, is deliberately NOT added here even though the executable atom
+    // conditionally reads it — see the sibling comment on `amount-over`'s currency config
+    // above: it is optional PER ATOM INSTANCE (only read when a molecule configures a
+    // currency scope), so unlike `cumulativeSpend` (always read), a static per-predicate
+    // requiredContext can't represent it without forcing every set using this atom to demand
+    // a currency it may never need.
+    requiredContext: ["amount", "cumulativeSpend"]
+  },
+  {
+    predicate: "risk-at-or-above",
+    label: "Risk at or above level",
+    description: "Fires when the assessed risk level is at or above the configured threshold.",
+    config: [
+      {
+        key: "level",
+        type: "enum",
+        required: true,
+        description: "Threshold risk level",
+        options: ["low", "medium", "high", "critical"]
+      }
+    ],
+    requiredContext: ["riskLevel"]
+  },
+  {
+    predicate: "data-source-not-approved",
+    label: "Data source not approved",
+    description: "Fires when the action uses a data source not on the approved list.",
+    config: [
+      { key: "approved", type: "string[]", required: true, description: "Allow-list of approved data source ids" }
+    ],
+    requiredContext: ["dataSourceId"]
+  },
+  {
+    predicate: "consent-missing",
+    label: "Consent missing",
+    description: "Fires when explicit consent is absent for the action.",
+    config: [],
+    requiredContext: ["consent"]
+  },
+  {
+    predicate: "text-matches",
+    label: "Text contains prohibited terms",
+    description: "Fires when the prompt or output contains any of the configured terms.",
+    config: [{ key: "terms", type: "string[]", required: true, description: "Terms that must not appear" }],
+    requiredContext: ["prompt", "output"]
+  },
+  {
+    predicate: "jurisdiction-not-allowed",
+    label: "Jurisdiction not allowed",
+    description: "Fires when the action's jurisdiction is not on the allow-list.",
+    config: [{ key: "allowed", type: "string[]", required: true, description: "Allowed jurisdictions (e.g. US, MY, EU)" }],
+    requiredContext: ["jurisdiction"]
+  },
+  {
+    predicate: "data-residency-violation",
+    label: "Data residency violation",
+    description: "Fires when data would be processed in a region not on the allow-list.",
+    config: [{ key: "allowedRegions", type: "string[]", required: true, description: "Allowed processing regions" }],
+    requiredContext: ["dataResidency"]
+  },
+  {
+    predicate: "model-not-allowed",
+    label: "LLM model not allowed",
+    description: "Fires when the agent uses an LLM model not on the approved list.",
+    config: [{ key: "allowed", type: "string[]", required: true, description: "Approved model ids" }],
+    requiredContext: ["model"]
+  },
+  {
+    predicate: "tool-not-allowed",
+    label: "Tool not allowed",
+    description: "Fires when the agent invokes a tool/function not on the approved list.",
+    config: [{ key: "allowed", type: "string[]", required: true, description: "Approved tool names" }],
+    requiredContext: ["tool"]
+  },
+  {
+    predicate: "pii-present",
+    label: "PII present",
+    description: "Fires when the action is flagged as involving personal data (PII).",
+    config: [],
+    requiredContext: ["piiPresent"]
+  },
+  {
+    predicate: "rate-limit-exceeded",
+    label: "Rate limit exceeded",
+    description: "Fires when the rolling call count exceeds a configured maximum.",
+    config: [{ key: "max", type: "number", required: true, description: "Maximum allowed calls" }],
+    requiredContext: ["callCount"]
+  },
+  {
+    predicate: "hol-trust-below-review",
+    label: "Counterparty trust below review line",
+    description: "Routes to human review when the counterparty's MetaMynd Trust Index (HCS-28) score is below a soft review line. Guidance, not a hard block \u2014 author it with an ESCALATE decision. The score is resolved server-side; no counterparty score \u2192 the atom does not fire.",
+    config: [{ key: "reviewBelow", type: "number", required: true, description: "Trust score (0\u2013100) below which a human is asked to decide" }],
+    requiredContext: ["holTrustScore"]
+  },
+  {
+    predicate: "evidence-requirement",
+    label: "Required evidence missing",
+    description: "Fires when the action is not backed by every REQUIRED evidence type the agent attests to in `evidenceTypes` (missing evidence \u2014 including none supplied). A REQUIRE control (SAFR \xA724): author it with ESCALATE or BLOCK so an under-evidenced action is stopped or reviewed.",
+    config: [{ key: "required", type: "string[]", required: true, description: "Evidence types that must all be present (e.g. kyc, source-doc, signature)" }],
+    requiredContext: ["evidenceTypes"]
+  },
+  {
+    predicate: "evidence-confidence-below",
+    label: "Evidence confidence below minimum",
+    description: "Fires when the attested evidence confidence is below a required minimum \u2014 or absent (SAFR \xA724). A min of 0 / unset is no requirement. Author with ESCALATE to route low-confidence actions to review.",
+    config: [{ key: "min", type: "number", required: true, description: "Minimum evidence confidence (0\u20131) required" }],
+    requiredContext: ["evidenceConfidence"]
+  }
+];
+var CATALOGUED_ATOMS = ATOM_SPECS.filter((s) => !!ATOM_REGISTRY[s.predicate]);
+function requiredContextFor(predicates) {
+  const fields = /* @__PURE__ */ new Set();
+  for (const p of predicates) {
+    const spec = ATOM_SPECS.find((s) => s.predicate === p);
+    for (const f of spec?.requiredContext ?? []) fields.add(f);
+  }
+  return [...fields].sort();
+}
+
+// src/policy-core/own-entry.ts
+function ownEntry(table, key) {
+  return typeof key === "string" && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : void 0;
+}
+
+// src/policy-core/standards-rules.ts
+var CONTEXT_UNVERIFIABLE = "CONTEXT_UNVERIFIABLE";
+var JURISDICTION_ATOM = "jurisdiction-not-allowed";
+function documentEnforcesJurisdiction(doc) {
+  return (doc?.molecules ?? []).some((m) => m?.decision !== "observe" && (m?.atoms ?? []).some((a) => a?.predicate === JURISDICTION_ATOM));
+}
+var PRECEDENCE = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
+function atomFires(atom, ctx) {
+  const pred = ownEntry(ATOM_REGISTRY, atom.predicate);
+  if (!pred) return false;
+  try {
+    return !!pred(ctx, atom.config);
+  } catch (err) {
+    console.warn(
+      `[standards] atom '${atom.predicate}' threw during evaluation (treated as not-firing):`,
+      err instanceof Error ? err.message : err
+    );
+    return false;
+  }
+}
+function moleculeFires(m, ctx) {
+  if (!m.atoms || m.atoms.length === 0) return false;
+  const results = m.atoms.map((a) => atomFires(a, ctx));
+  switch (m.combinator) {
+    case "all":
+      return results.every(Boolean);
+    case "any":
+      return results.some(Boolean);
+    case "none":
+      return !results.some(Boolean);
+    default:
+      return false;
+  }
+}
+function requiredContextOf(m) {
+  const required = /* @__PURE__ */ new Map();
+  const need = (field, level) => {
+    const have = required.get(field);
+    if (!have || PROVENANCE_RANK[level] > PROVENANCE_RANK[have]) required.set(field, level);
+  };
+  for (const a of m.atoms ?? []) {
+    if (!Object.prototype.hasOwnProperty.call(ATOM_DEFAULT_REQUIRED_CONTEXT, a.predicate)) continue;
+    for (const f of ATOM_DEFAULT_REQUIRED_CONTEXT[a.predicate]) need(f, "agent_asserted");
+  }
+  for (const [f, level] of Object.entries(m.requireProvenance ?? {})) {
+    need(f, isProvenance(level) ? level : "attested");
+  }
+  return required;
+}
+function moleculeUnverifiable(m, ctx) {
+  const bad = [];
+  for (const [field, minimum] of requiredContextOf(m)) {
+    if (contextFieldProblem(ctx, field) !== null || !meetsProvenance(provenanceOf(ctx, field), minimum)) bad.push(field);
+  }
+  return bad.sort();
+}
+function evaluateStandardRules(molecules, ctx, standardKey = null) {
+  let best = null;
+  for (const m of molecules ?? []) {
+    const fired = moleculeFires(m, ctx);
+    const unverifiable = moleculeUnverifiable(m, ctx);
+    if (!fired && unverifiable.length === 0) continue;
+    let decision = fired ? m.decision : "escalate";
+    if (unverifiable.length > 0 && PRECEDENCE[decision] < PRECEDENCE.escalate) decision = "escalate";
+    const reasonCode = fired ? m.reasonCode : CONTEXT_UNVERIFIABLE;
+    if (!best || PRECEDENCE[decision] > PRECEDENCE[best.decision]) {
+      best = { decision, reasonCode, id: m.id, unverifiable: unverifiable.length > 0 ? unverifiable : void 0 };
+    }
+  }
+  if (!best) return { decision: "allow", reasonCode: null, firedMoleculeId: null, standardKey };
+  return {
+    decision: best.decision,
+    reasonCode: best.reasonCode,
+    firedMoleculeId: best.id,
+    standardKey,
+    ...best.unverifiable ? { unverifiableContext: best.unverifiable } : {}
+  };
+}
+function evaluateBoundStandards(standards, ctx) {
+  let best = { decision: "allow", reasonCode: null, firedMoleculeId: null, standardKey: null };
+  for (const s of standards) {
+    const r = evaluateStandardRules(s.document?.molecules, ctx, s.standardKey);
+    if (PRECEDENCE[r.decision] > PRECEDENCE[best.decision]) best = r;
+  }
+  return standards.some((s) => documentEnforcesJurisdiction(s.document)) ? { ...best, jurisdictionRequired: true } : best;
+}
+function configValueValid(field, value) {
+  switch (field.type) {
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "string":
+      return typeof value === "string";
+    case "string[]":
+      return Array.isArray(value) && value.every((v) => typeof v === "string");
+    case "enum":
+      return typeof value === "string" && (field.options ?? []).includes(value);
+    default:
+      return true;
+  }
+}
+function validateAtomConfig(predicate, config) {
+  const spec = ATOM_SPECS.find((s) => s.predicate === predicate);
+  if (!spec) return [];
+  const errors = [];
+  const cfg = config ?? {};
+  for (const field of spec.config) {
+    const present = cfg[field.key] !== void 0 && cfg[field.key] !== null;
+    if (!present) {
+      if (field.required) errors.push(`atom '${predicate}' missing required config '${field.key}'`);
+      continue;
+    }
+    if (!configValueValid(field, cfg[field.key])) {
+      errors.push(`atom '${predicate}' config '${field.key}' must be a ${field.type}`);
+    }
+  }
+  return errors;
+}
+function validateMolecules(molecules) {
+  const issues = [];
+  for (const m of molecules ?? []) {
+    if (!m.id) issues.push({ moleculeId: "(missing id)", message: "molecule is missing an id" });
+    if (!["all", "any", "none"].includes(m.combinator)) {
+      issues.push({ moleculeId: m.id, message: `invalid combinator '${m.combinator}' (all|any|none)` });
+    }
+    if (!["observe", "block", "escalate", "suspend", "quarantine"].includes(m.decision)) {
+      issues.push({ moleculeId: m.id, message: `invalid decision '${m.decision}' (observe|block|escalate|suspend|quarantine)` });
+    }
+    if (!m.reasonCode) issues.push({ moleculeId: m.id, message: "molecule is missing a reasonCode" });
+    if (!m.atoms || m.atoms.length === 0) {
+      issues.push({ moleculeId: m.id, message: "molecule has no atoms" });
+    }
+    if (m.requireProvenance !== void 0) {
+      const rp = m.requireProvenance;
+      if (rp === null || typeof rp !== "object" || Array.isArray(rp)) {
+        issues.push({ moleculeId: m.id, message: "requireProvenance must be an object of { field: level }" });
+      } else {
+        for (const [field, level] of Object.entries(rp)) {
+          if (field.trim() === "") issues.push({ moleculeId: m.id, message: "requireProvenance has an empty field name" });
+          if (!isProvenance(level)) {
+            issues.push({ moleculeId: m.id, message: `requireProvenance '${field}' must be one of agent_asserted|agent_signed|gateway_derived|authoritative|attested` });
+          }
+        }
+      }
+    }
+    for (const a of m.atoms ?? []) {
+      if (!ownEntry(ATOM_REGISTRY, a.predicate)) {
+        issues.push({ moleculeId: m.id, message: `unknown atom predicate '${a.predicate}'` });
+        continue;
+      }
+      for (const err of validateAtomConfig(a.predicate, a.config)) {
+        issues.push({ moleculeId: m.id, message: err });
+      }
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+// src/policy-core/mandate-eval.ts
+var toNum = (v) => typeof v === "number" ? v : Number(v);
+var toArray = (v) => Array.isArray(v) ? v : v === void 0 || v === null ? [] : [v];
+var toTime = (v) => Date.parse(String(v));
+var OPERATORS = {
+  eq: (l, r) => l === r,
+  neq: (l, r) => l !== r,
+  lt: (l, r) => toNum(l) < toNum(r),
+  lteq: (l, r) => toNum(l) <= toNum(r),
+  gt: (l, r) => toNum(l) > toNum(r),
+  gteq: (l, r) => toNum(l) >= toNum(r),
+  isAnyOf: (l, r) => toArray(r).includes(l),
+  isNoneOf: (l, r) => !toArray(r).includes(l),
+  isPartOf: (l, r) => toArray(r).includes(l),
+  before: (l, r) => toTime(l) < toTime(r),
+  after: (l, r) => toTime(l) > toTime(r)
+};
+var REASON_BY_OPERAND = {
+  "mm:payAmount": "SPEND_LIMIT_EXCEEDED",
+  "mm:cumulativeSpend": "SPEND_LIMIT_EXCEEDED",
+  "mm:merchant": "MERCHANT_NOT_ALLOWED",
+  "mm:route": "ROUTE_NOT_ALLOWED",
+  "mm:counterparty": "COUNTERPARTY_NOT_ALLOWED"
+};
+var AMOUNT_OPERANDS = /* @__PURE__ */ new Set(["mm:payAmount", "mm:cumulativeSpend"]);
+var JURISDICTION_OPERANDS = /* @__PURE__ */ new Set(["mm:jurisdiction", "jurisdiction"]);
+function reasonFor(constraint, req) {
+  if (!constraint) return "CONSTRAINT_FAILED";
+  const { leftOperand } = constraint;
+  if (AMOUNT_OPERANDS.has(leftOperand) && !Object.prototype.hasOwnProperty.call(req.values, leftOperand)) {
+    return "AMOUNT_NOT_DETERMINABLE";
+  }
+  if (JURISDICTION_OPERANDS.has(leftOperand)) {
+    const v = req.values[leftOperand];
+    return v === void 0 || v === null || v === "" ? "JURISDICTION_REQUIRED" : "JURISDICTION_NOT_ALLOWED";
+  }
+  return ownEntry(REASON_BY_OPERAND, leftOperand) ?? `CONSTRAINT_FAILED:${leftOperand}`;
+}
+function constraintSatisfied(c, req, strict) {
+  const op = ownEntry(OPERATORS, c.operator);
+  if (!op) return false;
+  const left = Object.prototype.hasOwnProperty.call(req.values, c.leftOperand) ? req.values[c.leftOperand] : void 0;
+  if (!c.unit) return op(left, c.rightOperand);
+  const currency = req.values["mm:currency"];
+  const allowedUnits = Array.isArray(c.unit) ? c.unit : [c.unit];
+  const unitMatches = typeof currency === "string" && allowedUnits.some((u) => u.toUpperCase() === currency.toUpperCase());
+  return unitMatches ? op(left, c.rightOperand) : !strict;
+}
+function targetOf(rule, mandate) {
+  return rule.target ?? mandate.target;
+}
+function isAuthorityFailure(result) {
+  return result.matched?.kind === "expiry" || result.matched?.kind === "no-permission";
+}
+function authorityFailure(mandate, target, now) {
+  const result = evaluateMandate(mandate, { target, now, values: {} });
+  return isAuthorityFailure(result) ? { ...result, decision: "block" } : null;
+}
+function evaluateMandate(mandate, req) {
+  const now = toTime(req.now);
+  if (mandate.validFrom && now < toTime(mandate.validFrom)) {
+    return { decision: "block", reasonCode: "MANDATE_NOT_YET_VALID", matched: { kind: "expiry" } };
+  }
+  if (mandate.validUntil && now > toTime(mandate.validUntil)) {
+    return { decision: "block", reasonCode: "MANDATE_EXPIRED", matched: { kind: "expiry" } };
+  }
+  for (const p of mandate.prohibition ?? []) {
+    if (targetOf(p, mandate) !== req.target) continue;
+    const fires = (p.constraint ?? []).every((c) => constraintSatisfied(c, req, false));
+    if (fires) {
+      return {
+        decision: p.enforcement ?? "block",
+        reasonCode: p.reasonCode ?? "PROHIBITED",
+        matched: { kind: "prohibition", target: p.target }
+      };
+    }
+  }
+  const perms = (mandate.permission ?? []).filter((p) => targetOf(p, mandate) === req.target);
+  if (perms.length === 0) {
+    return {
+      decision: "block",
+      reasonCode: "NO_PERMISSION_FOR_ACTION",
+      matched: { kind: "no-permission", target: req.target }
+    };
+  }
+  for (const p of perms) {
+    const failing2 = (p.constraint ?? []).find((c) => !constraintSatisfied(c, req, true));
+    if (!failing2) return { decision: "allow", reasonCode: "AUTHORIZED" };
+  }
+  const failing = (perms[0].constraint ?? []).filter((c) => !constraintSatisfied(c, req, true));
+  const firstFail = failing[0];
+  const reported = reportedFailure(failing) ?? firstFail;
+  return {
+    decision: firstFail?.onFail ?? "block",
+    reasonCode: reasonFor(reported, req),
+    matched: { kind: "permission", target: perms[0].target, constraint: reported }
+  };
+}
+function reportedFailure(failing) {
+  const first = failing[0];
+  if (!first || !AMOUNT_OPERANDS.has(first.leftOperand)) return void 0;
+  const decision = first.onFail ?? "block";
+  return failing.find((c) => !AMOUNT_OPERANDS.has(c.leftOperand) && (c.onFail ?? "block") === decision);
+}
+function remainingBudget(b) {
+  return Math.max(0, b.cap - b.spent - b.held);
+}
+function canAuthorize(b, amount) {
+  return amount >= 0 && amount <= remainingBudget(b);
+}
+function applyHold(b, amount) {
+  return { ...b, held: b.held + amount };
+}
+function applyCapture(b, amount) {
+  return { cap: b.cap, spent: b.spent + amount, held: Math.max(0, b.held - amount) };
+}
+function releaseHold(b, amount) {
+  return { ...b, held: Math.max(0, b.held - amount) };
+}
+function sumEventField(events, type, field) {
+  return events.filter((e) => e.type === type).reduce((acc, e) => acc + (typeof e.payload[field] === "number" ? e.payload[field] : 0), 0);
+}
+
+// src/policy-core/evaluate.ts
+var PRECEDENCE2 = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
+function evaluate(input) {
+  let decision = "allow";
+  let reasonCode = "AUTHORIZED";
+  const consider = (d, code) => {
+    if (PRECEDENCE2[d] > PRECEDENCE2[decision]) {
+      decision = d;
+      reasonCode = code;
+    }
+  };
+  const m = input.mandate && input.mandateRequest ? evaluateMandate(input.mandate, input.mandateRequest) : null;
+  const authority = m !== null && isAuthorityFailure(m);
+  if (m && authority) consider(m.decision, m.reasonCode);
+  const std = evaluateBoundStandards(input.standards ?? [], input.context);
+  if (std.decision !== "allow") consider(std.decision, std.reasonCode ?? "STANDARD_RULE");
+  const sop = evaluateBoundStandards(input.sops ?? [], input.context);
+  if (sop.decision !== "allow") consider(sop.decision, sop.reasonCode ?? "SOP_RULE");
+  if (m && !authority && m.decision !== "allow") consider(m.decision, m.reasonCode);
+  return { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
+}
+
+// src/policy-core/canonical.ts
+var AUTH_MESSAGE_V2_TAG = "MAGP-AUTH-v2";
+function escapeField(v) {
+  return v.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
+}
+function buildAuthMessage(f) {
+  const v1 = [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.resource ?? "", f.nonce, f.issuedAt];
+  const fields = f.jurisdiction === void 0 || f.jurisdiction === null ? v1 : [...v1, AUTH_MESSAGE_V2_TAG, f.jurisdiction];
+  return fields.map((v) => escapeField(String(v))).join("|");
+}
+function buildLegacyAuthMessageV1(f) {
+  return [f.agentDid, f.action, f.amount, f.currency, f.merchant ?? "", f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+}
+function buildLocalDecisionMessage(f) {
+  return [f.agentDid, f.action, f.decision, f.reasonCode, f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+}
+
+// src/policy-core/checkpoint-anchor.ts
+function buildCheckpointAnchorMessage(f) {
+  return [f.agentDid, f.checkpointHash, f.previousCheckpointHash, f.entryCount, f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+}
+
+// src/policy-core/context.ts
+function applySignedLast(unsigned, signed) {
+  return { ...unsigned ?? {}, ...signed };
+}
+
+// src/policy-core/operating-mode.ts
+var MODE_RANK = {
+  read_only: 0,
+  restricted: 1,
+  supervised: 2,
+  autonomous: 3
+};
+var MODES_BY_RANK = ["read_only", "restricted", "supervised", "autonomous"];
+function isOperatingMode(v) {
+  return typeof v === "string" && Object.prototype.hasOwnProperty.call(MODE_RANK, v);
+}
+function asOperatingMode(v) {
+  return isOperatingMode(v) ? v : "autonomous";
+}
+function moreRestrictive(a, b) {
+  return MODE_RANK[a] <= MODE_RANK[b] ? a : b;
+}
+var SUPERVISED_AMOUNT_CAP = 100;
+var RISK_RANK2 = { low: 0, medium: 1, high: 2, critical: 3 };
+function riskAtOrAboveHigh(riskLevel) {
+  const r = typeof riskLevel === "string" ? RISK_RANK2[riskLevel.toLowerCase()] : void 0;
+  return r !== void 0 && r >= RISK_RANK2.high;
+}
+function operatingModeGate(mode, ctx) {
+  const m = asOperatingMode(mode);
+  const valueBearing = (ctx.amount ?? 0) > 0;
+  if (!valueBearing || m === "autonomous") return { decision: "allow", reasonCode: null };
+  switch (m) {
+    case "read_only":
+      return { decision: "block", reasonCode: "MODE_READ_ONLY" };
+    case "restricted":
+      return { decision: "escalate", reasonCode: "MODE_RESTRICTED_REVIEW" };
+    case "supervised":
+      return riskAtOrAboveHigh(ctx.riskLevel) || (ctx.amount ?? 0) >= SUPERVISED_AMOUNT_CAP ? { decision: "escalate", reasonCode: "MODE_SUPERVISED_REVIEW" } : { decision: "allow", reasonCode: null };
+    default:
+      return { decision: "allow", reasonCode: null };
+  }
+}
+export {
+  ATOM_DEFAULT_REQUIRED_CONTEXT,
+  ATOM_REGISTRY,
+  ATOM_SPECS,
+  AUTH_MESSAGE_V2_TAG,
+  CATALOGUED_ATOMS,
+  CONTEXT_UNVERIFIABLE,
+  JURISDICTION_ATOM,
+  MODES_BY_RANK,
+  MODE_RANK,
+  PROVENANCE_KEY,
+  PROVENANCE_LEVELS,
+  PROVENANCE_RANK,
+  RISK_LEVELS,
+  SUPERVISED_AMOUNT_CAP,
+  applyCapture,
+  applyHold,
+  applySignedLast,
+  asOperatingMode,
+  authorityFailure,
+  buildAuthMessage,
+  buildCheckpointAnchorMessage,
+  buildLegacyAuthMessageV1,
+  buildLocalDecisionMessage,
+  buildRuleContext,
+  canAuthorize,
+  contextFieldProblem,
+  documentEnforcesJurisdiction,
+  evaluate,
+  evaluateBoundStandards,
+  evaluateMandate,
+  evaluateStandardRules,
+  isAuthorityFailure,
+  isOperatingMode,
+  isProvenance,
+  maxRisk,
+  meetsProvenance,
+  moleculeFires,
+  moleculeUnverifiable,
+  moreRestrictive,
+  normalizeRiskLevel,
+  operatingModeGate,
+  provenanceOf,
+  releaseHold,
+  remainingBudget,
+  requiredContextFor,
+  requiredContextOf,
+  requiresPayloadBindingFor,
+  riskFloorFor,
+  sumEventField,
+  validateMolecules
+};

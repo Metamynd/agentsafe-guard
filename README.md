@@ -48,9 +48,10 @@ Default-deny by scope gets you that for free.
 | [`packages/policy-core`](packages/policy-core) | The deterministic evaluator. Zero dependencies, no IO, no clock, no LLM. Atoms → molecules → mandate, combined most-restrictive-wins. |
 | [`packages/agentsafe-guard`](packages/agentsafe-guard) | The agent-side guard. `guardTool()` wraps a function and refuses to run it unless the verdict permits. [npm](https://www.npmjs.com/package/@metamynd/agentsafe-guard) |
 | [`packages/agentsafe-mcp-guard`](packages/agentsafe-mcp-guard) | The counterparty-side guard. An MCP server re-evaluates the agent's authority *independently*, so a compromised agent still cannot make an honest service act. [npm](https://www.npmjs.com/package/@metamynd/agentsafe-mcp-guard) |
+| [`packages/agentsafe-a2a-guard`](packages/agentsafe-a2a-guard) | The A2A guard. An agent receiving an Agent2Agent task re-verifies the caller's signed MAGP envelope against the caller's own published policy, so a caller that ignores its own guard still cannot make your agent act. A refusal is a returned `TaskStatus`. [npm](https://www.npmjs.com/package/@metamynd/agentsafe-a2a-guard) |
 | [`packages/create-metamynd-agent`](packages/create-metamynd-agent) | The scaffolder. `npx create-metamynd-agent --sandbox` provisions a governed agent and writes a runnable example — about four seconds, no account. [npm](https://www.npmjs.com/package/create-metamynd-agent) |
 
-Both guards ship with **zero runtime dependencies** — Node's built-in Ed25519 (`node:crypto`)
+All three guards ship with **zero runtime dependencies** — Node's built-in Ed25519 (`node:crypto`)
 and `fetch`, nothing else. For something in the execution path of every privileged action,
 that matters more than features.
 

@@ -37,7 +37,7 @@ jobs:
       - name: Test
         run: npm run test:core
 
-  # Both guards' smoke suites, on every Node version the packages claim to support.
+  # The guards' smoke suites, on every Node version the packages claim to support.
   #
   # These need no dependencies at all - the packages have none, and the suites are plain
   # node scripts - so they run against a bare checkout. That makes this the honest test of
@@ -67,12 +67,16 @@ jobs:
         working-directory: packages/agentsafe-mcp-guard
         run: npm test
 
+      - name: A2A guard smoke suite
+        working-directory: packages/agentsafe-a2a-guard
+        run: npm test
+
   generated:
     name: Bundled evaluator is current
     runs-on: ubuntu-latest
 
     # `packages/*/policy-core.mjs` is generated from `packages/policy-core` by esbuild.
-    # Both guards ship the bundle rather than the TypeScript, so a stale bundle means the
+    # The guards ship the bundle rather than the TypeScript, so a stale bundle means the
     # code people install disagrees with the code they can read here - the precise failure
     # that would make publishing a reference implementation pointless.
     steps:
@@ -97,7 +101,7 @@ jobs:
 
           norm /tmp/rebuilt.mjs > /tmp/rebuilt.norm
           fail=0
-          for pkg in agentsafe-guard agentsafe-mcp-guard; do
+          for pkg in agentsafe-guard agentsafe-mcp-guard agentsafe-a2a-guard; do
             norm "packages/$pkg/policy-core.mjs" > /tmp/committed.norm
             if diff -q /tmp/rebuilt.norm /tmp/committed.norm > /dev/null; then
               echo "packages/$pkg/policy-core.mjs is current."
