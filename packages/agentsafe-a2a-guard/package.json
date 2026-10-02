@@ -1,0 +1,64 @@
+{
+  "name": "@metamynd/agentsafe-a2a-guard",
+  "version": "0.13.3",
+  "description": "Zero-dependency trustless governance for the A2A (Agent2Agent) protocol. The RECEIVING agent independently re-verifies a calling agent's signed MAGP envelope against the caller's own published policy — so a caller that ignores its own guard still cannot make your agent act.",
+  "type": "module",
+  "main": "./agentsafe-a2a-guard.mjs",
+  "module": "./agentsafe-a2a-guard.mjs",
+  "exports": {
+    ".": "./agentsafe-a2a-guard.mjs",
+    "./policy": "./magp-policy.mjs",
+    "./policy-core": "./policy-core.mjs",
+    "./keepalive-fetch": "./keepalive-fetch.mjs",
+    "./did": "./magp-did.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "keepalive-fetch.mjs",
+    "agentsafe-a2a-guard.mjs",
+    "magp-policy.mjs",
+    "magp-did.mjs",
+    "payload-binding.mjs",
+    "governance-envelope.mjs",
+    "policy-core.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node a2a-guard.smoke.mjs && node a2a-claim-token.smoke.mjs && node a2a-payload-binding.smoke.mjs && node jurisdiction.smoke.mjs && node itinerary-context.smoke.mjs && node context-signature.smoke.mjs && node bundle-authentication.smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "a2a",
+    "agent2agent",
+    "ai",
+    "agent",
+    "agents",
+    "governance",
+    "authorization",
+    "trustless",
+    "zero-trust",
+    "ed25519",
+    "did",
+    "magp",
+    "metamynd",
+    "agentsafe"
+  ],
+  "author": "MetaMynd",
+  "license": "MIT",
+  "homepage": "https://metamynd.ai/en/developers/spec",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Metamynd/agentsafe-guard.git",
+    "directory": "packages/agentsafe-a2a-guard"
+  },
+  "bugs": {
+    "url": "https://github.com/Metamynd/agentsafe-guard/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

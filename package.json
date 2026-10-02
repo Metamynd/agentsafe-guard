@@ -2,12 +2,13 @@
   "name": "agentsafe-guard-workspace",
   "private": true,
   "type": "module",
-  "description": "Runtime governance for AI agents - the deterministic evaluator and the two guards that call it.",
+  "description": "Runtime governance for AI agents - the deterministic evaluator and the guards that call it.",
   "scripts": {
-    "test": "npm run test:core && npm run test:guard && npm run test:mcp-guard",
+    "test": "npm run test:core && npm run test:guard && npm run test:mcp-guard && npm run test:a2a-guard",
     "test:core": "vitest run",
     "test:guard": "cd packages/agentsafe-guard && npm test",
     "test:mcp-guard": "cd packages/agentsafe-mcp-guard && npm test",
+    "test:a2a-guard": "cd packages/agentsafe-a2a-guard && npm test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
