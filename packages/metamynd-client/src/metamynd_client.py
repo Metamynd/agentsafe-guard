@@ -51,7 +51,26 @@ of a hold nobody has claimed, are the cases an agent can do itself.
 Risk. A rule that judges `riskLevel` escalates a request that carries none (or an
 unrecognised one) — an agent that omits its risk is indistinguishable from one hiding it.
 Send an honest `riskLevel` in `context`, or have your mandate's owner set a `riskTier` so
-it does not depend on you (MAGP §6.3). `guard_tool` never invents one.
+it does not depend on you (MAGP §6.3). `guard_tool` never invents one. Whatever you send is
+the agent's OWN claim: signing the context proves who said it, not that it is true, and
+nothing checks the value unless the owner configures provenance for it. Never default a
+missing one to "low" in a `map_args` — pass it through, so a call that does not say is
+sent for review.
+
+In-process, cooperative. `guard_tool` runs in YOUR process: it is the agent declining to
+call a tool the gate refused, which stops a well-behaved agent and records every decision,
+but anything that can import the raw function (or the credential it uses) can still call it
+directly. The enforcement boundary is a SEPARATE process that holds the tool and its
+credentials and re-verifies the signed request itself — `@metamynd/agentsafe-http-gateway`
+or an MCP server using `agentsafe-mcp-guard`.
+
+Parallel tool calls (0.8.0). A refused SYNC tool raises `GovernanceBlocked`; frameworks that
+run several sync tool calls of one model turn in worker threads (PydanticAI, LangGraph's
+`ToolNode`) abort the turn on that exception while sibling calls already in their threads
+keep going — they are authorized and run, and their results reach nobody. Prefer `async def`
+tools (a cancelled async call is cancelled, and a hold it created is released), or pass
+`guard_tool(..., on_refusal="return")` so a refusal comes back as a `GovernanceRefusal`
+value the framework hands to the model, and no exception aborts the turn.
 
 Jurisdiction (0.6.0). Pass `jurisdiction="SG"` (ISO 3166-1 alpha-2) to `authorize` /
 `sign_request`: it is sent as a top-level field and SIGNED (the v2 message, MAGP §8.3.12 —
@@ -142,9 +161,10 @@ __all__ = [
     "current_governance",
     "governance_headers",
     "GovernanceBlocked",
+    "GovernanceRefusal",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1409,11 +1429,53 @@ class GovernanceBlocked(RuntimeError):
         self.action = action
 
 
+# Reason codes that mean "the gate gave no decision" (a rate-limit or server error with a JSON body is read as a block
+# with one of these), not "the gate refused this request". Telling the model never to retry those would be wrong.
+_NO_DECISION_REASONS = frozenset({"", "UNKNOWN", "REFUSED"})
+
+
+def _refusal_message(verdict: Verdict, action: str) -> str:
+    """The text a model reads for a refusal: what happened, and whether retrying could ever help."""
+    if verdict.decision == "escalate":
+        return f"Held for human review: {verdict.reason_code}. {action} did not run. It is held for a human; do not retry it."
+    if (verdict.reason_code or "") in _NO_DECISION_REASONS:
+        return f"The governance gate did not give a decision, so {action} did not run. It may be retried later."
+    return f"Refused by governance: {verdict.decision}/{verdict.reason_code}. {action} did not run. Do not retry it with different arguments."
+
+
+class GovernanceRefusal(dict):
+    """What a `guard_tool(..., on_refusal="return")` tool returns instead of raising (0.8.0).
+
+    A plain dict, so every framework can hand it to the model as the tool's result (JSON-serialisable as is):
+    `refused` (always True), `action`, `decision` (`block` / `escalate` / ...), `reasonCode`, `escalationId`
+    (an escalate's handle for `client.wait_for_escalation`, else None) and `message`. The full verdict is on
+    `.verdict` (an attribute, never serialised). The tool did NOT run. Test for it with
+    `isinstance(result, GovernanceRefusal)`, never by truthiness: a non-empty dict is truthy.
+    """
+
+    def __init__(self, verdict: Verdict, action: str):
+        super().__init__(
+            refused=True,
+            action=action,
+            decision=verdict.decision,
+            reasonCode=verdict.reason_code,
+            escalationId=verdict.escalation_id,
+            message=_refusal_message(verdict, action),
+        )
+        self.verdict = verdict
+        self.action = action
+
+
+_ON_REFUSAL_MODES = ("raise", "return")
+
+
 def guard_tool(
     client: "MetaMyndClient",
     action: str,
     fn: "Any",
     map_args: "Any" = None,
+    *,
+    on_refusal: "Any" = "raise",
 ) -> "Any":
     """Wrap a callable so it runs ONLY on a permit.
 
@@ -1427,11 +1489,18 @@ def guard_tool(
     (`amount`, `currency`, `merchant`, `resource`, `jurisdiction`, `context`). Without it the call is
     authorized with no amount, which is right for a tool that moves no money and wrong for
     one that does — so pass it whenever there is a value at stake. Put an honest `riskLevel`
-    in `context`; a call with none is escalated (MAGP §6.3), and this function never invents one.
+    in `context`; a call with none is escalated (MAGP §6.3), and this function never invents one —
+    nor should your `map_args` (pass the tool's own value through; never `or "low"`). It is the
+    agent's own claim unless the mandate's owner configures provenance for it.
 
         book = guard_tool(client, "flight-purchase", raw_book,
                           lambda vendor, amount: {"amount": amount, "merchant": vendor,
                                                   "context": {"tool": "book-flight", "riskLevel": "low"}})
+
+    This wrapper is IN-PROCESS and cooperative: it makes the governed path the easy one for
+    your agent, but code that can reach `raw_book` itself can still call it. The boundary is a
+    separate process holding the tool and its credentials that re-verifies the signed request
+    (`@metamynd/agentsafe-http-gateway`, or an MCP server using `agentsafe-mcp-guard`).
 
     `map_args` may also return `"payload"`: the complete payload the tool will send (a dict of
     JSON values). It is digested and signed with the request, so the service that executes it
@@ -1444,7 +1513,22 @@ def guard_tool(
     held action has not happened yet, and returning normally would tell the caller it had.
     (`refused.verdict.escalation_id` is the handle for `client.wait_for_escalation`.)
 
-    Async tools are supported: pass an `async def` and get an `async def` back.
+    `on_refusal` (0.8.0, keyword-only) chooses what a refusal does — only a governance refusal;
+    an unreachable gate and a payload that cannot be bound still raise, and the tool still never
+    runs in any case:
+      - `"raise"` (default): raise `GovernanceBlocked`, as above.
+      - `"return"`: return a `GovernanceRefusal` (a JSON-ready dict) instead. Use this when a
+        framework runs several SYNC tool calls of one model turn in parallel threads (PydanticAI,
+        LangGraph's `ToolNode`): there, one raised refusal aborts the turn while the sibling calls
+        already in their threads go on — authorized and run, with results nobody receives. A
+        returned refusal is just that call's result; the turn completes and the model sees every
+        outcome.
+      - a callable: `on_refusal(refused: GovernanceBlocked)` is called and its return value is
+        the tool's result (e.g. a string for the model). Whatever it raises propagates.
+
+    Async tools are supported: pass an `async def` and get an `async def` back. They are the
+    better fit for parallel tool calls: a cancelled async call is cancelled (and a hold it had
+    already been granted is released), where a sync call already in a worker thread cannot be.
 
     If the tool calls a service that re-verifies the agent (an HTTP gateway, an MCP server), it
     needs the signed request: inside the wrapped call, `governance_headers()` returns the
@@ -1464,6 +1548,16 @@ def guard_tool(
     unguarded function and the wrapper is invisible to the framework — which is the only
     way "wrap the tool" can be advice we give people.
     """
+
+    if not (callable(on_refusal) or on_refusal in _ON_REFUSAL_MODES):
+        # Refused at wrap time: a typo here ("retrun") must not silently fall back to either behaviour.
+        raise ValueError(f'on_refusal must be "raise", "return" or a callable, not {on_refusal!r}')
+
+    def _refused(refused: "GovernanceBlocked") -> "Any":
+        """The tool's result for a governance refusal when it is not raised. The tool has NOT run."""
+        if on_refusal == "return":
+            return GovernanceRefusal(refused.verdict, refused.action)
+        return on_refusal(refused)
 
     def _gate(*args: "Any", **kwargs: "Any") -> "Verdict":
         payload = map_args(*args, **kwargs) if map_args else {}
@@ -1517,6 +1611,11 @@ def guard_tool(
             except asyncio.CancelledError:
                 gate_call.add_done_callback(_release_if_cancelled)
                 raise
+            except GovernanceBlocked as refused:
+                if on_refusal == "raise":
+                    raise
+                result = _refused(refused)
+                return (await result) if inspect.isawaitable(result) else result
             token = _GOVERNANCE.set(verdict.signed)
             try:
                 return await fn(*args, **kwargs)
@@ -1527,7 +1626,14 @@ def guard_tool(
 
     @functools.wraps(fn)
     def governed(*args: "Any", **kwargs: "Any") -> "Any":
-        verdict = _gate(*args, **kwargs)
+        try:
+            verdict = _gate(*args, **kwargs)
+        except GovernanceBlocked as refused:
+            if on_refusal == "raise":
+                raise
+            # Returned, not raised: a framework running sibling sync calls in parallel threads would otherwise abort the
+            # turn on this exception while those siblings run on unobserved (M-5). The tool has not been touched.
+            return _refused(refused)
         # While the tool runs, the signed request is available to it WITHOUT appearing in its
         # signature (which frameworks read to build the tool's schema): a tool that calls a
         # gateway does `headers=governance_headers()`. Reset afterwards so it can never leak into

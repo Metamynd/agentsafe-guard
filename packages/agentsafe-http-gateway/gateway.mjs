@@ -329,6 +329,74 @@ function isNonScalar(v) {
   return v !== null && typeof v === 'object';
 }
 
+/**
+ * Percent-decode every `%XX` (byte-wise, never throwing) until the string stops changing, at most 4 rounds — so a
+ * double- or triple-encoded `%253F` is seen for what an upstream that decodes more than once would read.
+ */
+function decodeFully(s) {
+  let cur = s;
+  for (let round = 0; round < 4; round++) {
+    const next = cur.replace(/%([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+/** A query key a route may list in `allowedQuery`: plain, unencoded, and never one of the signed value fields. */
+const QUERY_KEY = /^[A-Za-z0-9_.~-]+$/;
+
+/**
+ * Check the request target of a GOVERNED route for anything the agent's signature does not cover (M-7). The signed request
+ * and the payload binding cover the BODY; the URL query string reaches the upstream verbatim, so an upstream that reads
+ * `?amount=4000&merchant=attacker-llc` would act on values nobody signed. Returns null when the target is clean, or a short
+ * reason string when it must be refused (`QUERY_NOT_BOUND`):
+ *   - a fragment (`#`), raw or percent-encoded at any depth;
+ *   - a query (`?`), a path parameter (`;`), or a fragment encoded into the PATH (`%3F`, `%253F`, `;`, `%3B`, `%23`);
+ *   - any query at all — even an empty `?` — unless the route lists `allowedQuery`;
+ *   - with `allowedQuery`: a parameter whose key is not listed EXACTLY (no encoded, renamed or differently-cased key), a
+ *     key that appears twice (first-wins and last-wins readers disagree, like a duplicate JSON key), an empty `&&`
+ *     segment, a `;` separator, or a value whose decoded form carries `& ; = ? #` (a double-decoding upstream would read
+ *     it as more parameters).
+ */
+export function queryRefusal(path, route) {
+  const target = String(path ?? '');
+  if (decodeFully(target).includes('#')) return 'a URL fragment';
+  const qi = target.indexOf('?');
+  const pathPart = qi < 0 ? target : target.slice(0, qi);
+  if (/[?;]/.test(decodeFully(pathPart))) return 'a query or path parameter encoded into the path';
+  if (qi < 0) return null;
+  const allowed = route?.allowedQuery;
+  if (!Array.isArray(allowed)) return 'a query string on a governed route that declares no allowedQuery';
+  const query = target.slice(qi + 1);
+  if (query === '') return null;
+  if (query.includes(';')) return 'a ";" query separator';
+  const seen = new Set();
+  for (const part of query.split('&')) {
+    if (part === '') return 'an empty query parameter';
+    const eq = part.indexOf('=');
+    const key = eq < 0 ? part : part.slice(0, eq);
+    const value = eq < 0 ? '' : part.slice(eq + 1);
+    if (!allowed.includes(key)) return `query parameter "${key}" is not in allowedQuery`;
+    if (seen.has(key)) return `query parameter "${key}" appears more than once`;
+    seen.add(key);
+    if (/[&;=?#]/.test(decodeFully(value.replace(/\+/g, ' ')))) return `query parameter "${key}" carries an encoded separator`;
+  }
+  return null;
+}
+
+/** Validate a route's `allowedQuery` at construction time; throws on a misconfiguration (never guesses). */
+function assertAllowedQuery(route) {
+  if (route?.allowedQuery === undefined) return;
+  const where = `route "${route.method ?? '*'} ${route.path}"`;
+  if (!Array.isArray(route.allowedQuery)) throw new Error(`allowedQuery for ${where} must be an array of query keys`);
+  const valueFields = new Set([...BOUND_FIELDS, ...(route.valueFields ?? DEFAULT_VALUE_FIELDS)]);
+  for (const k of route.allowedQuery) {
+    if (typeof k !== 'string' || !QUERY_KEY.test(k)) throw new Error(`allowedQuery for ${where} has an invalid key ${JSON.stringify(k)} (letters, digits, _ . ~ - only)`);
+    if (valueFields.has(k)) throw new Error(`allowedQuery for ${where} may not list "${k}": it is a signed value field, and a query parameter is not covered by the signature`);
+  }
+}
+
 const RISK_LEVELS = new Set(['low', 'medium', 'high', 'critical']);
 
 /**
@@ -419,6 +487,12 @@ function withHeader(headers, name, value) {
  * overrides it per route. Unset (the default) → the guard's own `requireContextSignature` (off unless the guard was
  * built with it). A PRESENT `envelopeSignature` is always verified by the guard either way — one that does not verify
  * over the request as it reached this gateway is `403 CONTEXT_SIGNATURE_INVALID`.
+ *
+ * route.allowedQuery — OPTIONAL (since 0.17.1): a governed route refuses any URL query string, and any query, fragment or
+ * path parameter encoded into its path, with `403 QUERY_NOT_BOUND` before anything is claimed — the signature covers the
+ * body, not the URL (see queryRefusal). `allowedQuery: ['page', 'sort']` forwards exactly those keys, each at most once,
+ * UNBOUND (logged at startup); a signed value field (amount/currency/merchant, or one in `valueFields`) cannot be listed.
+ * Unmatched routes are untouched.
  *
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
@@ -554,6 +628,20 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     }
   }
 
+  // Since 0.17.1 a governed route refuses a query string (QUERY_NOT_BOUND) unless it lists `allowedQuery`. A listed
+  // key is forwarded but NOT covered by the agent's signature — say so at startup, once per route.
+  for (const route of routes) {
+    assertAllowedQuery(route);
+    if (Array.isArray(route?.allowedQuery) && route.allowedQuery.length > 0) {
+      console.warn(
+        `[gateway] route "${route.method ?? '*'} ${route.path}" forwards query parameter(s) ${route.allowedQuery.join(', ')} ` +
+        `UNBOUND: the agent's signature and payload binding cover the body, not the URL query. List only keys whose value ` +
+        `the upstream may take from the caller unchecked (paging, sorting), or bind them with a route.payload(req) that ` +
+        `includes them and that the agent signs. See README "Query strings".`,
+      );
+    }
+  }
+
   async function handle(req) {
     const route = matchRoute(routes, req.method, req.path);
 
@@ -563,6 +651,13 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
         return { status: 403, body: { decision: 'block', reasonCode: 'ROUTE_NOT_ALLOWED', path: req.path } };
       }
       return forward(req);
+    }
+
+    // The signature and the payload binding cover the BODY; the URL query reaches the upstream verbatim. Refuse a query
+    // (or one smuggled into the path) the route has not explicitly allowed — before anything is claimed or consumed.
+    const queryProblem = queryRefusal(req.path, route);
+    if (queryProblem) {
+      return { status: 403, body: { decision: 'block', reasonCode: 'QUERY_NOT_BOUND', action: route.action, error: `refused: ${queryProblem}` } };
     }
 
     // Protected route → the caller must present a signed MAGP request to be governed.

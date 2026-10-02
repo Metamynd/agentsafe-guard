@@ -45,6 +45,9 @@ instead of allowing it: an agent that omits its risk is indistinguishable from o
 `guard_tool` never invents a risk for you, and the `"low"` in the examples is a **placeholder,
 not an assessment**. A real integration states an honest one — or, better, doesn't depend on
 the agent: the mandate's owner can set a `riskTier` no claim can lower (MAGP §6.3).
+Whatever you send is the agent's **own claim**: signing the context proves who said it, not that it is
+true, and nothing checks the value unless the owner configures provenance for it. In a `map_args`, pass
+the tool's own value through — never `or "low"` — so a call that does not say is sent for review.
 
 ### Jurisdiction (0.6.0, MAGP §8.3.12)
 
@@ -114,6 +117,34 @@ framework that builds the tool schema from it — the OpenAI Agents SDK, Pydanti
 the unguarded function. If the awaiting task is cancelled (a timeout) while the gate is answering, and
 the gate permits, the hold that call created is voided rather than left reserving the budget.
 Async generator tools are refused when you wrap them: one authorization covers one action.
+
+**In-process and cooperative.** `guard_tool` runs in your own process: it makes the governed path the one
+your agent takes, and records every decision, but code that can import `book_flight` (or reach the credential it
+uses) can still call it directly. The enforcement boundary is a **separate process** that holds the tool and its
+credentials and re-verifies the signed request — see [Behind a gateway or MCP server](#behind-a-gateway-or-mcp-server).
+
+### Parallel tool calls: `on_refusal` (0.8.0)
+
+When a model asks for several tools in one turn, PydanticAI and LangGraph's default `ToolNode` run the **sync** ones
+in worker threads. A refused call that raises `GovernanceBlocked` aborts the turn — while the sibling calls already
+in their threads keep going: authorized, run, and their results delivered to nobody. Three fixes, best first:
+
+- **Use `async def` tools.** A cancelled async guarded call is cancelled, and a hold it was already granted is
+  released.
+- **`guard_tool(..., on_refusal="return")`.** A refusal is returned as a `GovernanceRefusal` — a JSON-ready dict
+  (`refused`, `action`, `decision`, `reasonCode`, `escalationId`, `message`; the full verdict on `.verdict`) — so it
+  is just that call's result, the turn completes, and the model sees every outcome. `on_refusal=callable` gets the
+  `GovernanceBlocked` and returns whatever the tool should return instead. Only governance refusals are returned: an
+  unreachable gate still raises. Check with `isinstance(result, GovernanceRefusal)`, not truthiness.
+- **LangGraph:** `ToolNode(tools, handle_tool_errors=GovernanceBlocked)` turns the exception into a `ToolMessage`
+  (its default re-raises everything except its own invocation errors).
+
+```python
+book = guard_tool(client, "flight-purchase", book_flight, map_args, on_refusal="return")
+result = book(amount=150, merchant="skyward-air")
+if isinstance(result, GovernanceRefusal):
+    ...  # the tool did not run; result["reasonCode"] says why
+```
 
 An escalation can also end as `modified` — a reviewer changed the action instead of approving it as
 asked. That stops the wait too, is never `may_proceed`, and `status.next_escalation_id` is the

@@ -17,13 +17,37 @@ export function segments(path) {
   // evaluation, and NO payload binding — while the upstream decoded it right back to the
   // governed path and executed it. A malformed escape falls back to the raw segment
   // rather than throwing, so it compares literally instead of crashing the gateway.
-  let decoded;
-  try {
-    decoded = decodeURIComponent(raw);
-  } catch {
-    decoded = raw;
+  // Decoded REPEATEDLY (to a fixed point, at most 4 rounds): an upstream that decodes again would otherwise see
+  // `/book%253Famount=4000` as `/book?amount=4000` while this matcher, having decoded once, saw `/book%3Famount=4000`
+  // as a different path — unmatched, forwarded ungoverned. A backslash is treated as `/` (many stacks normalise it).
+  let decoded = raw;
+  for (let round = 0; round < 4; round++) {
+    let next;
+    try {
+      next = decodeURIComponent(decoded);
+    } catch {
+      break;
+    }
+    if (next === decoded) break;
+    decoded = next;
   }
-  return decoded.split('/').filter(Boolean);
+  decoded = decoded.replace(/\\/g, '/');
+  // A query, fragment or path parameter smuggled into the PATH (`/book%3Famount=4000`,
+  // `/book%23x`, `/book;amount=4000`) must still be recognised as the governed path it
+  // decorates: an upstream that strips `;params` (many servlet/routing stacks do) or decodes
+  // `%3F` into a query would otherwise run a governed route that this matcher called
+  // "unmatched" and forwarded ungoverned. Cutting at the first such character makes the
+  // variant MATCH, and the gateway then refuses it (QUERY_NOT_BOUND) — see gateway.mjs.
+  decoded = decoded.split(/[?#]/)[0];
+  // Dot segments are resolved as an upstream would (`/x/../book` IS `/book` to it), so a traversal cannot route a
+  // governed path around this matcher. `..` above the root is dropped, never an escape.
+  const out = [];
+  for (const s of decoded.split('/').map((p) => p.split(';')[0])) {
+    if (!s || s === '.') continue;
+    if (s === '..') out.pop();
+    else out.push(s);
+  }
+  return out;
 }
 
 /**

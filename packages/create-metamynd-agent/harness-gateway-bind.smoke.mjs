@@ -194,6 +194,17 @@ try {
     assert.equal(fin.toolRuns(), before);
   });
 
+  // M-4: the scaffolded agent no longer defaults a missing riskLevel to 'low'. What it now sends when the tool call states no
+  // risk is a context WITHOUT one, and that must reach the policy as missing: held for review, the tool never runs.
+  await check('a request whose context states NO riskLevel is held for review, not allowed as low, and the tool never runs', async () => {
+    const before = fin.toolRuns();
+    const body = { amount: 250, currency: 'USD', merchant: 'skyward-air' };
+    const r = await fin.post('/book-flight', { header: await fin.signBound({ ...good, context: { tool: 'flight-purchase' } }, body), body });
+    assert.notEqual(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body?.decision, 'escalate', JSON.stringify(r.body));
+    assert.equal(fin.toolRuns(), before, 'the tool must not have run');
+  });
+
   await check('an unknown route is refused (deny-by-default), and a path variant cannot reach a governed tool ungoverned', async () => {
     const before = fin.toolRuns();
     let r = await fin.post('/wire-funds', { header: await fin.sign(good), body: { amount: 250 } });
@@ -246,6 +257,39 @@ await check('hosted financial scaffold: agent body and gateway allowedFields agr
   assert.match(agent, /payload: \{ amount: a\.amount, merchant: a\.merchant, currency: a\.currency \?\? /, 'the authorization is bound to the same body');
   assert.match(gw, /requirePayloadBinding: true/, 'the gateway refuses an unbound request');
   rmSync(out, { recursive: true, force: true });
+});
+
+// M-4: every financial template used to map `riskLevel: a.riskLevel ?? 'low'`, turning "the agent did not say" into "low" (allowed,
+// no review). The gate escalates a missing risk by design, so the scaffold must pass it through unchanged — and say so in its README.
+await check('no financial scaffold defaults a missing riskLevel to low, and each README says riskLevel is the agent\'s own claim', async () => {
+  process.env.CREATE_METAMYND_AGENT_NO_MAIN = '1';
+  const { scaffoldProject } = await import('./index.mjs');
+  const projects = [];
+  const realLog = console.log; console.log = () => {};
+  try {
+    for (const [label, opts] of [['hosted-gw', { sandbox: false, withGateway: true }], ['hosted-nogw', { sandbox: false, withGateway: false }], ['sandbox', { sandbox: true, withGateway: false }]]) {
+      const out = mkdtempSync(join(tmpdir(), `metamynd-risk-${label}-`));
+      scaffoldProject({ outDir: out, config: { apiBase: 'http://127.0.0.1:1', agentDid: 'did:key:zStub', agentKey: 'aa', identityId: 'stub', keyVerified: true, mandate: { scope: 'flight-purchase' }, issuer: { policyKey: 'ab'.repeat(32) } }, slug: label, scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', ...opts });
+      projects.push([label, out]);
+    }
+  } finally { console.log = realLog; }
+  for (const [label, extra] of [['harness', []], ['harness-gw', ['--gateway']]]) {
+    const out = mkdtempSync(join(tmpdir(), `metamynd-risk-${label}-`));
+    execFileSync(process.execPath, [join(HERE, 'index.mjs'), '--harness', ...extra, '--yes', '--name', 'Risk Test', '--scope', 'flight-purchase', '--per-txn-max', '500', '--out', out], { stdio: 'pipe', env: { ...process.env, CREATE_METAMYND_AGENT_NO_MAIN: '' } });
+    projects.push([label, out]);
+  }
+  for (const [label, out] of projects) {
+    const agent = readFileSync(join(out, 'index.mjs'), 'utf8');
+    assert.doesNotMatch(agent, /riskLevel \?\? ['"]/, `${label}: index.mjs must not default riskLevel`);
+    assert.match(agent, /riskLevel: a\.riskLevel \}/, `${label}: the guardTool mapping passes riskLevel through`);
+    // The demo output is unchanged because every financial step states its risk explicitly.
+    assert.equal((agent.match(/riskLevel: 'low' \}\);/g) ?? []).length, 2, `${label}: steps 1 and 2 state low risk`);
+    assert.equal((agent.match(/riskLevel: 'high' \}\);/g) ?? []).length, 1, `${label}: step 3 states high risk`);
+    const readme = readFileSync(join(out, 'README.md'), 'utf8');
+    assert.match(readme, /the agent's own claim/, `${label}: README says riskLevel is the agent's own claim`);
+    assert.match(readme, /\*\*no default\*\*/, `${label}: README says there is no default`);
+    try { rmSync(out, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
 });
 
 if (failed) { console.log(`\n${failed} check(s) FAILED`); process.exit(1); }
