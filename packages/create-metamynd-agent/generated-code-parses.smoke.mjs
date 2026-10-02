@@ -149,6 +149,40 @@ check('...but the single-process scaffold (withGateway: false) needs no key', ()
   } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
+// "Change the rules" points at the dashboard path that exists (L-1: it said "Legal Entity → SOPs", which no menu has), and a
+// --sandbox scaffold — the SHARED agent, which nobody has dashboard access to — says how to get an agent you can change (L-7).
+for (const [label, extra] of [
+  ['hosted financial, in-process', {}],
+  ['hosted non-financial, in-process', { demo: mod.defaultNeutralDemo() }],
+]) {
+  for (const sandbox of [false, true]) {
+    check(`${label}${sandbox ? ', --sandbox' : ''}: the rules-change copy names a path the user can reach`, () => {
+      const out = mkdtempSync(join(tmpdir(), 'metamynd-parse-'));
+      const lines = [];
+      const log = console.log;
+      console.log = (...a) => lines.push(a.join(' '));
+      try {
+        mod.scaffoldProject({ outDir: out, config, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox, withGateway: false, ...extra });
+      } finally { console.log = log; }
+      try {
+        assertParses(out);
+        const agent = readFileSync(join(out, 'index.mjs'), 'utf8');
+        const readme = readFileSync(join(out, 'README.md'), 'utf8');
+        const printed = lines.join('\n');
+        for (const [what, text] of [['agent', agent], ['README', readme], ['printed Next: text', printed]]) {
+          assert.doesNotMatch(text, /Legal Entity (→|->) SOPs/, `${what} still names the nonexistent "Legal Entity → SOPs" path`);
+          if (sandbox) {
+            assert.match(text, /shared sandbox agent/i, `${what} says the sandbox agent is shared`);
+            assert.match(text, /without --sandbox/, `${what} says how to get an agent whose rules you can change`);
+          } else {
+            assert.match(text, /VeriFAI (→|->) Legal Entities (→|->) SOPs/, `${what} names the real dashboard path`);
+          }
+        }
+      } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+    });
+  }
+}
+
 // ensurePolicyKey: the provisioning response's key wins; otherwise GET /magp/policy/pubkey on the same API; otherwise null.
 {
   const http = await import('node:http');
