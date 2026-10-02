@@ -133,10 +133,12 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   and fails closed for every action, amount 0 included, on an unsigned/tampered/stale bundle —
  *   so per-request enforcement needs no live MetaMynd. Omit for the legacy hash-addressed + TLS mode —
  *   which is only as trustworthy as the transport: over plain http:// nothing authenticates the bundle,
- *   so a value-bearing action is refused (POLICY_BUNDLE_UNVERIFIED) unless `allowUnverifiedBundle` is set.
- * @param {boolean} [cfg.allowUnverifiedBundle] accept a value-bearing action on a bundle fetched over plain
- *   http:// with no `policyPublicKey` pinned. Off by default: a proxy on that path can rewrite the rules (an
- *   independent tester raised an over-cap $5,000 purchase that way). For local development only.
+ *   so EVERY action is refused (POLICY_BUNDLE_UNVERIFIED) unless `allowUnverifiedBundle` is set — amount 0 included since
+ *   0.18.3: an amount-0 action is not a read (`permissions.update`, `records-update`, every non-financial tool), and a
+ *   proxy that can rewrite the bundle can grant it.
+ * @param {boolean} [cfg.allowUnverifiedBundle] accept actions on a bundle fetched over plain http:// with no
+ *   `policyPublicKey` pinned. Off by default: a proxy on that path can rewrite the rules (an independent tester raised
+ *   an over-cap $5,000 purchase that way, and a rewritten bundle can grant any amount-0 action). For local development only.
  * @param {boolean} [cfg.requireAuthorization] when true, a PERMIT verdict (allow/observe) is only
  *   actually granted if `signed.authorizationId` atomically claims single-use execution against the
  *   stateful issuer gate (see claimAuthorization below) — this is what closes REPLAY and CUMULATIVE
@@ -174,7 +176,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   if (!policyPublicKey) {
     console.warn(
       bundleUnauthenticated
-        ? `[mcp-guard] no policyPublicKey and the issuer is not https (${base}): nothing authenticates the policy bundle. Value-bearing actions are refused (POLICY_BUNDLE_UNVERIFIED)${allowUnverifiedBundle ? ' — except allowUnverifiedBundle is set, so they are NOT' : ''}. Pin policyPublicKey (GET /magp/policy/pubkey, out of band).`
+        ? `[mcp-guard] no policyPublicKey and the issuer is not https (${base}): nothing authenticates the policy bundle. Every action is refused (POLICY_BUNDLE_UNVERIFIED)${allowUnverifiedBundle ? ' — except allowUnverifiedBundle is set, so they are NOT' : ''}. Pin policyPublicKey (GET /magp/policy/pubkey, out of band).`
         : '[mcp-guard] no policyPublicKey: the policy bundle is trusted on the strength of TLS alone. Pin policyPublicKey (GET /magp/policy/pubkey, out of band) so a rewritten bundle is refused.',
     );
   }
@@ -716,8 +718,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       if (policyPublicKey) {
         const v = verifyBundle(bundle, { publicKey: policyPublicKey, valueBearing: Number(amount) > 0 });
         if (!v.ok) return { decision: 'block', reasonCode: v.reasonCode };
-      } else if (bundleUnauthenticated && !allowUnverifiedBundle && Number(amount) > 0) {
-        // Nothing authenticates these rules (no pinned key, no TLS): moving value on them is exactly the D-08 attack.
+      } else if (bundleUnauthenticated && !allowUnverifiedBundle) {
+        // Nothing authenticates these rules (no pinned key, no TLS): moving value on them is the D-08 attack, and since 0.18.3
+        // an amount-0 action is refused too — a rewritten bundle could grant `permissions.update` as easily as raise a cap.
         return { decision: 'block', reasonCode: 'POLICY_BUNDLE_UNVERIFIED' };
       }
       const verdict = verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} }, trustedContext);

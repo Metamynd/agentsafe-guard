@@ -163,7 +163,7 @@ async function main() {
     issuerApi: MAGP_API,
     requireAuthorization: REQUIRE_AUTHORIZATION,
     // MetaMynd's policy-signing key (GET /magp/policy/pubkey, fetched once out of band). With it the guard refuses a
-    // rewritten policy bundle; without it over plain http a value-bearing call is refused (POLICY_BUNDLE_UNVERIFIED).
+    // rewritten policy bundle; without it over plain http every call is refused (POLICY_BUNDLE_UNVERIFIED).
     policyPublicKey: process.env.AGENTSAFE_POLICY_PUBLIC_KEY || undefined,
     allowUnverifiedBundle: process.env.AGENTSAFE_ALLOW_UNVERIFIED_BUNDLE === 'true',
     // Refuse a request whose context (itinerary/trace/materiality) the agent did not sign (CONTEXT_SIGNATURE_REQUIRED).

@@ -380,8 +380,10 @@ const guard = createMcpGuard({ serviceDid, issuerApi: 'https://metamynd.ai/api/v
 **Since 0.12.0** a guard with no pinned key says so at startup, and one that fetches its bundle over plain `http://`
 refuses value-bearing calls (`POLICY_BUNDLE_UNVERIFIED`): nothing authenticates that bundle, and an independent tester
 used exactly that path to drop the spend cap and run a $5,000 over-cap purchase. Over `https://` it warns and carries
-on (TLS authenticates the issuer). For local development only, `allowUnverifiedBundle: true` restores the old
-behaviour. A custom `fetchBundle` is your own source and is not affected.
+on (TLS authenticates the issuer). **Since 0.18.3** that refusal covers every call, amount 0 included: an amount-0
+call is not a read (`permissions.update`, every non-financial tool), and a rewritten bundle can grant one. For local
+development only, `allowUnverifiedBundle: true` restores the old behaviour. A custom `fetchBundle` is your own source
+and is not affected.
 
 ### Cache the bundle (`bundleCache`) — since 0.18.0
 
