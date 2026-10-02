@@ -415,7 +415,7 @@ node_modules\.bin\tsx scripts\demo-seed-governance.ts
 
 The agent is now bound to a mandate (`flight-purchase`), an **enforced Standard** (EU AI Act) and an
 **active SOP** (spend cap + approved tools). Manage/toggle these from the dashboard:
-Super Admin → Standards, Legal Entity → SOPs.
+Super Admin → Standards, and Dashboard → VeriFAI → Legal Entities → SOPs tab (also linked as AgentSafe → SOPs).
 
 ## 2. Try the example
 
