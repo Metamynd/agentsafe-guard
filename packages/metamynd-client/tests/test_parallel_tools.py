@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -182,6 +183,9 @@ class LangGraphToolNode(_Base):
             from langgraph.graph import END, START, MessagesState, StateGraph
             from langgraph.prebuilt import ToolNode
         except ImportError:
+            # CI installs langgraph and sets this, so the real ToolNode path cannot quietly go back to being skipped.
+            if os.environ.get("METAMYND_REQUIRE_LANGGRAPH"):
+                raise
             self.skipTest("langgraph not installed")
 
         def book_flight(vendor: str, amount: float) -> dict:
