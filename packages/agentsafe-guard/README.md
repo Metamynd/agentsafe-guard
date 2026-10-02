@@ -304,17 +304,22 @@ The rest of this guide shows the manual path (seed → wire) and the advanced fe
 
 Since v0.2.0 the guard decides **locally by default**. `guardTool` (and the mode-aware
 `guard.check(...)`) evaluate the rule layer against the agent's cached signed policy
-bundle using the **same `policy-core` bytes the gate runs** — so a **block or escalate
-is decided with no network** (instant, works offline). An **allowed value action**
-(`amount > 0`) is still sealed by the remote gate, because the cumulative-spend cap,
-nonce/replay + atomic cap, and anchored evidence **must** be server-side. If the bundle
-can't be fetched, the guard defers to the authoritative remote gate rather than
-blind-allowing; a value action it can neither evaluate nor seal **fails closed**.
+bundle using the **same `policy-core` bytes the gate runs** — so a **block is decided with
+no network** (instant, works offline). An **allowed value action** (`amount > 0`) is still
+sealed by the remote gate, because the cumulative-spend cap, nonce/replay + atomic cap, and
+anchored evidence **must** be server-side. An **escalate** goes to the gate too (since
+0.18.1, for any amount): a person can only decide what the gate has parked — the escalation,
+the `escalationId` that `escalationStatus()` polls, the owner's Escalations queue entry and
+the evidence event all exist only once it has. (Before 0.18.1 it was decided locally, and
+none of them did.) If the bundle can't be fetched, the guard defers to the authoritative
+remote gate rather than blind-allowing; a value action it can neither evaluate nor seal
+**fails closed**. With `sealValueActions: false` (pure offline) there is no gate, so an
+escalate stays local and nobody is asked.
 
-A block/escalate/non-value-allow decided locally is still reported to the gate as a
-best-effort, signed **local decision receipt** — visible in the Activity Log and fleet
-decision-mix, but not anchored/evidence-grade (see "Trust model" below). This never
-blocks or delays the call above it.
+A block/non-value-allow decided locally is still reported to the gate as a best-effort,
+signed **local decision receipt** — counted in the refusal digest and fleet decision-mix,
+but not anchored/evidence-grade and not listed as a decision row in the Activity Log (see
+"Trust model" below). This never blocks or delays the call above it.
 
 ```js
 // default — local-first

@@ -317,8 +317,9 @@ export function createGuard(opts = {}) {
 
   // --- Enforcement mode (spec §9.2 + local-first plan) --------------------------------------
   // 'local' (DEFAULT): decide the rule layer LOCALLY against a cached signed bundle — a
-  //   block/escalate needs no network; an allowed VALUE action is still sealed by the remote
-  //   gate (two-phase hold + cumulative cap + evidence). 'remote': every call hits the gate.
+  //   block needs no network; an allowed VALUE action is still sealed by the remote gate
+  //   (two-phase hold + cumulative cap + evidence), and an ESCALATE is parked there so the
+  //   owner can see and decide it (0.18.1). 'remote': every call hits the gate.
   const mode = opts.mode ?? cfg?.mode ?? 'local';
   const bundleUrl = opts.bundleUrl ?? cfg?.bundleUrl ?? `${base}/policy/bundle/${encodeURIComponent(agentDid)}`;
   const sealValueActions = opts.sealValueActions !== false; // default true
@@ -742,7 +743,14 @@ export function createGuard(opts = {}) {
       return local;
     }
     const local = evaluateLocally({ ...bundleForAction, request: input });
-    // allow/observe both PERMIT; block/escalate/contain are decided locally with no network.
+    // An ESCALATE asks a person to decide, and the person can only see what the gate recorded: the escalation, its
+    // escalationId (what escalationStatus() polls) and the evidence event all exist only once the gate has parked the
+    // action. Decided here, none of them did — the owner's Escalations queue never showed it, nothing could approve it,
+    // and the scaffold's "approve it in the dashboard and the action resumes" could not come true (2026-10-02 pre-beta
+    // evaluation, H-1). So it goes to the gate, which is authoritative anyway, exactly as an allowed value action is
+    // sealed there. Pure offline (sealValueActions:false) has no gate to park it at, so it stays local there.
+    if (local.decision === 'escalate' && sealValueActions) return authorize(input);
+    // allow/observe both PERMIT; block/contain (and an offline escalate) are decided locally with no network.
     const permits = local.decision === 'allow' || local.decision === 'observe';
     if (!permits) {
       reportLocalDecision(action, local.decision, local.reasonCode); // fire-and-forget — see above
