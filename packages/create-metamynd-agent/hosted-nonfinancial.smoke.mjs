@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
-import { createGuardFromConfig } from '../agentsafe-guard/agentsafe-guard.mjs';
+import { createGuard, createGuardFromConfig } from '../agentsafe-guard/agentsafe-guard.mjs';
 import { signBundle, rawPublicKeyHex } from '../magp-policy/magp-policy.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -124,11 +124,30 @@ const issuer = http.createServer((req, res) => {
       provisionBodies.push(body);
       return res.end(JSON.stringify({ success: true, data: { apiBase: ISSUER, agentDid: AGENT_DID, agentKey: privateKeyHex, identityId: 'stand-in', keyVerified: true, mandate: { scope: body.scope }, standards: [], bundleUrl: `${ISSUER}/policy/bundle/${AGENT_DID}` } }));
     }
+    // The gate itself — where a local-first guard parks an ESCALATE (agentsafe-guard >= 0.18.1) and seals a value action.
+    // It decides with the same policy-core over the same bundle (an offline guard for this agent), and parks an escalate
+    // under an escalationId as the real gate does. Nonce/replay and spend state are not modelled here.
+    if (req.method === 'POST' && req.url === '/api/v1/policy/mandate/authorize') {
+      return gateDecide(body).then((data) => {
+        res.statusCode = data.decision === 'allow' || data.decision === 'observe' ? 200 : 403;
+        res.end(JSON.stringify({ success: res.statusCode === 200, data }));
+      }, () => { res.statusCode = 500; res.end('{}'); });
+    }
     res.end('{}'); // decision reports and anything else the guard fires and forgets
   });
 });
 await new Promise((r) => issuer.listen(0, '127.0.0.1', r));
 ISSUER = `http://127.0.0.1:${issuer.address().port}/api/v1`;
+
+const gateEvaluator = createGuard({ api: ISSUER, agentDid: AGENT_DID, agentKey: privateKeyHex, sealValueActions: false, signContext: false });
+let escalations = 0;
+async function gateDecide(signed) {
+  const v = await gateEvaluator.authorizeLocal({
+    action: signed.action, amount: signed.amount ?? 0, currency: signed.currency, merchant: signed.merchant,
+    resource: signed.resource, jurisdiction: signed.jurisdiction, context: signed.itinerary ?? {},
+  });
+  return { ...v, ...(v.decision === 'escalate' ? { escalationId: `esc-${++escalations}`, eventId: `evt-esc-${escalations}` } : {}) };
+}
 
 const workdir = mkdtempSync(join(tmpdir(), 'metamynd-hosted-nf-'));
 const config = { apiBase: ISSUER, agentDid: AGENT_DID, agentKey: privateKeyHex, identityId: 'stand-in', keyVerified: true, mandate: { scope: SCOPE }, issuer: { policyKey: POLICY_KEY } };

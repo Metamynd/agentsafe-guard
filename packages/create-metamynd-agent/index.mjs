@@ -59,7 +59,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.17.0 signs the agent's context (envelopeSignature, MAGP 8.3.13) by default; the scaffolded agent gets it with no template
 // change (signContext: false opts out). A daemon-custody agent needs agentsafe-signer >= 0.19.0 for its no-amount requests.
 // 0.18.0 exports keepAliveFetch. No template change.
-const GUARD_VERSION = '^0.18.0';
+// 0.18.1 parks a local-first ESCALATE at the gate. Required: every scaffold's demo says "approve it in the dashboard and
+// the action resumes", and below this the escalation never reached the owner's queue (decided in-process, no escalationId).
+const GUARD_VERSION = '^0.18.1';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
