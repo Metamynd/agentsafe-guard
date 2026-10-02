@@ -486,10 +486,27 @@ function defaultNeutralDemo() {
   return demo;
 }
 
+/**
+ * Where an agent's rules are edited in the dashboard. SOPs belong to the legal entity, so the page is
+ * VeriFAI → Legal Entities (/dashboard/organization), SOPs tab; the AgentSafe sidebar group links the same
+ * tab as "SOPs". This said "Legal Entity → SOPs", a path no menu had (2026-10-02 eval, L-1).
+ */
+const SOPS_PATH = 'Dashboard → VeriFAI → Legal Entities → SOPs tab (also linked as AgentSafe → SOPs)';
+/** The same path for the generated demo's console output, which stays ASCII. */
+const SOPS_PATH_ASCII = 'Dashboard -> VeriFAI -> Legal Entities -> SOPs';
+/**
+ * A --sandbox scaffold runs as the SHARED sandbox agent, which no user has dashboard access to, so "change
+ * the rules in the dashboard" sent them somewhere they could not go (L-7). Say how to get an agent whose
+ * rules they CAN change instead.
+ */
+const SANDBOX_RULES_FIXED = "This is the shared sandbox agent: its rules are fixed and nobody can edit them. To change the rules, provision your own agent — re-run without --sandbox (it signs you up and creates an agent whose SOPs you own, edited at " + SOPS_PATH + "), or use --harness for a free local agent whose rules you edit by hand.";
+
 /** A --config file's rules cannot reach an agent the caller does not provision themselves: say so instead of implying they apply. */
-function warnRulesNotApplied(fileConfig, where) {
+function warnRulesNotApplied(fileConfig, where, { shared = false } = {}) {
   if (policyMolecules(fileConfig).length === 0) return;
-  console.log(`  ${c.yellow('!')} the rules in ${c.b('the config file')} are not applied to ${where} — its rules are the platform's defaults. Set your own in the dashboard (Legal Entity → SOPs), or provision your own agent (drop this flag) to author them here.`);
+  console.log(shared
+    ? `  ${c.yellow('!')} the rules in ${c.b('the config file')} are not applied to ${where} — its rules are the platform's defaults, and nobody can change them. Provision your own agent (drop this flag) to author them here.`
+    : `  ${c.yellow('!')} the rules in ${c.b('the config file')} are not applied to ${where} — its rules are the platform's defaults. Its owner sets them in the dashboard (${SOPS_PATH}), or provision your own agent (drop this flag) to author them here.`);
 }
 
 /**
@@ -1042,7 +1059,7 @@ function keepConfigAndFail(outDir, config, why) {
  * it — the same shape of gap --harness's README documents. See exampleIndex() below, which is
  * what the real (non-sandbox) flow scaffolds by default instead.
  */
-function exampleIndexNoGateway(scope, perTxnMax, currency, merchant) {
+function exampleIndexNoGateway(scope, perTxnMax, currency, merchant, sandbox = false) {
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
   return `// index.mjs — your agent, governed by MetaMynd/AgentSafe.
@@ -1189,8 +1206,12 @@ console.log(bold('  Without MetaMynd, you can be bypassed.') + ' bookFlight() ru
 console.log(dim('  call it directly instead of gatedBookFlight and nothing above stops you.'));
 console.log(dim('  Re-scaffold without --sandbox/--no-gateway for the default shape, which does.'));
 console.log('');
-console.log('  Change the cap in the dashboard (Legal Entity -> SOPs) and run again.');
-console.log(dim('  The outcome changes. This file does not. That is the point.'));
+${sandbox ? `console.log('  This is the SHARED sandbox agent: its rules are fixed and nobody can edit them.');
+console.log(dim('  To change the cap, provision your own agent: re-run create-metamynd-agent'));
+console.log(dim('  without --sandbox (it signs you up), then change the cap in your dashboard'));
+console.log(dim('  (${SOPS_PATH_ASCII}) and run again.'));
+console.log(dim('  The outcome changes. Your code does not. That is the point.'));` : `console.log('  Change the cap in the dashboard (${SOPS_PATH_ASCII}) and run again.');
+console.log(dim('  The outcome changes. This file does not. That is the point.'));`}
 console.log('');
 `;
 }
@@ -1390,7 +1411,7 @@ console.log('');
 console.log(bold('  With MetaMynd, you can\\'t be bypassed.') + ' ./gateway is why - it independently');
 console.log(dim('  re-verified step 1 before running it, and holds the tool this file never can.'));
 console.log('');
-console.log('  Change the cap in the dashboard (Legal Entity -> SOPs) and run again.');
+console.log('  Change the cap in the dashboard (${SOPS_PATH_ASCII}) and run again.');
 console.log(dim('  The outcome changes. This file does not. That is the point.'));
 console.log('');
 `;
@@ -1423,7 +1444,7 @@ If a committed \`package-lock.json\` pins an older \`${GUARD_PKG}\` than this pr
  * with `gatewayPort` the tool lives in a separate process (./gateway, the real enforcement
  * boundary); without it (--no-gateway) the tool is a local function in this process.
  */
-function exampleIndexNeutral({ scope, gatewayPort, demo, merchant }) {
+function exampleIndexNeutral({ scope, gatewayPort, demo, merchant, sandbox = false }) {
   const withGateway = gatewayPort != null;
   const steps = [
     ...demo.cases,
@@ -1570,8 +1591,12 @@ console.log(bold('  Without MetaMynd, you can be bypassed.') + ' performAction()
 console.log(dim('  call it directly instead of gatedAction and nothing above stops you.'));
 console.log(dim('  Re-scaffold without --no-gateway for the default shape, which closes that.'));`}
 console.log('');
-console.log('  Change your rules in the dashboard (Legal Entity -> SOPs) and run again.');
-console.log(dim('  The outcome changes. This file does not. That is the point.'));
+${sandbox ? `console.log('  This is the SHARED sandbox agent: its rules are fixed and nobody can edit them.');
+console.log(dim('  To change them, provision your own agent: re-run create-metamynd-agent'));
+console.log(dim('  without --sandbox (it signs you up), then change its rules in your dashboard'));
+console.log(dim('  (${SOPS_PATH_ASCII}) and run again.'));
+console.log(dim('  The outcome changes. Your code does not. That is the point.'));` : `console.log('  Change your rules in the dashboard (${SOPS_PATH_ASCII}) and run again.');
+console.log(dim('  The outcome changes. This file does not. That is the point.'));`}
 console.log('');
 `;
 }
@@ -1750,7 +1775,15 @@ Replace \`performAction()\` in \`server.mjs\` with your implementation and put a
 }
 
 /** The README for a non-financial hosted scaffold. `withGateway` selects the two-process shape. */
-function exampleReadmeNeutral(slug, scope, withGateway, gatewayPort, daemonKey, demo) {
+/** The generated README's "Change the rules" body: the dashboard path, or — for the shared sandbox agent — how to get an agent whose rules you can change. */
+function changeRulesSection(sandbox) {
+  return sandbox
+    ? `${SANDBOX_RULES_FIXED} An \`escalate\` verdict is held for an owner to approve; poll \`guard.escalationStatus(id)\`.`
+    : `Edit the agent's SOPs in the dashboard (${SOPS_PATH}). The agent's behaviour changes live —
+no redeploy. An \`escalate\` verdict is held for an owner to approve; poll \`guard.escalationStatus(id)\`.`;
+}
+
+function exampleReadmeNeutral(slug, scope, withGateway, gatewayPort, daemonKey, demo, sandbox = false) {
   const configLine = daemonKey
     ? `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
   **Holds no secret key.** Signing goes through your already-running agentsafe-signer daemon instead.`
@@ -1829,8 +1862,7 @@ ${clonedFreshSection(daemonKey)}
 
 ## Change the rules
 
-Edit the agent's SOPs in the dashboard (Legal Entity → SOPs). The agent's behaviour changes live —
-no redeploy. An \`escalate\` verdict is held for an owner to approve; poll \`guard.escalationStatus(id)\`.
+${changeRulesSection(sandbox)}
 
 ## What this is not
 
@@ -1867,7 +1899,7 @@ function examplePackageJson(slug, neutral = false) {
   ) + '\n';
 }
 
-function exampleReadme(slug, scope, withGateway, gatewayPort, daemonKey = false) {
+function exampleReadme(slug, scope, withGateway, gatewayPort, daemonKey = false, sandbox = false) {
   const configFileLine = daemonKey
     ? `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
   **Holds no secret key.** Signing goes through your already-running agentsafe-signer daemon
@@ -1961,8 +1993,7 @@ ${clonedFreshSection(daemonKey)}
 
 ## Change the rules
 
-Edit the agent's SOPs in the dashboard (Legal Entity → SOPs). The agent's behaviour changes live —
-no redeploy. An \`escalate\` verdict is held for an owner to approve; poll \`guard.escalationStatus(id)\`.
+${changeRulesSection(sandbox)}
 
 Full integration guide: \`docs/integration/INTEGRATE-WITH-METAMYND.md\`.
 `;
@@ -2303,10 +2334,10 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
     outDir,
     'index.mjs',
     neutral
-      ? exampleIndexNeutral({ scope, gatewayPort: withGateway ? gatewayPort : null, demo, merchant })
+      ? exampleIndexNeutral({ scope, gatewayPort: withGateway ? gatewayPort : null, demo, merchant, sandbox: !!sandbox })
       : withGateway
         ? exampleIndex(scope, perTxnMax, gatewayPort, currency, paymentMerchant)
-        : exampleIndexNoGateway(scope, perTxnMax, currency, paymentMerchant),
+        : exampleIndexNoGateway(scope, perTxnMax, currency, paymentMerchant, !!sandbox),
     force,
   );
   writeFileSafe(outDir, 'package.json', examplePackageJson(slug, neutral), force);
@@ -2315,8 +2346,8 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
     outDir,
     'README.md',
     neutral
-      ? exampleReadmeNeutral(slug, scope, withGateway, gatewayPort, config.keyProvider === 'daemon', demo)
-      : exampleReadme(slug, scope, withGateway, gatewayPort, config.keyProvider === 'daemon'),
+      ? exampleReadmeNeutral(slug, scope, withGateway, gatewayPort, config.keyProvider === 'daemon', demo, !!sandbox)
+      : exampleReadme(slug, scope, withGateway, gatewayPort, config.keyProvider === 'daemon', !!sandbox),
     force,
   );
   // `npm test` (agentsafe-guard verify --context) needs the request inputs of a compliant request:
@@ -2387,7 +2418,9 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
     console.log(c.dim('                 · BLOCK (the agent asking to raise its OWN limit)\n'));
   }
   console.log(c.cyan(`    npm test`) + c.dim('    → assert it CANNOT exceed its mandate. Put this in CI.\n'));
-  console.log(c.dim(`  Change the rules any time in the dashboard (Legal Entity → SOPs) — no redeploy.\n`));
+  console.log(c.dim(sandbox
+    ? `  ${SANDBOX_RULES_FIXED}\n`
+    : `  Change the rules any time in the dashboard (${SOPS_PATH}) — no redeploy.\n`));
 }
 
 /** --sandbox: no login, no KYB — fetch the shared sandbox agent config and scaffold. */
@@ -2402,7 +2435,7 @@ async function runSandbox(args) {
   const fileConfig = typeof args.config === 'string' ? loadConfigFile(args.config) : null;
   if (fileConfig) console.log(`  ${c.green('✓')} loaded policy config ${c.dim(args.config)}`);
   const { financial } = announceFinancial(args, fileConfig);
-  warnRulesNotApplied(fileConfig, 'the shared sandbox agent');
+  warnRulesNotApplied(fileConfig, 'the shared sandbox agent', { shared: true });
   if (!financial && typeof fileConfig?.scope === 'string' && fileConfig.scope !== 'perform-action') {
     console.log(`  ${c.yellow('!')} the scope "${fileConfig.scope}" in the config file is not used: the shared sandbox agent's scope is "perform-action".`);
   }
