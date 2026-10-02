@@ -17,6 +17,7 @@ import type {
   Permission,
   Prohibition,
 } from './mandate.types.js';
+import { ownEntry } from './own-entry.js';
 
 const toNum = (v: unknown): number => (typeof v === 'number' ? v : Number(v));
 const toArray = (v: unknown): unknown[] => (Array.isArray(v) ? v : v === undefined || v === null ? [] : [v]);
@@ -71,7 +72,7 @@ function reasonFor(constraint: Constraint | undefined, req: MandateRequest): str
     const v = req.values[leftOperand];
     return v === undefined || v === null || v === '' ? 'JURISDICTION_REQUIRED' : 'JURISDICTION_NOT_ALLOWED';
   }
-  return REASON_BY_OPERAND[leftOperand] ?? `CONSTRAINT_FAILED:${leftOperand}`;
+  return ownEntry(REASON_BY_OPERAND, leftOperand) ?? `CONSTRAINT_FAILED:${leftOperand}`;
 }
 
 /**
@@ -106,7 +107,8 @@ function reasonFor(constraint: Constraint | undefined, req: MandateRequest): str
  * request whose currency is in the list is exactly as "proven" as one matching a lone unit.
  */
 function constraintSatisfied(c: Constraint, req: MandateRequest, strict: boolean): boolean {
-  const op = OPERATORS[c.operator];
+  // Own entries only: `constructor` / `toString` / `valueOf` must not resolve to Object.prototype (see own-entry.ts).
+  const op = ownEntry(OPERATORS, c.operator);
   if (!op) return false; // unknown operator -> fail closed
   const left = Object.prototype.hasOwnProperty.call(req.values, c.leftOperand)
     ? req.values[c.leftOperand]
