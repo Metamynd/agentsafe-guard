@@ -1,4 +1,5 @@
 import { ATOM_REGISTRY } from './atom-registry.js';
+import { ownEntry } from './own-entry.js';
 import { ATOM_SPECS, type AtomConfigField } from './atom-catalog.js';
 import type { EvaluationContext, PolicyDecision } from './types.js';
 import {
@@ -126,7 +127,7 @@ const PRECEDENCE: Record<PolicyDecision, number> = { allow: 0, observe: 1, escal
 
 /** Evaluate a single atom. An unknown predicate never fires (validation rejects it at authoring). */
 function atomFires(atom: RuleAtom, ctx: EvaluationContext): boolean {
-  const pred = ATOM_REGISTRY[atom.predicate];
+  const pred = ownEntry(ATOM_REGISTRY, atom.predicate); // own entries only — see own-entry.ts
   if (!pred) return false;
   try {
     return !!pred(ctx, atom.config);
@@ -330,7 +331,7 @@ export function validateMolecules(molecules: Molecule[] | undefined): { ok: bool
       }
     }
     for (const a of m.atoms ?? []) {
-      if (!ATOM_REGISTRY[a.predicate]) {
+      if (!ownEntry(ATOM_REGISTRY, a.predicate)) {
         issues.push({ moleculeId: m.id, message: `unknown atom predicate '${a.predicate}'` });
         continue;
       }

@@ -409,6 +409,11 @@ function requiredContextFor(predicates) {
   return [...fields].sort();
 }
 
+// src/policy-core/own-entry.ts
+function ownEntry(table, key) {
+  return typeof key === "string" && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : void 0;
+}
+
 // src/policy-core/standards-rules.ts
 var CONTEXT_UNVERIFIABLE = "CONTEXT_UNVERIFIABLE";
 var JURISDICTION_ATOM = "jurisdiction-not-allowed";
@@ -417,7 +422,7 @@ function documentEnforcesJurisdiction(doc) {
 }
 var PRECEDENCE = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
 function atomFires(atom, ctx) {
-  const pred = ATOM_REGISTRY[atom.predicate];
+  const pred = ownEntry(ATOM_REGISTRY, atom.predicate);
   if (!pred) return false;
   try {
     return !!pred(ctx, atom.config);
@@ -554,7 +559,7 @@ function validateMolecules(molecules) {
       }
     }
     for (const a of m.atoms ?? []) {
-      if (!ATOM_REGISTRY[a.predicate]) {
+      if (!ownEntry(ATOM_REGISTRY, a.predicate)) {
         issues.push({ moleculeId: m.id, message: `unknown atom predicate '${a.predicate}'` });
         continue;
       }
@@ -602,10 +607,10 @@ function reasonFor(constraint, req) {
     const v = req.values[leftOperand];
     return v === void 0 || v === null || v === "" ? "JURISDICTION_REQUIRED" : "JURISDICTION_NOT_ALLOWED";
   }
-  return REASON_BY_OPERAND[leftOperand] ?? `CONSTRAINT_FAILED:${leftOperand}`;
+  return ownEntry(REASON_BY_OPERAND, leftOperand) ?? `CONSTRAINT_FAILED:${leftOperand}`;
 }
 function constraintSatisfied(c, req, strict) {
-  const op = OPERATORS[c.operator];
+  const op = ownEntry(OPERATORS, c.operator);
   if (!op) return false;
   const left = Object.prototype.hasOwnProperty.call(req.values, c.leftOperand) ? req.values[c.leftOperand] : void 0;
   if (!c.unit) return op(left, c.rightOperand);
