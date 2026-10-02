@@ -120,7 +120,10 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // requireContextSignature option. No template change (the scaffolded agent does not sign its context by default).
 // 0.18.0: an opt-in bundleCache (push-invalidated by the issuer's events stream) and keepAliveFetch exported. No
 // template change (the scaffolded gateways don't enable the cache).
-const MCP_GUARD_VERSION = '^0.18.0';
+// 0.18.1: the pinned policyPublicKey every scaffolded gateway sets now refuses an unsigned or stale bundle for an
+// amount-0 action too. Required: the non-financial gateway's every request is amount 0, so below this a stripped
+// bundle could grant it an action the agent never had.
+const MCP_GUARD_VERSION = '^0.18.1';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -972,6 +975,50 @@ async function registerGatewayCounterparty(base, token, did, label) {
   }
 }
 
+/**
+ * Every scaffolded gateway pins the issuer's policy-signing key, so it refuses any bundle MetaMynd did not sign —
+ * an unpinned gateway trusts whatever its bundle fetch returns, and over plain http:// that is whatever an
+ * interceptor wrote (mcp-guard only refuses VALUE-bearing actions there, and a non-financial agent has none).
+ * The provisioning response carries the key (`issuer.policyKey`); when it does not (an older backend), it is read
+ * from GET /magp/policy/pubkey on the same API this CLI just provisioned through, then saved into the config.
+ * Returns the key, or null when neither source has one — the caller must then not scaffold a gateway.
+ */
+async function ensurePolicyKey(config, base) {
+  const isKey = (k) => typeof k === 'string' && /^[0-9a-f]{64}$/i.test(k);
+  if (isKey(config.issuer?.policyKey)) return config.issuer.policyKey;
+  let key = null;
+  try {
+    const res = await fetch(`${String(base).replace(/\/+$/, '')}/magp/policy/pubkey`);
+    key = (await res.json().catch(() => null))?.data?.publicKey ?? null;
+  } catch {
+    key = null;
+  }
+  if (!isKey(key)) return null;
+  config.issuer = { ...(config.issuer ?? {}), policyKey: key.toLowerCase() };
+  return config.issuer.policyKey;
+}
+
+const NO_POLICY_KEY = (base) =>
+  `Could not get MetaMynd's policy-signing key: the provisioning response carried none, and GET ${base}/magp/policy/pubkey ` +
+  'did not return one. A gateway without it would trust whatever policy bundle its network fetch returns, so none was ' +
+  'scaffolded. Retry when the API is reachable, or pass --no-gateway for the single-process example (not an enforcement boundary).';
+
+/**
+ * Stop after provisioning WITHOUT losing what it returned: a managed agent key is handed back once and cannot be
+ * fetched again. Saves the config into the project directory (never over an existing file), then fails with `why`.
+ */
+function keepConfigAndFail(outDir, config, why) {
+  let kept = null;
+  try {
+    mkdirSync(outDir, { recursive: true });
+    kept = join(outDir, existsSync(join(outDir, 'agent.metamynd.json')) ? `agent.metamynd.${Date.now()}.json` : 'agent.metamynd.json');
+    writeFileSync(kept, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  } catch {
+    kept = null;
+  }
+  fail(`${why}${kept ? `\n  The agent was provisioned; its config (with its key) was saved to ${kept.replace(/\\/g, '/')}.` : ''}`);
+}
+
 // ---------- scaffolding ----------
 /**
  * The --no-gateway / --sandbox variant: the tool is a local function in the SAME process as
@@ -1561,7 +1608,7 @@ const routes = [{ method: 'POST', path: '/perform', action: '${scope}', valueFie
 // forged bundle). Without it, verifyBundle() never runs at all: an attacker who can intercept the
 // fetch to \`\${MAGP_API}/policy/bundle/...\` — a MITM, a compromised DNS/proxy — can hand this gateway
 // a bundle with a higher cap or no rules, and it would be trusted the same as the real one.
-const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API, requireAuthorization: false${policyKey ? `, policyPublicKey: '${policyKey}'` : ''} });
+const guard = createMcpGuard({ serviceDid: 'did:local:${scope}-gateway', issuerApi: MAGP_API, requireAuthorization: false, policyPublicKey: '${policyKey}' });
 
 const gateway = createHttpGateway({
   guard,
@@ -1966,7 +2013,7 @@ const identity = JSON.parse(readFileSync(new URL('./service.metamynd.json', impo
 // forged bundle). Without it, verifyBundle() never runs at all: an attacker who can intercept the
 // fetch to \`\${MAGP_API}/policy/bundle/...\` — a MITM, a compromised DNS/proxy — can hand this gateway
 // a bundle with a higher cap or no rules, and it would be trusted the same as the real one.
-const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: true${policyKey ? `, policyPublicKey: '${policyKey}'` : ''} });
+const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: true, policyPublicKey: '${policyKey}' });
 
 const gateway = createHttpGateway({
   guard,
@@ -2262,12 +2309,14 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
 
   if (withGateway) {
     const apiBase = config.apiBase ?? config.api ?? DEFAULT_API;
-    // The key that signs every policy bundle (magp.policy-signer.ts) — present on every provisioning
-    // response that talks to a real backend (full account, sandbox, delegated-claim). Baked into the
-    // generated gateway so it pins the bundle rather than trusting whatever the fetch returns; absent
-    // only for a config predating this field (an older scaffold's saved agent.metamynd.json), where
-    // the generated gateway is unchanged from before rather than baking in nothing and crashing.
+    // The key that signs every policy bundle (magp.policy-signer.ts), baked into the generated gateway so it pins the
+    // bundle rather than trusting whatever the fetch returns. REQUIRED: an unpinned gateway takes an interceptor's
+    // bundle as its rules (2026-10-02 — a non-financial gateway executed an action the agent was never granted). The
+    // interactive flows fill it in with ensurePolicyKey() before calling this, so a missing key here is a caller bug.
     const policyKey = config.issuer?.policyKey ?? null;
+    if (!policyKey) {
+      throw new Error("scaffoldProject: a gateway needs the issuer's policy-signing key (config.issuer.policyKey) to pin its bundle — call ensurePolicyKey() first, or pass withGateway: false");
+    }
     const gwDir = join(outDir, 'gateway');
     if (!existsSync(gwDir)) mkdirSync(gwDir, { recursive: true });
     if (!neutral) {
@@ -3784,6 +3833,7 @@ async function runClaim(args) {
   if (args.financial && issuedNonFinancial) {
     keepConfigAndStop('--financial was passed, but the approved agent has NO spending authority (the request was non-financial).');
   }
+  if (!args['no-gateway'] && !(await ensurePolicyKey(config, config.apiBase ?? base))) keepConfigAndStop(NO_POLICY_KEY(base));
   const slug = slugify(state.name || 'metamynd-agent');
   const outDir = resolve(String(args.out || `./${slug}`));
   if (issuedNonFinancial) {
@@ -4019,6 +4069,7 @@ async function main() {
     console.log(`  ${c.green('✓')} derived ${demo.cases.length} demo case(s) from your rules`);
     for (const n of demo.notDemonstrated) console.log(`  ${c.yellow('!')} not staged in the demo: ${n.rule} ${c.dim('— ' + n.why + '; still enforced')}`);
   }
+  if (!args['no-gateway'] && !(await ensurePolicyKey(config, config.apiBase ?? base))) keepConfigAndFail(outDir, config, NO_POLICY_KEY(base));
   scaffoldProject({ demo, outDir, config, slug, scope, perTxnMax, currency, merchant: financial ? merchants[0] || 'demo-merchant' : merchants[0], sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force, gatewayIdentity });
 }
 
@@ -4028,6 +4079,7 @@ export {
   buildPolicyCases, resolveFinancial, policyMolecules, ruleToMolecule,
   generateAgentKeypair, harnessAgentDid, harnessMandate, harnessRulesFile, harnessDefaultSopNeutral,
   scaffoldProject, defaultNeutralDemo, exampleIndexNeutral, exampleReadmeNeutral, gatewayServerFileNeutral, gatewayReadmeNeutral,
+  ensurePolicyKey,
 };
 if (!process.env.CREATE_METAMYND_AGENT_NO_MAIN) {
   // fail() can also be reached from a callback outside main()'s promise chain (readline, child process).

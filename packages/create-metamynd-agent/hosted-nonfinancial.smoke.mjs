@@ -21,7 +21,9 @@ import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 import { createGuardFromConfig } from '../agentsafe-guard/agentsafe-guard.mjs';
+import { signBundle, rawPublicKeyHex } from '../magp-policy/magp-policy.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const INTEGRATIONS = resolve(HERE, '..');
@@ -61,8 +63,12 @@ const bundle = {
   sops: [{ id: 'sop', document: { molecules } }],
   mandates: [{ action: SCOPE, hash: null, ref: null, document: harnessMandate({ scope: SCOPE, financial: false, merchants: [] }) }],
   issuer: null,
-  proof: { type: 'none', note: 'stand-in issuer' },
 };
+// Every scaffolded gateway pins the issuer's policy key, so the stand-in signs what it serves — at serve time, with a
+// fresh issuedAt, exactly as the real issuer re-issues every copy (compiler.service servableBundle).
+const issuerKeys = crypto.generateKeyPairSync('ed25519');
+const POLICY_KEY = rawPublicKeyHex(issuerKeys.publicKey);
+const servedBundle = () => signBundle({ ...bundle, issuedAt: new Date().toISOString() }, issuerKeys.privateKey);
 const provisionBodies = []; // what the hosted CLI actually POSTed to /onboarding/agent
 // The rule-pack catalog the stand-in platform serves, in the shapes a CLI can meet: 'current' (says which
 // packs need spend limits — FA-001 onward), 'legacy' (no requiresSpend: packs apply only with spend
@@ -103,7 +109,9 @@ function servePacks(req, res) {
 let ISSUER = '';
 const issuer = http.createServer((req, res) => {
   res.setHeader('content-type', 'application/json');
-  if (req.method === 'GET' && req.url.startsWith('/api/v1/policy/bundle/')) return res.end(JSON.stringify({ data: bundle }));
+  if (req.method === 'GET' && req.url.startsWith('/api/v1/policy/bundle/')) return res.end(JSON.stringify({ data: servedBundle() }));
+  // What the hosted CLI reads when the provisioning response carries no issuer.policyKey (this stand-in's doesn't).
+  if (req.method === 'GET' && req.url === '/api/v1/magp/policy/pubkey') return res.end(JSON.stringify({ success: true, data: { publicKey: POLICY_KEY } }));
   if (req.method === 'GET' && req.url.startsWith('/api/v1/onboarding/rule-packs')) return servePacks(req, res);
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
@@ -123,7 +131,7 @@ await new Promise((r) => issuer.listen(0, '127.0.0.1', r));
 ISSUER = `http://127.0.0.1:${issuer.address().port}/api/v1`;
 
 const workdir = mkdtempSync(join(tmpdir(), 'metamynd-hosted-nf-'));
-const config = { apiBase: ISSUER, agentDid: AGENT_DID, agentKey: privateKeyHex, identityId: 'stand-in', keyVerified: true, mandate: { scope: SCOPE } };
+const config = { apiBase: ISSUER, agentDid: AGENT_DID, agentKey: privateKeyHex, identityId: 'stand-in', keyVerified: true, mandate: { scope: SCOPE }, issuer: { policyKey: POLICY_KEY } };
 
 /** node_modules/<pkg> -> the real package source, so generated code resolves it as a user's would. */
 function link(dir, pkg, target) {

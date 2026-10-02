@@ -36,7 +36,8 @@ let modern = true; // false = a server that predates non-financial sandbox/reque
 let claimConfig = null; // what GET .../claim returns as the approved config
 const seen = { sandbox: [], requests: [], claims: 0 };
 
-const baseConfig = (scope) => ({ apiBase: '', agentDid: DID, agentKey: KEY, identityId: 'stand-in', keyVerified: true, mandate: { scope, policyId: null }, standards: [], bundleUrl: `x/policy/bundle/${DID}` });
+// issuer.policyKey: every real claimed config carries it, and every scaffolded gateway is pinned to it.
+const baseConfig = (scope) => ({ apiBase: '', agentDid: DID, agentKey: KEY, identityId: 'stand-in', keyVerified: true, mandate: { scope, policyId: null }, standards: [], bundleUrl: `x/policy/bundle/${DID}`, issuer: { policyKey: 'ab'.repeat(32) } });
 
 const server = http.createServer((req, res) => {
   res.setHeader('content-type', 'application/json');
@@ -307,6 +308,18 @@ function assertKeptNotScaffolded(r, out) {
   assert.match(r.out, /Contain or rotate/);
   assert.doesNotMatch(r.out, /ask the owner to deny/i, 'an approved request cannot be denied: that advice cannot work');
 }
+
+// Every scaffolded gateway is pinned: an approved config with no policy key, from an API that cannot supply one either,
+// gets no gateway at all — never an unpinned one — and the one-time config is still kept.
+await check('--claim with no policy key anywhere: NOTHING scaffolded (no unpinned gateway), config kept', async () => {
+  const { issuer: _none, ...noKey } = nonFinancialConfig();
+  claimConfig = noKey;
+  const out = join(fresh(), 'proj');
+  const r = await cli([...claimArgs(out), '--non-financial']);
+  assertKeptNotScaffolded(r, out);
+  assert.equal(existsSync(join(out, 'gateway', 'server.mjs')), false);
+  assert.match(r.out, /policy-signing key/);
+});
 
 await check('--claim --non-financial when the approved config does NOT say it is non-financial STOPS - and KEEPS the one-time key', async () => {
   claimConfig = baseConfig('perform-action'); // no `financial` field: not confirmed

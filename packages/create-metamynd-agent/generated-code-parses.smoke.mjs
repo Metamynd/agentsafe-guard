@@ -9,7 +9,7 @@
 //   node generated-code-parses.smoke.mjs   → PASS when every generated .mjs file parses.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,9 @@ const mod = await import('./index.mjs');
 let failed = 0;
 const check = (name, fn) => {
   try { fn(); console.log(`ok    ${name}`); } catch (e) { failed++; console.log(`FAIL  ${name}\n      ${String(e.message).split('\n').slice(0, 6).join('\n      ')}`); }
+};
+const checkAsync = async (name, fn) => {
+  try { await fn(); console.log(`ok    ${name}`); } catch (e) { failed++; console.log(`FAIL  ${name}\n      ${String(e.message).split('\n').slice(0, 6).join('\n      ')}`); }
 };
 
 function mjsFiles(dir) {
@@ -121,18 +124,60 @@ for (const [label, extra] of [
   });
 }
 
-check('a config predating issuer.policyKey (an older saved agent.metamynd.json) still scaffolds — no pinning, not a crash', () => {
+// Every scaffolded gateway is pinned (2026-10-02): an unpinned one takes an interceptor's bundle as its rules. With no
+// key there is no gateway — the interactive flows fetch it first (ensurePolicyKey) or stop with the config saved.
+for (const [label, extra] of [['financial', {}], ['non-financial', { demo: mod.defaultNeutralDemo() }]]) {
+  check(`a config with no issuer.policyKey is REFUSED a ${label} gateway, never given an unpinned one`, () => {
+    const out = mkdtempSync(join(tmpdir(), 'metamynd-parse-'));
+    try {
+      const { issuer: _drop, ...oldConfig } = config;
+      assert.throws(
+        () => quiet(() => mod.scaffoldProject({ outDir: out, config: oldConfig, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: true, ...extra })),
+        /policy-signing key/,
+      );
+      assert.ok(!existsSync(join(out, 'gateway', 'server.mjs')), 'no gateway written');
+    } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+  });
+}
+
+check('...but the single-process scaffold (withGateway: false) needs no key', () => {
   const out = mkdtempSync(join(tmpdir(), 'metamynd-parse-'));
   try {
     const { issuer: _drop, ...oldConfig } = config;
-    quiet(() => mod.scaffoldProject({ outDir: out, config: oldConfig, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: true }));
-    const server = readFileSync(join(out, 'gateway', 'server.mjs'), 'utf8');
-    const guardCall = server.match(/const guard = createMcpGuard\(\{[^}]*\}\);/)?.[0] ?? '';
-    assert.ok(guardCall, 'the gateway still scaffolds a guard');
-    assert.doesNotMatch(guardCall, /policyPublicKey:/, 'omitted from the actual call, not baked in as undefined/null (the explanatory comment still mentions the option by name)');
+    quiet(() => mod.scaffoldProject({ outDir: out, config: oldConfig, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: false }));
     assertParses(out);
   } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
+
+// ensurePolicyKey: the provisioning response's key wins; otherwise GET /magp/policy/pubkey on the same API; otherwise null.
+{
+  const http = await import('node:http');
+  let served = 'cd'.repeat(32);
+  const srv = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(req.url === '/api/v1/magp/policy/pubkey' ? JSON.stringify({ success: true, data: { publicKey: served } }) : '{}');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${srv.address().port}/api/v1`;
+  try {
+    await checkAsync('ensurePolicyKey keeps the provisioning response key', async () => {
+      const cfg = { issuer: { policyKey: 'ab'.repeat(32) } };
+      assert.equal(await mod.ensurePolicyKey(cfg, base), 'ab'.repeat(32));
+    });
+    await checkAsync('ensurePolicyKey falls back to GET /magp/policy/pubkey and saves it into the config', async () => {
+      const cfg = {};
+      assert.equal(await mod.ensurePolicyKey(cfg, base), 'cd'.repeat(32));
+      assert.equal(cfg.issuer.policyKey, 'cd'.repeat(32));
+    });
+    await checkAsync('ensurePolicyKey returns null for a missing or malformed key (the caller then scaffolds no gateway)', async () => {
+      served = 'not-a-key';
+      assert.equal(await mod.ensurePolicyKey({}, base), null);
+      assert.equal(await mod.ensurePolicyKey({}, 'http://127.0.0.1:1/api/v1'), null);
+    });
+  } finally {
+    srv.close();
+  }
+}
 
 if (failed) { console.log(`\n${failed} check(s) FAILED`); process.exit(1); }
 console.log('\nPASS — every generated JavaScript file parses.');
