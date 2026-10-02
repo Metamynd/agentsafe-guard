@@ -15,6 +15,7 @@ agent → [ HTTP gateway ] → upstream service
               │
               ├─ route not protected      → forward as-is
               └─ route protected:
+                    query / %3F / ; / #    → 403 QUERY_NOT_BOUND (verifyRequest never called)
                     no signed request      → 401
                     payload ≠ signed value → 403 PAYLOAD_NOT_BOUND (verifyRequest never called)
                     verifyRequest(signed)  → allow/observe → forward upstream (+ x-agentsafe-decision)
@@ -33,6 +34,31 @@ guard already verifies); the gateway forwards only on `allow`/`observe`.
   { "method": "POST", "path": "/payments/**", "action": "payment-execute" }
 ]
 ```
+
+## Query strings are refused on governed routes — since 0.17.1
+
+**0.17.1 — a governed route refuses a URL query string the signature does not cover (`403 QUERY_NOT_BOUND`).** The
+signed request and the payload binding cover the request **body**; through 0.17.0 the URL query string was forwarded to
+the upstream verbatim and unchecked. Reproduced: a body bound to a $250 `skyward-air` booking plus
+`?amount=4000&merchant=attacker-llc` was authorized, its hold claimed, and the query handed to the upstream — one that
+reads query parameters would have acted on values nobody signed. Now:
+
+- Any query string on a protected route — even an innocuous `?page=2`, even a bare `?` — is refused with
+  `403 QUERY_NOT_BOUND` before `verifyRequest` is called, so no hold is claimed and no nonce consumed.
+- A query, path parameter or fragment smuggled into the **path** is refused the same way: `/book%3Famount=4000`,
+  `/book;amount=4000`, `/book%3Bamount=4000`, `#` / `%23`, and double- or triple-encoded forms (`%253F`). Route matching
+  now cuts a request path at a decoded `?`/`#` and drops a segment's `;params`, so such a variant of a protected path
+  **matches** that route (and is refused) instead of passing through as "unmatched" to an upstream that strips them.
+- Unmatched routes are unchanged: forwarded with their query, or `ROUTE_NOT_ALLOWED` under `denyByDefault`.
+
+A route whose upstream genuinely takes query parameters lists them: `allowedQuery: ['page', 'sort']`. Exactly those keys
+are forwarded — unencoded, exact case, each at most once (a repeated key is as ambiguous as a duplicate JSON key), with
+no `;` separator, no empty `&&` segment, and no value that decodes to `& ; = ? #`; anything else is still
+`QUERY_NOT_BOUND`. **Listed keys are not covered by the agent's signature** — the gateway logs that at startup — so list
+only keys whose value the upstream may take from the caller unchecked (paging, sorting), or bind them with a
+`route.payload(req)` that includes them and that the agent signs. A route that lists a signed value field (`amount`,
+`currency`, `merchant`, or one in its `valueFields`) refuses to start. Shipped as a patch so every `^0.17.0` install
+picks it up; a governed route that relied on forwarding a query needs `allowedQuery` after upgrading.
 
 ## Run
 

@@ -374,6 +374,16 @@ function loadConfigFile(path) {
   return json;
 }
 
+// Written into every financial scaffold's README. The generated code passes the tool call's riskLevel through
+// unchanged (no `?? 'low'`): a missing one must reach the gate as missing, where it escalates by design.
+const RISK_LEVEL_NOTE = `## Risk level: the agent's own claim
+
+\`riskLevel\` is **the agent's own claim**. It travels in the request's context: the agent's key may sign that context,
+which proves who said it, not that it is true, and nothing checks the value unless your owner configures provenance for it (an owner-set \`riskTier\` on the mandate permission, or a
+gateway route's \`trustedContext\`). \`index.mjs\` passes the tool call's own \`riskLevel\` through unchanged —
+there is **no default**. A call that does not state one (or states one the gate does not recognise) is **sent
+for review** (\`CONTEXT_UNVERIFIABLE\`), never treated as \`low\`. The demo steps each state their risk explicitly.`;
+
 // A rule needs `when.predicate` (the atom) and `then` (the decision the gate should return
 // when it fires) — everything else is optional sugar. See backend's atom-catalog.ts for the
 // full predicate list (amount-over, risk-at-or-above, jurisdiction-not-allowed, ...).
@@ -1061,7 +1071,10 @@ const gatedBookFlight = guard.guardTool(
     amount: a.amount,
     currency: '${currency}',
     merchant: a.merchant,
-    context: { tool: 'book-flight', riskLevel: a.riskLevel ?? 'low' },
+    // riskLevel is the agent's OWN claim: signing it proves who said it, not that it is true, and nothing checks it unless
+    // the owner configures provenance. Passed through as-is: when the agent does not say, it stays absent and the gate sends
+    // the action for review — never 'low'.
+    context: { tool: 'book-flight', riskLevel: a.riskLevel },
   }),
 );
 
@@ -1222,7 +1235,8 @@ async function bookFlightViaGateway(args, decision) {
     amount: args.amount,
     currency: args.currency ?? '${currency}',
     merchant: args.merchant,
-    context: { tool: 'book-flight', riskLevel: args.riskLevel ?? 'low' },
+    // Passed through as-is (never defaulted): a missing riskLevel must reach the gateway as missing.
+    context: { tool: 'book-flight', riskLevel: args.riskLevel },
     payload,
   });
   signed.authorizationId = decision?.authorizationId;
@@ -1250,7 +1264,10 @@ const gatedBookFlight = guard.guardTool(
     amount: a.amount,
     currency: a.currency ?? '${currency}',
     merchant: a.merchant,
-    context: { tool: 'book-flight', riskLevel: a.riskLevel ?? 'low' },
+    // riskLevel is the agent's OWN claim: signing it proves who said it, not that it is true, and nothing checks it unless
+    // the owner configures provenance. Passed through as-is: when the agent does not say, it stays absent and the gate sends
+    // the action for review — never 'low'.
+    context: { tool: 'book-flight', riskLevel: a.riskLevel },
     // The authorization is bound to the SAME body bookFlightViaGateway() sends, so the gate records what this agent
     // signed and the gateway can prove it is running exactly that. Keep the two in step if you add a field.
     payload: { amount: a.amount, merchant: a.merchant, currency: a.currency ?? '${currency}' },
@@ -1877,6 +1894,8 @@ You should see an ALLOW (fulfilled by \`./gateway\`), a BLOCK (over the per-tran
 an ESCALATE (high risk). The BLOCK and ESCALATE never reach the gateway at all — this file's own
 \`guard.guardTool()\` refuses them first. Only the ALLOW crosses into the other process.
 
+${RISK_LEVEL_NOTE}
+
 ## Files
 
 ${configFileLine}
@@ -1897,6 +1916,8 @@ npm start
 \`\`\`
 
 You should see an ALLOW, a BLOCK (over the per-transaction cap), and an ESCALATE (high risk).
+
+${RISK_LEVEL_NOTE}
 
 ## Files
 
@@ -3095,7 +3116,8 @@ async function callGateway(path, action, args) {
   // The COMPLETE body the tool receives, signed as a payload (MAGP 8.3.9): the eight signed fields cover amount and merchant
   // only, and this gateway refuses to run the tool on a body that is not exactly the one signed here.
   const payload = { amount: args.amount, merchant: args.merchant, currency: args.currency ?? '${currency}' };
-  const signed = await guard.buildSignedRequest({ action, amount: args.amount, currency: args.currency ?? '${currency}', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel ?? 'low' }, payload });
+  // riskLevel is passed through as-is (never defaulted): a missing one must reach the gateway as missing.
+  const signed = await guard.buildSignedRequest({ action, amount: args.amount, currency: args.currency ?? '${currency}', merchant: args.merchant, context: { tool: '${scope}', riskLevel: args.riskLevel }, payload });
   const res = await fetch(GATEWAY + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) }, body: JSON.stringify(payload) });
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -3120,7 +3142,10 @@ const gatedBookFlight = guard.guardToolLocal(
     amount: a.amount,
     currency: a.currency ?? '${currency}',
     merchant: a.merchant,
-    context: { tool: 'book-flight', riskLevel: a.riskLevel ?? 'low' },
+    // riskLevel is the agent's OWN claim: signing it proves who said it, not that it is true, and nothing checks it unless
+    // the owner configures provenance. Passed through as-is: when the agent does not say, it stays absent and the gate sends
+    // the action for review — never 'low'.
+    context: { tool: 'book-flight', riskLevel: a.riskLevel },
   }),
   getBundle,
 );
@@ -3474,7 +3499,9 @@ action outside the mandate entirely. Every step says what it expects and flags a
     : `None of your rules could be staged in the demo (see below), so it shows only a BLOCK for an
 action outside the mandate. Your rules are still enforced; see \`metamynd-rules.json\`.`)
   : `You should see an ALLOW, a BLOCK (over the per-transaction cap), an ESCALATE (high risk —
-open the dashboard to approve it), and a BLOCK (an action outside the mandate entirely).`}
+open the dashboard to approve it), and a BLOCK (an action outside the mandate entirely).
+
+${RISK_LEVEL_NOTE}`}
 
 ## Files
 

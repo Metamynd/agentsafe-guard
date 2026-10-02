@@ -433,9 +433,12 @@ signed value only and ignores one in the context. Scaffolds pin `@metamynd/agent
 
 The starter rules include a high-risk review. A request that sends **no** `riskLevel` (or an unrecognised one)
 is no longer waved through: it is **escalated** (`CONTEXT_UNVERIFIABLE`) for a human, because an agent that omits
-its risk is indistinguishable from one hiding it. The scaffolded financial examples send `riskLevel` (`'low'`
-unless you say otherwise) — that default is a placeholder, not an assessment — and the neutral template passes
-your own `args` as the context, so include it there. A real integration should send an honest one — or, better, not depend on the agent at all: a mandate
+its risk is indistinguishable from one hiding it. The scaffolded examples pass the tool call's own `riskLevel`
+through **unchanged** — there is no default, so a call that does not say is sent for review rather than treated as
+`'low'` (the demo steps each state their risk explicitly). The neutral template passes your own `args` as the
+context, so include it there. Either way `riskLevel` is **the agent's own claim**: it travels in the request
+context, and even when the agent's key signs that context, the signature proves who said it, not that it is true —
+nothing checks the value unless your owner configures provenance for it. A real integration should send an honest one — or, better, not depend on the agent at all: a mandate
 permission can carry an owner-set `riskTier` that no claim can lower, and a gateway route can derive the risk
 itself with `route.trustedContext` (`@metamynd/agentsafe-http-gateway` 0.10.0). See MAGP §6.3.
 
