@@ -24,8 +24,9 @@ const bookFlight = guard.guardTool(
     // Only reached when the gate ALLOWED. Real booking would go here.
     return { booked: true, pnr: 'PNR-DEMO', remaining: decision.remaining, ...args };
   },
-  // Map the tool args → gate inputs. `context` carries what the Standard/SOP rules need.
-  (a) => ({ amount: a.amount, currency: 'USD', merchant: a.merchant, context: { tool: a.tool ?? 'book-flight', riskLevel: a.riskLevel ?? 'low' } }),
+  // Map the tool args → gate inputs. `context` carries what the Standard/SOP rules need. riskLevel is the agent's own claim:
+  // passed through as the tool call states it, never defaulted — "not said" must not read as "low risk".
+  (a) => ({ amount: a.amount, currency: 'USD', merchant: a.merchant, context: { tool: a.tool ?? 'book-flight', riskLevel: a.riskLevel } }),
 );
 
 async function ask(label, args) {
