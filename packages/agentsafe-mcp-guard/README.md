@@ -361,9 +361,17 @@ if (verdict.decision === 'allow' || verdict.decision === 'observe') await upstre
 
 The bundle is what `verifyRequest` enforces, so whoever can change it in flight can change the rules. Pin MetaMynd's
 policy-signing key — fetch `GET /magp/policy/pubkey` once, out of band, and bake it into your config — and the guard
-verifies every bundle's signature and freshness, refusing a tampered, unsigned or stale one for a value-bearing call
-(`POLICY_BUNDLE_SIGNATURE_INVALID`, `POLICY_BUNDLE_UNSIGNED`, `POLICY_BUNDLE_STALE`). `create-metamynd-agent`'s gateways
-pin it for you.
+verifies every bundle's signature and freshness, refusing a tampered, unsigned or stale one for **every** call, amount 0
+included (`POLICY_BUNDLE_SIGNATURE_INVALID`, `POLICY_BUNDLE_UNSIGNED`, `POLICY_BUNDLE_STALE`). `create-metamynd-agent`'s
+gateways pin it for you.
+
+**0.18.1 — a pinned key now refuses an unsigned or stale bundle for an amount-0 action too.** Before, the pin only
+failed closed for a value-bearing call, so an interceptor on the bundle fetch could strip the proof, add an action the
+agent was never granted, and have a non-financial gateway execute it (`permissions.update` reached upstream in the
+2026-10-02 pre-beta evaluation); or replay a bundle from before a revoke. An amount-0 action is not a read: every tool
+of a non-financial agent carries no amount. MetaMynd never serves an unsigned bundle and re-issues every copy it
+serves, so nothing legitimate is refused. Without a pin nothing changes (the guard warns at startup that it is
+trusting its transport).
 
 ```js
 const guard = createMcpGuard({ serviceDid, issuerApi: 'https://metamynd.ai/api/v1', policyPublicKey: '<hex from /magp/policy/pubkey>' });

@@ -232,7 +232,7 @@ await check('hosted financial scaffold: agent body and gateway allowedFields agr
   const out = mkdtempSync(join(tmpdir(), 'metamynd-hosted-fin-'));
   const realLog = console.log; console.log = () => {};
   try {
-    scaffoldProject({ outDir: out, config: { apiBase: 'http://127.0.0.1:1', agentDid: 'did:key:zStub', agentKey: 'aa', identityId: 'stub', keyVerified: true, mandate: { scope: 'flight-purchase' } }, slug: 'fin', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: true });
+    scaffoldProject({ outDir: out, config: { apiBase: 'http://127.0.0.1:1', agentDid: 'did:key:zStub', agentKey: 'aa', identityId: 'stub', keyVerified: true, mandate: { scope: 'flight-purchase' }, issuer: { policyKey: 'ab'.repeat(32) } }, slug: 'fin', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: true });
   } finally { console.log = realLog; }
   const gw = readFileSync(join(out, 'gateway', 'server.mjs'), 'utf8');
   const agent = readFileSync(join(out, 'index.mjs'), 'utf8');

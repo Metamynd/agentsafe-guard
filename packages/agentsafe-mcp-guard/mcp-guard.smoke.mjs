@@ -353,11 +353,27 @@ console.log('\n— signed policy bundle: staleness + risk-tiered fail-closed (Ph
     if (!ok) failed++;
     console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label} (${v.decision}/${v.reasonCode})`);
   }
-  // A non-value read tolerates a stale bundle (only value-bearing fails closed).
-  const readOk = await withBundle(stale).verifyRequest(signedRequest({ amount: 0 }));
-  const okRead = readOk.decision !== 'block' || readOk.reasonCode !== 'POLICY_BUNDLE_STALE';
+  // Against a PINNED key, an amount-0 action fails closed too (C-2, 2026-10-02): an interceptor that strips the proof
+  // and adds an ungranted action, or replays a bundle from before a revoke, must not govern a non-financial tool.
+  const zero = signedRequest({ amount: 0 });
+  const forged = { ...unsigned, mandates: [...(unsigned.mandates ?? []), { action: 'permissions.update', hash: null, document: {} }] };
+  for (const [label, b, wantReason] of [
+    ['pinned: stale bundle, amount-0 action → fail closed', stale, 'POLICY_BUNDLE_STALE'],
+    ['pinned: unsigned bundle, amount-0 action → fail closed', unsigned, 'POLICY_BUNDLE_UNSIGNED'],
+    ['pinned: proof stripped + ungranted action added → fail closed', forged, 'POLICY_BUNDLE_UNSIGNED'],
+  ]) {
+    const v = await withBundle(b).verifyRequest(zero);
+    const ok = v.decision === 'block' && v.reasonCode === wantReason;
+    if (!ok) failed++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label} (${v.decision}/${v.reasonCode})`);
+  }
+  // Without a pin the guard is trusting its transport (it warns at startup), and the risk tier still applies:
+  // only a value-bearing action fails closed on a stale bundle.
+  const unpinned = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => stale });
+  const readOk = await unpinned.verifyRequest(zero);
+  const okRead = readOk.reasonCode !== 'POLICY_BUNDLE_STALE';
   if (!okRead) failed++;
-  console.log(`${okRead ? 'ok  ' : 'FAIL'}  non-value read tolerates a stale bundle`);
+  console.log(`${okRead ? 'ok  ' : 'FAIL'}  unpinned: amount-0 action is not refused for staleness (${readOk.decision}/${readOk.reasonCode})`);
 }
 
 if (failed) {

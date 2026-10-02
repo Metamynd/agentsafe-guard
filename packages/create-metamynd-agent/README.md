@@ -175,6 +175,11 @@ the whole protocol.
 Named precisely, not left implicit:
 
 - **Direct call.** `bookFlight()` doesn't exist in the agent's process.
+- **Forged or replayed policy (every gateway is pinned, 0.14.3).** The gateway's `policyPublicKey` is baked in from your
+  provisioning response (or, from an older API, `GET /magp/policy/pubkey`), and with `@metamynd/agentsafe-mcp-guard` 0.18.1 an
+  unsigned, tampered or stale bundle is refused for every action, amount 0 included — so a non-financial gateway cannot be granted
+  an action by whoever sits on its bundle fetch. If no key can be had, the CLI scaffolds no gateway at all (it keeps the
+  provisioned config and says so) rather than writing an unpinned one.
 - **Payload binding is ON by default (0.11.0, MAGP §8.3.9).** The generated agent signs the COMPLETE body it sends as a payload, the
   authorization it gets from the gate is bound to that same body, and the generated gateway sets `requirePayloadBinding: true`: it
   digests the body it is about to run and the issuer refuses the claim unless that is the digest the agent signed. The eight

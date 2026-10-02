@@ -7,9 +7,10 @@
 // CDN, or a Hedera mirror — with **no live MetaMynd call** (the Phase F exit: no MetaMynd dependence
 // for per-request enforcement).
 //
-// Risk-tiered fail-closed (§5.3.3): a value-bearing action MUST fail closed on an unsigned,
-// tampered, or stale (past `maxStaleness`) bundle; a non-value read may proceed (a bad *signature*
-// is always a hard fail). Zero dependencies — node:crypto Ed25519 only.
+// Fail-closed (§6.2): a bad *signature* is always a hard fail. Against a PINNED key, so is an
+// unsigned or stale bundle, for every action. Without a pin the tier is risk-based: a value-bearing
+// action MUST fail closed on an unsigned or stale bundle; an amount-0 action may proceed.
+// Zero dependencies — node:crypto Ed25519 only.
 import crypto from 'node:crypto';
 
 // ── canonicalization (deterministic bytes for signing) ────────────────────────────────────────
@@ -71,22 +72,36 @@ export function parseDurationMs(iso) {
  * Verify a signed bundle and apply the risk tier. Returns
  * `{ ok, reasonCode, ageMs, maxStalenessMs, signed }`.
  *   • a present-but-invalid signature → POLICY_BUNDLE_SIGNATURE_INVALID (hard fail, any tier)
- *   • unsigned → POLICY_BUNDLE_UNSIGNED (fail closed only for value-bearing)
- *   • stale past maxStaleness → POLICY_BUNDLE_STALE (fail closed only for value-bearing)
+ *   • unsigned → POLICY_BUNDLE_UNSIGNED
+ *   • stale past maxStaleness → POLICY_BUNDLE_STALE
  *   • otherwise → POLICY_BUNDLE_OK
+ *
+ * With a pinned `publicKey`, unsigned and stale are hard fails for EVERY action. Pinning is the
+ * caller saying "only bundles MetaMynd signed, recently, govern this service" — and the issuer
+ * never serves an unsigned bundle, and re-issues every copy it serves. So an unsigned bundle under
+ * a pin can only be one an interceptor stripped (then rewrote), and a stale one a replay of
+ * authority since withdrawn (a revoked mandate, a tightened SOP). Tolerating either for an
+ * amount-0 action handed the interceptor every non-value action — and an amount-0 action is not a
+ * read: `records-update`, `permissions.update` and every non-financial agent's tools carry no
+ * amount (found 2026-10-02: an interceptor stripped the proof, added `permissions.update`, and the
+ * pinned gateway executed it).
+ *
+ * Without a pin the risk tier still applies: unsigned or stale fails closed only for a
+ * value-bearing action. That mode trusts the transport, and the guards say so when they start.
  *
  * @param {object} opts { publicKey?, nowMs?, valueBearing?, maxStalenessMs? }
  */
 export function verifyBundle(bundle, opts = {}) {
   const nowMs = opts.nowMs ?? Date.now();
-  const valueBearing = !!opts.valueBearing;
+  const pinned = opts.publicKey != null;
+  const failClosed = pinned || !!opts.valueBearing;
   const sig = bundle?.proof?.signature;
   // The verifier's trusted key wins; else fall back to the key the bundle advertises (still checked
   // for freshness, but a caller SHOULD pin publicKey to a MetaMynd key it trusts).
   const keyMaterial = opts.publicKey ?? bundle?.proof?.publicKeyHex ?? null;
 
   if (!sig || !keyMaterial) {
-    return { ok: !valueBearing, reasonCode: 'POLICY_BUNDLE_UNSIGNED', ageMs: null, maxStalenessMs: null, signed: false };
+    return { ok: !failClosed, reasonCode: 'POLICY_BUNDLE_UNSIGNED', ageMs: null, maxStalenessMs: null, signed: false };
   }
   let sigOk = false;
   try { sigOk = crypto.verify(null, signingBytes(bundle), toPublicKey(keyMaterial), Buffer.from(sig, 'hex')); } catch { sigOk = false; }
@@ -96,7 +111,7 @@ export function verifyBundle(bundle, opts = {}) {
   const issuedMs = Date.parse(bundle.issuedAt);
   const ageMs = Number.isFinite(issuedMs) ? nowMs - issuedMs : null;
   const stale = maxStalenessMs != null && ageMs != null && ageMs > maxStalenessMs;
-  if (stale) return { ok: !valueBearing, reasonCode: 'POLICY_BUNDLE_STALE', ageMs, maxStalenessMs, signed: true };
+  if (stale) return { ok: !failClosed, reasonCode: 'POLICY_BUNDLE_STALE', ageMs, maxStalenessMs, signed: true };
 
   return { ok: true, reasonCode: 'POLICY_BUNDLE_OK', ageMs, maxStalenessMs, signed: true };
 }

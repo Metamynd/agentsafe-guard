@@ -129,8 +129,8 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   unseen here for up to `maxAgeMs`. Every per-request check (signature, staleness, subject, containment) still runs
  *   on the cached copy. Call `close()` when the Service shuts down; the streams never keep the process alive.
  * @param {string} [cfg.policyPublicKey] MetaMynd's Ed25519 policy-signing key (hex, from
- *   GET /magp/policy/pubkey). When set, the guard VERIFIES the bundle signature + freshness (Phase F,
- *   §5.3.2/§5.3.3) and fails closed for value-bearing actions on an unsigned/tampered/stale bundle —
+ *   GET /magp/policy/pubkey). When set, the guard VERIFIES the bundle signature + freshness (MAGP §6.2)
+ *   and fails closed for every action, amount 0 included, on an unsigned/tampered/stale bundle —
  *   so per-request enforcement needs no live MetaMynd. Omit for the legacy hash-addressed + TLS mode —
  *   which is only as trustworthy as the transport: over plain http:// nothing authenticates the bundle,
  *   so a value-bearing action is refused (POLICY_BUNDLE_UNVERIFIED) unless `allowUnverifiedBundle` is set.
@@ -710,10 +710,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       const effectiveRisk = maxRisk(riskFloorFor(mandateForRisk, action), normalizeRiskLevel(trustedContext?.riskLevel), normalizeRiskLevel(signed?.itinerary?.riskLevel)) ?? undefined;
       const modeGate = operatingModeGate(bundle?.__operatingMode?.mode, { amount, riskLevel: effectiveRisk });
       if (modeGate.decision === 'block') return { decision: 'block', reasonCode: modeGate.reasonCode };
-      // 3b. Signed-bundle verification + risk-tiered fail-closed (Phase F, §5.3.2/§5.3.3). When a
-      // policy key is configured, a value-bearing action (amount > 0) MUST fail closed on an
-      // unsigned / tampered / stale bundle — so enforcement needs no live MetaMynd. A bad SIGNATURE
-      // is a hard fail even for non-value reads.
+      // 3b. Signed-bundle verification (MAGP §6.2). With a pinned policy key, an unsigned, tampered or
+      // stale bundle fails closed for EVERY action, amount 0 included (0.18.1 — verifyBundle documents
+      // why: an amount-0 action is not a read) — so enforcement needs no live MetaMynd.
       if (policyPublicKey) {
         const v = verifyBundle(bundle, { publicKey: policyPublicKey, valueBearing: Number(amount) > 0 });
         if (!v.ok) return { decision: 'block', reasonCode: v.reasonCode };

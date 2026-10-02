@@ -65,6 +65,8 @@ function startFakeBackend() {
             perTxnMax: json.perTxnMax,
             standards: [],
             challenge,
+            // Every real provisioning response carries it; every scaffolded gateway is pinned to it.
+            issuer: { policyKey: 'ab'.repeat(32) },
           },
         }),
       );
