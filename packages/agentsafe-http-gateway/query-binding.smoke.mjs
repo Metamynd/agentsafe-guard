@@ -138,6 +138,24 @@ test('allowedQuery may not list a signed value field, an invalid key, or be a no
   }
 });
 
+// Item 15 (2026-10-02 open items): two allowedQuery edge cases.
+test('0.17.3: any casing of a signed value field is refused at construction (a case-insensitive upstream reads it)', () => {
+  for (const bad of [['Amount'], ['MERCHANT'], ['Currency'], ['page', 'Total']]) {
+    const extra = { allowedQuery: bad, ...(bad?.[1] === 'Total' ? { valueFields: ['amount', 'merchant', 'total'] } : {}) };
+    assert.throws(() => mk(extra), /signed value field/, JSON.stringify(bad));
+  }
+});
+
+test('0.17.3: an "=" in a value (a base64 cursor, a padded token) is forwarded; real separators are still refused', async () => {
+  const gw = mk({ allowedQuery: ['cursor'] });
+  for (const p of ['/book-flight?cursor=abc==', '/book-flight?cursor=abc%3D%3D', '/book-flight?cursor=a=b']) {
+    const r = await call(gw, p);
+    assert.equal(r.status, 200, p);
+    assert.equal(forwarded.path, p);
+  }
+  for (const p of ['/book-flight?cursor=abc%26amount=4000', '/book-flight?cursor=abc%253Bx', '/book-flight?cursor=a%3Fb']) refused(await call(gw, p));
+});
+
 test('allowedQuery logs, at startup, that its keys are forwarded UNBOUND', () => {
   const lines = [];
   const w = console.warn; console.warn = (m) => lines.push(String(m));

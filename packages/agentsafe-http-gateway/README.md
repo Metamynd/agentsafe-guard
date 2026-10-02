@@ -53,11 +53,12 @@ reads query parameters would have acted on values nobody signed. Now:
 
 A route whose upstream genuinely takes query parameters lists them: `allowedQuery: ['page', 'sort']`. Exactly those keys
 are forwarded — unencoded, exact case, each at most once (a repeated key is as ambiguous as a duplicate JSON key), with
-no `;` separator, no empty `&&` segment, and no value that decodes to `& ; = ? #`; anything else is still
+no `;` separator, no empty `&&` segment, and no value that decodes to `& ; ? #` (an `=` in a value, as in a base64
+cursor, is fine since 0.17.3); anything else is still
 `QUERY_NOT_BOUND`. **Listed keys are not covered by the agent's signature** — the gateway logs that at startup — so list
 only keys whose value the upstream may take from the caller unchecked (paging, sorting), or bind them with a
 `route.payload(req)` that includes them and that the agent signs. A route that lists a signed value field (`amount`,
-`currency`, `merchant`, or one in its `valueFields`) refuses to start. Shipped as a patch so every `^0.17.0` install
+`currency`, `merchant`, or one in its `valueFields`), in any letter case, refuses to start. Shipped as a patch so every `^0.17.0` install
 picks it up; a governed route that relied on forwarding a query needs `allowedQuery` after upgrading.
 
 ## Run

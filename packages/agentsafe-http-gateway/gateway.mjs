@@ -356,8 +356,9 @@ const QUERY_KEY = /^[A-Za-z0-9_.~-]+$/;
  *   - any query at all — even an empty `?` — unless the route lists `allowedQuery`;
  *   - with `allowedQuery`: a parameter whose key is not listed EXACTLY (no encoded, renamed or differently-cased key), a
  *     key that appears twice (first-wins and last-wins readers disagree, like a duplicate JSON key), an empty `&&`
- *     segment, a `;` separator, or a value whose decoded form carries `& ; = ? #` (a double-decoding upstream would read
- *     it as more parameters).
+ *     segment, a `;` separator, or a value whose decoded form carries `& ; ? #` (a double-decoding upstream would read
+ *     it as more parameters). An `=` in a value is allowed (0.17.3): on its own it cannot start a parameter — only a
+ *     separator can — and base64 cursors and padded tokens (`cursor=abc==`) carry it.
  */
 export function queryRefusal(path, route) {
   const target = String(path ?? '');
@@ -380,7 +381,7 @@ export function queryRefusal(path, route) {
     if (!allowed.includes(key)) return `query parameter "${key}" is not in allowedQuery`;
     if (seen.has(key)) return `query parameter "${key}" appears more than once`;
     seen.add(key);
-    if (/[&;=?#]/.test(decodeFully(value.replace(/\+/g, ' ')))) return `query parameter "${key}" carries an encoded separator`;
+    if (/[&;?#]/.test(decodeFully(value.replace(/\+/g, ' ')))) return `query parameter "${key}" carries an encoded separator`;
   }
   return null;
 }
@@ -390,10 +391,12 @@ function assertAllowedQuery(route) {
   if (route?.allowedQuery === undefined) return;
   const where = `route "${route.method ?? '*'} ${route.path}"`;
   if (!Array.isArray(route.allowedQuery)) throw new Error(`allowedQuery for ${where} must be an array of query keys`);
-  const valueFields = new Set([...BOUND_FIELDS, ...(route.valueFields ?? DEFAULT_VALUE_FIELDS)]);
+  // Compared case-insensitively (0.17.3): an upstream that reads query keys case-insensitively would take `Amount` for
+  // the signed `amount`, so listing any casing of a signed value field is refused.
+  const valueFields = new Set([...BOUND_FIELDS, ...(route.valueFields ?? DEFAULT_VALUE_FIELDS)].map((f) => String(f).toLowerCase()));
   for (const k of route.allowedQuery) {
     if (typeof k !== 'string' || !QUERY_KEY.test(k)) throw new Error(`allowedQuery for ${where} has an invalid key ${JSON.stringify(k)} (letters, digits, _ . ~ - only)`);
-    if (valueFields.has(k)) throw new Error(`allowedQuery for ${where} may not list "${k}": it is a signed value field, and a query parameter is not covered by the signature`);
+    if (valueFields.has(k.toLowerCase())) throw new Error(`allowedQuery for ${where} may not list "${k}": it is (a casing of) a signed value field, and a query parameter is not covered by the signature`);
   }
 }
 
