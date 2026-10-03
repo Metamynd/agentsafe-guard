@@ -345,7 +345,8 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
   // settlement below the authorization (or a release after the claim) must be confirmed by an independent observer. It only
   // widens checks, so it is a plain body flag; unset, the claim request is exactly as before.
   // `requireHumanApproval: true` (MAGP §8.7.18): grant only a hold a PERSON approved — see agentsafe-mcp-guard's own note.
-  async function claimAuthorization({ authorizationId, payloadDigest, x402 = false, requireHumanApproval = false } = {}) {
+  // `expect` (MAGP §8.7.19): what this receiver is about to execute, compared by the issuer BEFORE it claims.
+  async function claimAuthorization({ authorizationId, payloadDigest, x402 = false, requireHumanApproval = false, expect } = {}) {
     if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!base) throw new Error('issuerApi is required to claim an authorization');
     if (payloadDigest !== undefined && !isPayloadDigest(payloadDigest)) return { claimed: false, reasonCode: 'PAYLOAD_DIGEST_INVALID' };
@@ -358,7 +359,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         // header: the issuer compares it with the digest the AGENT signed for this authorization and refuses the claim (leaving the
         // hold unclaimed) on any difference. Payload binding, spec 8.3.9 / 8.7.11.
         const auth = serviceAuthHeaders('claim', authorizationId, [idempotencyKey, ...(payloadDigest ? [claimDigestField(payloadDigest)] : [])]);
-        const flags = { ...(x402 === true ? { x402: true } : {}), ...(requireHumanApproval === true ? { requireHumanApproval: true } : {}) };
+        const flags = { ...(x402 === true ? { x402: true } : {}), ...(requireHumanApproval === true ? { requireHumanApproval: true } : {}), ...(expect && typeof expect === 'object' ? { expect } : {}) };
         const hasFlags = Object.keys(flags).length > 0;
         const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, {
           method: 'POST',
@@ -655,8 +656,15 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         // The claim states the digest of what THIS receiver is about to execute — only when the agent bound one (a digest for an
         // unbound authorization is refused by the issuer: this receiver would be asserting a binding that does not exist).
         const claimDigest = payloadDigest !== undefined && signedDigest !== undefined ? payloadDigest : undefined;
-        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true, requireHumanApproval: reviewed });
+        const expect = { agentDid, action, ...(Number.isFinite(Number(amount)) ? { amount: Number(amount) } : {}), currency, merchant };
+        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true, requireHumanApproval: reviewed, expect });
         claimToken = claim.claimToken; claimAuthenticated = claim.counterpartyAuthenticated === true;
+        // A mismatch found only after the grant (an issuer that predates §8.7.19) must not strand the hold: release, then refuse.
+        const refuseClaimed = async (reasonCode) => {
+          const released = await releaseAuthorization({ authorizationId: signed.authorizationId, claimToken, reason: reasonCode }).catch((err) => ({ ok: false, reasonCode: String(err?.message ?? err) }));
+          if (!released?.ok) console.warn(`[a2a-guard] could not release claimed authorization ${signed.authorizationId} after ${reasonCode} (${released?.reasonCode ?? 'unknown'}) — nothing executed; it settles by reconciliation`);
+          return { decision: 'block', reasonCode };
+        };
         if (reviewed && claim.reasonCode === 'ESCALATION_NOT_APPROVED') return final;
         if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
         if (reviewed) {
@@ -671,12 +679,12 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         // already refused a claim whose digest differed; this catches an issuer that did NOT compare — one that predates payload
         // binding ignores the header and its grant carries no digest, which is "not enforced", never "fine". Only reachable when
         // the agent bound a payload, a flow an issuer that predates binding cannot honour anyway.
-        if ((claim.payloadDigest ?? null) !== (claimDigest ?? null)) return { decision: 'block', reasonCode: 'PAYLOAD_DIGEST_MISMATCH' };
-        if (claim.agentDid !== undefined && claim.agentDid !== agentDid) return { decision: 'block', reasonCode: 'AUTHORIZATION_AGENT_MISMATCH' };
-        if (claim.action !== undefined && claim.action !== action) return { decision: 'block', reasonCode: 'AUTHORIZATION_ACTION_MISMATCH' };
-        if (claim.amount !== undefined && Number(claim.amount) !== Number(amount)) return { decision: 'block', reasonCode: 'AUTHORIZATION_AMOUNT_MISMATCH' };
-        if (claim.currency !== undefined && claim.currency !== currency) return { decision: 'block', reasonCode: 'AUTHORIZATION_CURRENCY_MISMATCH' };
-        if (claim.merchant !== undefined && claim.merchant !== merchant) return { decision: 'block', reasonCode: 'AUTHORIZATION_MERCHANT_MISMATCH' };
+        if ((claim.payloadDigest ?? null) !== (claimDigest ?? null)) return refuseClaimed('PAYLOAD_DIGEST_MISMATCH');
+        if (claim.agentDid !== undefined && claim.agentDid !== agentDid) return refuseClaimed('AUTHORIZATION_AGENT_MISMATCH');
+        if (claim.action !== undefined && claim.action !== action) return refuseClaimed('AUTHORIZATION_ACTION_MISMATCH');
+        if (claim.amount !== undefined && Number(claim.amount) !== Number(amount)) return refuseClaimed('AUTHORIZATION_AMOUNT_MISMATCH');
+        if (claim.currency !== undefined && claim.currency !== currency) return refuseClaimed('AUTHORIZATION_CURRENCY_MISMATCH');
+        if (claim.merchant !== undefined && claim.merchant !== merchant) return refuseClaimed('AUTHORIZATION_MERCHANT_MISMATCH');
       }
       return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
     } catch (err) {

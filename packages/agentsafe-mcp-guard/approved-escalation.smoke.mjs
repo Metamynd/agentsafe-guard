@@ -67,7 +67,7 @@ test('the reproduced defect: an owner-approved escalation, presented with its or
     assert.equal(r.reasonCode, 'ESCALATION_APPROVED');
     assert.equal(r.escalatedFor, 'RISK_REVIEW');
     assert.equal(r.claimToken, 'tok-1'); // claimed once, settleable like any permit
-    assert.deepEqual(io.calls[0].body, { requireHumanApproval: true }); // asked the issuer for a PERSON's approval
+    assert.equal(io.calls[0].body.requireHumanApproval, true); // asked the issuer for a PERSON's approval
   } finally { io.restore(); }
 });
 
@@ -158,7 +158,7 @@ test('an ordinary permit still claims WITHOUT the flag (nothing changes for allo
   try {
     const r = await mk().verifyRequest(signed({ riskLevel: 'low', authorizationId: 'auth-low' }));
     assert.equal(r.decision, 'allow');
-    assert.equal(io.calls[0].body, null);
+    assert.equal(io.calls[0].body.requireHumanApproval, undefined);
   } finally { io.restore(); }
 });
 

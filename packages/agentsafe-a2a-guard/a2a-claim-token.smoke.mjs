@@ -63,16 +63,17 @@ const test = (name, fn) => t.push([name, fn]);
 test('x402: true marks the claim x402-bound (claimAuthorization, verifyRequest, guardA2ATask); unset, the claim request is unchanged', async () => {
   const m = mockIssuer(route());
   try {
+    // verifyRequest's claim states what it is about to execute (`expect`, §8.7.19) — never x402 unless asked.
     await mk().verifyRequest({ ...message().metadata[MAGP_A2A_EXTENSION_URI] });
-    assert.equal(m.calls[0].body, null);
-    assert.equal('Content-Type' in m.headers[0], false);
+    assert.equal(m.calls[0].body.x402, undefined);
+    assert.equal(m.calls[0].body.expect.action, 'book-hotel');
     await mk().claimAuthorization({ authorizationId: 'auth-2', x402: true });
     assert.deepEqual(m.calls[1].body, { x402: true });
     assert.equal(m.headers[1]['Content-Type'], 'application/json');
     await mk().verifyRequest({ ...message().metadata[MAGP_A2A_EXTENSION_URI] }, { x402: true });
-    assert.deepEqual(m.calls[2].body, { x402: true });
+    assert.equal(m.calls[2].body.x402, true);
     assert.equal(await mk().guardA2ATask('book-hotel', async () => 'BOOKED', { x402: true })(message(250), { id: 't' }), 'BOOKED');
-    assert.deepEqual(m.calls[3].body, { x402: true });
+    assert.equal(m.calls[3].body.x402, true);
   } finally { m.restore(); }
 });
 

@@ -310,7 +310,11 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   // when this Service's own policy judged the request as needing review. Refused ESCALATION_NOT_APPROVED with the hold left
   // unclaimed otherwise. It only ever narrows what may be claimed, so it is a plain body flag; the grant's `approvedByHuman`
   // is checked as well (verifyRequest), so an issuer that ignores the flag cannot turn it into a permit.
-  async function claimAuthorization({ authorizationId, payloadDigest, x402 = false, requireHumanApproval = false } = {}) {
+  //
+  // `expect` (MAGP §8.7.19): what this Service is about to execute — { agentDid, action, amount, currency, merchant }. The
+  // issuer compares it with the hold BEFORE claiming and refuses a mismatch (AUTHORIZATION_*_MISMATCH) with the hold left
+  // as it was, so presenting another agent's authorization id cannot strand that agent's hold. Only ever narrows.
+  async function claimAuthorization({ authorizationId, payloadDigest, x402 = false, requireHumanApproval = false, expect } = {}) {
     if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!base) throw new Error('issuerApi is required to claim an authorization');
     if (payloadDigest !== undefined && !isPayloadDigest(payloadDigest)) return { claimed: false, reasonCode: 'PAYLOAD_DIGEST_INVALID' };
@@ -325,7 +329,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         // as a header: the issuer compares it with the digest the AGENT signed for this authorization and refuses the claim
         // (leaving the hold unclaimed) on any difference. Payload binding, spec 8.3.9 / 8.7.11.
         const auth = await serviceAuthHeaders('claim', authorizationId, [idempotencyKey, ...(payloadDigest ? [claimDigestField(payloadDigest)] : [])]);
-        const flags = { ...(x402 === true ? { x402: true } : {}), ...(requireHumanApproval === true ? { requireHumanApproval: true } : {}) };
+        const flags = { ...(x402 === true ? { x402: true } : {}), ...(requireHumanApproval === true ? { requireHumanApproval: true } : {}), ...(expect && typeof expect === 'object' ? { expect } : {}) };
         const hasFlags = Object.keys(flags).length > 0;
         const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, {
           method: 'POST',
@@ -759,8 +763,17 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         // The claim states the digest of what THIS Service is about to execute — only when the agent bound one (a digest for
         // an unbound authorization is refused by the issuer: this Service would be asserting a binding that does not exist).
         const claimDigest = payloadDigest !== undefined && signedDigest !== undefined ? payloadDigest : undefined;
-        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true, requireHumanApproval: reviewed });
+        // What this Service is about to execute, for the issuer to compare BEFORE it claims (§8.7.19).
+        const expect = { agentDid, action, ...(Number.isFinite(Number(amount)) ? { amount: Number(amount) } : {}), currency, merchant };
+        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true, requireHumanApproval: reviewed, expect });
         claimToken = claim.claimToken; claimAuthenticated = claim.counterpartyAuthenticated === true;
+        // A mismatch found only AFTER the claim was granted (an issuer that predates §8.7.19 ignored `expect`) must not
+        // strand the hold claimed with nothing executed: release it, then refuse.
+        const refuseClaimed = async (reasonCode) => {
+          const released = await releaseAuthorization({ authorizationId: signed.authorizationId, claimToken, reason: reasonCode }).catch((err) => ({ ok: false, reasonCode: String(err?.message ?? err) }));
+          if (!released?.ok) console.warn(`[mcp-guard] could not release claimed authorization ${signed.authorizationId} after ${reasonCode} (${released?.reasonCode ?? 'unknown'}) — nothing executed; it settles by reconciliation`);
+          return { decision: 'block', reasonCode };
+        };
         // No person approved this hold: the request still needs one, exactly as before — the agent escalates and waits.
         if (reviewed && claim.reasonCode === 'ESCALATION_NOT_APPROVED') return final;
         if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
@@ -778,7 +791,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         // already refused a claim whose digest differed; this catches an issuer that did NOT compare — one that predates payload
         // binding ignores the header and its grant carries no digest at all, which is "not enforced", never "fine". Only
         // reachable when the agent bound a payload, a flow an issuer that predates binding cannot honour anyway.
-        if ((claim.payloadDigest ?? null) !== (claimDigest ?? null)) return { decision: 'block', reasonCode: 'PAYLOAD_DIGEST_MISMATCH' };
+        if ((claim.payloadDigest ?? null) !== (claimDigest ?? null)) return refuseClaimed('PAYLOAD_DIGEST_MISMATCH');
         // The claim alone only proves SOME real, unclaimed authorization exists — it must also
         // be FOR this agent and these exact values, or a cheap legitimate hold's id could be
         // presented to unlock a completely different, more expensive execution. Each check is
@@ -795,11 +808,11 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         if (Number(amount) > 0 && claim.amount === undefined) console.warn('[mcp-guard] claim response omitted amount for a value-bearing request — amount binding degraded');
         if (Number(amount) > 0 && claim.currency === undefined) console.warn('[mcp-guard] claim response omitted currency for a value-bearing request — currency binding degraded');
         if (merchant && claim.merchant === undefined) console.warn('[mcp-guard] claim response omitted merchant for a request that signed one — merchant binding degraded');
-        if (claim.agentDid !== undefined && claim.agentDid !== agentDid) return { decision: 'block', reasonCode: 'AUTHORIZATION_AGENT_MISMATCH' };
-        if (claim.action !== undefined && claim.action !== action) return { decision: 'block', reasonCode: 'AUTHORIZATION_ACTION_MISMATCH' };
-        if (claim.amount !== undefined && Number(claim.amount) !== Number(amount)) return { decision: 'block', reasonCode: 'AUTHORIZATION_AMOUNT_MISMATCH' };
-        if (claim.currency !== undefined && claim.currency !== currency) return { decision: 'block', reasonCode: 'AUTHORIZATION_CURRENCY_MISMATCH' };
-        if (claim.merchant !== undefined && claim.merchant !== merchant) return { decision: 'block', reasonCode: 'AUTHORIZATION_MERCHANT_MISMATCH' };
+        if (claim.agentDid !== undefined && claim.agentDid !== agentDid) return refuseClaimed('AUTHORIZATION_AGENT_MISMATCH');
+        if (claim.action !== undefined && claim.action !== action) return refuseClaimed('AUTHORIZATION_ACTION_MISMATCH');
+        if (claim.amount !== undefined && Number(claim.amount) !== Number(amount)) return refuseClaimed('AUTHORIZATION_AMOUNT_MISMATCH');
+        if (claim.currency !== undefined && claim.currency !== currency) return refuseClaimed('AUTHORIZATION_CURRENCY_MISMATCH');
+        if (claim.merchant !== undefined && claim.merchant !== merchant) return refuseClaimed('AUTHORIZATION_MERCHANT_MISMATCH');
       }
       // On a claimed permit the Service that executes needs the claim token to settle or release the
       // hold afterwards (non-enumerable — see withClaim).
