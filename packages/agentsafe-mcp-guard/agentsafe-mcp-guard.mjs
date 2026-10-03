@@ -104,6 +104,17 @@ function assertTrustedContext(tc, where) {
   }
 }
 
+/**
+ * The issuer could not be reached — a network failure or a 5xx on the bundle fetch. Tagged so verifyRequest refuses it
+ * GATE_UNREACHABLE, the agent guard's code for the same outage, instead of the catch-all GUARD_ERROR (eval 2026-10-03, N-6).
+ * A 4xx is an answer, not an outage, and stays an ordinary error.
+ */
+function gateUnreachable(cause) {
+  const err = new Error(`issuer unreachable: ${String(cause?.message ?? cause)}`);
+  err.code = 'GATE_UNREACHABLE';
+  return err;
+}
+
 /** Freshness window for signed requests and handshake nonces (spec §7.7). How far `issuedAt`
  *  may be BEHIND server time — network/processing delay. */
 const FRESHNESS_MS = 5 * 60 * 1000;
@@ -548,7 +559,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   async function fetchBundleUncached(agentDid) {
     if (typeof fetchBundle === 'function') return fetchBundle(agentDid);
     if (!base) throw new Error('issuerApi (or fetchBundle) is required to load the policy bundle');
-    const res = await fetch(`${base}/policy/bundle/${encodeURIComponent(agentDid)}`);
+    const res = await fetch(`${base}/policy/bundle/${encodeURIComponent(agentDid)}`).catch((err) => { throw gateUnreachable(err); });
+    if (res.status >= 500) throw gateUnreachable(`HTTP ${res.status}`);
     const body = await res.json().catch(() => null);
     if (!res.ok || !body?.data) throw new Error(`policy bundle fetch failed (HTTP ${res.status})`);
     // Live containment (Phase 2.4) + operating mode (Phase 2.5b) ride as SIBLINGS of the
@@ -584,7 +596,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     // with no Standard/SOP molecule happening to also catch it was silently ALLOWED here,
     // while the hosted gate and the agent SDK both correctly refused the identical request.
     if (!mandate) {
-      return { decision: 'block', reasonCode: mandates.length > 0 ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE', authorizationId: null, remaining: null, proofRef: null };
+      // Granted once and revoked (bundle `revokedActions`, §6.2.6) — names the refusal, never decides it.
+      const revoked = Array.isArray(bundle.revokedActions) && bundle.revokedActions.includes(action);
+      return { decision: 'block', reasonCode: revoked ? 'MANDATE_REVOKED' : mandates.length > 0 ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE', authorizationId: null, remaining: null, proofRef: null };
     }
     const standards = (bundle.standards ?? []).map((s) => ({ standardKey: s.key, document: s.document }));
     const sops = (bundle.sops ?? []).map((s) => ({ standardKey: `sop:${s.id}`, document: s.document }));
@@ -818,7 +832,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // hold afterwards (non-enumerable — see withClaim).
       return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
     } catch (err) {
-      return { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
+      // The issuer could not be reached for the bundle: say so (GATE_UNREACHABLE), as the agent guard does — GUARD_ERROR
+      // read as a fault in this Service during an issuer outage (eval 2026-10-03, N-6). Anything else stays GUARD_ERROR.
+      return { decision: 'block', reasonCode: err?.code === 'GATE_UNREACHABLE' ? 'GATE_UNREACHABLE' : 'GUARD_ERROR', error: String(err?.message ?? err) };
     }
   }
 

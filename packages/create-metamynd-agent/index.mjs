@@ -1132,7 +1132,8 @@ const WHY = {
   // action. Which one you see depends on whether the verdict was reached here or at the
   // gate, and neither of them depends on the amount.
   NO_PERMISSION_FOR_ACTION: 'the mandate never granted this action - at any amount',
-  NO_MANDATE: 'there is no mandate for this action at all',
+  NO_MANDATE: 'there is no mandate for this action at all',
+  MANDATE_REVOKED: 'the owner revoked the mandate for this action',
 };
 
 // ---------------------------------------------------------------- 1. CONTEXT
@@ -1333,7 +1334,8 @@ const WHY = {
   // action. Which one you see depends on whether the verdict was reached here or at the
   // gate, and neither of them depends on the amount.
   NO_PERMISSION_FOR_ACTION: 'the mandate never granted this action - at any amount',
-  NO_MANDATE: 'there is no mandate for this action at all',
+  NO_MANDATE: 'there is no mandate for this action at all',
+  MANDATE_REVOKED: 'the owner revoked the mandate for this action',
 };
 
 // ---------------------------------------------------------------- 1. CONTEXT
@@ -3212,7 +3214,8 @@ const WHY = {
   RISK_REVIEW: 'your SOP sends high-risk actions to a human first',
   MERCHANT_NOT_ALLOWED: 'the mandate lists which merchants this agent may pay',
   NO_PERMISSION_FOR_ACTION: 'the mandate never granted this action - at any amount',
-  NO_MANDATE: 'there is no mandate for this action at all',
+  NO_MANDATE: 'there is no mandate for this action at all',
+  MANDATE_REVOKED: 'the owner revoked the mandate for this action',
 };
 
 async function attempt(n, intent, action, args, tool = gatedBookFlight) {

@@ -109,6 +109,17 @@ export { keepAliveFetch } from './keepalive-fetch.mjs';
  *  governance is discoverable before any task is ever sent. */
 export const MAGP_A2A_EXTENSION_URI = 'https://schemas.metamynd.ai/a2a-extension/magp/v1';
 
+/**
+ * The issuer could not be reached — a network failure or a 5xx on the bundle fetch. Tagged so verifyRequest refuses it
+ * GATE_UNREACHABLE, the agent guard's code for the same outage, instead of the catch-all GUARD_ERROR (eval 2026-10-03, N-6).
+ * A 4xx is an answer, not an outage, and stays an ordinary error.
+ */
+function gateUnreachable(cause) {
+  const err = new Error(`issuer unreachable: ${String(cause?.message ?? cause)}`);
+  err.code = 'GATE_UNREACHABLE';
+  return err;
+}
+
 /** Freshness window for signed requests (spec §7.7) — how far `issuedAt` may lag server time. */
 const FRESHNESS_MS = 5 * 60 * 1000;
 /** How far `issuedAt` may lead server time — clock skew, not a pre-signing window. Checked
@@ -491,7 +502,8 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
   async function loadBundle(agentDid) {
     if (typeof fetchBundle === 'function') return fetchBundle(agentDid);
     if (!base) throw new Error('issuerApi (or fetchBundle) is required to load the policy bundle');
-    const res = await fetch(`${base}/policy/bundle/${encodeURIComponent(agentDid)}`);
+    const res = await fetch(`${base}/policy/bundle/${encodeURIComponent(agentDid)}`).catch((err) => { throw gateUnreachable(err); });
+    if (res.status >= 500) throw gateUnreachable(`HTTP ${res.status}`);
     const body = await res.json().catch(() => null);
     if (!res.ok || !body?.data) throw new Error(`policy bundle fetch failed (HTTP ${res.status})`);
     Object.defineProperty(body.data, '__contained', { value: body?.contained ?? null, enumerable: false, configurable: true });
@@ -511,7 +523,9 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
     const mandates = bundle.mandates ?? [];
     const mandate = mandates.find((m) => m.action === action)?.document;
     if (!mandate) {
-      return { decision: 'block', reasonCode: mandates.length > 0 ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE' };
+      // Granted once and revoked (bundle `revokedActions`, §6.2.6) — names the refusal, never decides it.
+      const revoked = Array.isArray(bundle.revokedActions) && bundle.revokedActions.includes(action);
+      return { decision: 'block', reasonCode: revoked ? 'MANDATE_REVOKED' : mandates.length > 0 ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE' };
     }
     const standards = (bundle.standards ?? []).map((s) => ({ standardKey: s.key, document: s.document }));
     const sops = (bundle.sops ?? []).map((s) => ({ standardKey: `sop:${s.id}`, document: s.document }));
@@ -688,7 +702,8 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       }
       return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
     } catch (err) {
-      return { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
+      // The issuer could not be reached for the bundle: GATE_UNREACHABLE, as the agent guard says it (eval 2026-10-03, N-6).
+      return { decision: 'block', reasonCode: err?.code === 'GATE_UNREACHABLE' ? 'GATE_UNREACHABLE' : 'GUARD_ERROR', error: String(err?.message ?? err) };
     }
   }
 
