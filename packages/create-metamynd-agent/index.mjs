@@ -1065,6 +1065,21 @@ function keepConfigAndFail(outDir, config, why) {
  * it — the same shape of gap --harness's README documents. See exampleIndex() below, which is
  * what the real (non-sandbox) flow scaffolds by default instead.
  */
+/**
+ * What a generated demo prints under an ESCALATE (pre-beta evaluation 2026-10-03, L-b). It used to say "approve it in the
+ * dashboard and the action resumes", which was untrue twice over. The shared sandbox has no owner anyone can sign in as, so
+ * nobody can approve its escalations. And nothing resumes on its own: once approved, the agent asks
+ * guard.escalationStatus(id) for the authorization and presents it to run the action (MAGP §8.7.18). Generated code: it
+ * reads `g`, the refusal's governance verdict, and `dim`, both in scope at every call site.
+ */
+function escalateNote(sandbox) {
+  return sandbox
+    ? `console.log(dim('     nobody can approve it here: the shared sandbox has no owner you can sign in as.'));
+      console.log(dim('     Provision your own agent to approve one in your dashboard.'));`
+    : `console.log(dim('     not a failure: it waits in your dashboard, under Escalations' + (g.escalationId ? ' (' + g.escalationId + ')' : '') + '.'));
+      console.log(dim('     Once you approve it, guard.escalationStatus(id) gives the agent the authorization to run it.'));`;
+}
+
 function exampleIndexNoGateway(scope, perTxnMax, currency, merchant, sandbox = false) {
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
@@ -1174,7 +1189,7 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
       console.log(dim('     ' + why));
-      console.log(dim('     not a failure: approve it in the dashboard and the action resumes.'));
+      ${escalateNote(sandbox)}
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? 'refused'));
       console.log(dim('     ' + why));
@@ -1206,7 +1221,9 @@ console.log(dim('     and not the model driving it.'));
 console.log(dim('   - step 4 needed no rule to stop it. The agent could not widen its own'));
 console.log(dim('     authority, because it cannot name an action nobody delegated to it.'));
 console.log(dim('   - the blocked call never reached your tool at all.'));
-console.log(dim('   - every decision was recorded as tamper-evident evidence.'));
+console.log(dim('   - every decision the gate made is recorded as tamper-evident evidence. A refusal'));
+console.log(dim('     this guard decided locally, from the signed rules, is reported as an'));
+console.log(dim('     agent-reported receipt - visible, but not anchored evidence.'));
 console.log(dim('   - if the gate were unreachable the guard fails CLOSED: it blocks.'));
 console.log('');
 console.log(bold('  Without MetaMynd, you can be bypassed.') + ' bookFlight() runs in THIS process -');
@@ -1379,7 +1396,7 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
       console.log(dim('     ' + why));
-      console.log(dim('     not a failure: approve it in the dashboard and the action resumes.'));
+      ${escalateNote(false)}
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? 'refused'));
       console.log(dim('     ' + why));
@@ -1548,7 +1565,7 @@ async function attempt(n, total, step) {
     got = g.decision ?? 'error';
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
-      console.log(dim('     not a failure: approve it in the dashboard and the action resumes.'));
+      ${escalateNote(sandbox)}
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? e.message));
       console.log(dim('     your tool never ran - refused before execution.'));
