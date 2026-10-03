@@ -125,7 +125,10 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.18.1: the pinned policyPublicKey every scaffolded gateway sets now refuses an unsigned or stale bundle for an
 // amount-0 action too. Required: the non-financial gateway's every request is amount 0, so below this a stripped
 // bundle could grant it an action the agent never had.
-const MCP_GUARD_VERSION = '^0.18.1';
+// 0.19.0: a request the gateway's own policy escalates, carrying an authorization a PERSON approved, is executed (once,
+// with every claim binding) instead of refused RISK_REVIEW (MAGP §8.7.18). Required: the scaffold tells the developer
+// "approve it in the dashboard and the action resumes" — below this the gateway refused exactly that.
+const MCP_GUARD_VERSION = '^0.19.0';
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.2.0 fixes a confused-deputy gap (payload not bound to the signed request) — the CLI must
 // never scaffold a range that could resolve below it.
@@ -146,7 +149,9 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.16.0: the caller is answered first and the claimed hold is settled after (settleInBackground), retried on a
 // transient failure. Template change: each scaffolded gateway drains settlements on SIGTERM/SIGINT (DRAIN_ON_SHUTDOWN).
 // 0.17.0: depends on agentsafe-mcp-guard ^0.18.0 and exports keepAliveFetch. No template change.
-const GATEWAY_VERSION = '^0.17.0';
+// 0.18.0: depends on agentsafe-mcp-guard ^0.19.0 (an approved escalation executes). Required with MCP_GUARD_VERSION
+// above, so the gateway never resolves a second, older guard of its own.
+const GATEWAY_VERSION = '^0.18.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `

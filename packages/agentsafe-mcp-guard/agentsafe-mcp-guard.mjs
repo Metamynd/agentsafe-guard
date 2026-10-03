@@ -169,6 +169,10 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
 export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
+  // Whether a claim RESPONSE from the issuer is integrity-protected in transit: TLS, or loopback (a local development
+  // issuer). Only then may a grant's `approvedByHuman` lift an escalate (§8.7.18) — that one field turns a policy
+  // decision, so a plain-http link a MITM could rewrite never carries it.
+  const issuerChannelAuthenticated = !!base && (/^https:\/\//i.test(base) || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(base));
   // With no policyPublicKey, nothing but the transport vouches for the policy bundle. Over plain http:// nothing does:
   // a proxy on the path can drop the spend cap and the guard would enforce the forged rules. A custom fetchBundle is the
   // integrator's own source, so it is left to them.
@@ -301,7 +305,12 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   // the hold as x402-bound, and only then does it ask an independent observer to confirm a settlement BELOW the authorization
   // (the Hedera mirror node, from the settlementTxHash + payTo the capture states) or a release after a claim. It only ever
   // widens the checks that apply, so it is a plain body flag. Unset (the default), the claim request is exactly as before.
-  async function claimAuthorization({ authorizationId, payloadDigest, x402 = false } = {}) {
+  //
+  // `requireHumanApproval: true` (MAGP §8.7.18) asks the issuer to grant the claim only if a PERSON approved this hold — used
+  // when this Service's own policy judged the request as needing review. Refused ESCALATION_NOT_APPROVED with the hold left
+  // unclaimed otherwise. It only ever narrows what may be claimed, so it is a plain body flag; the grant's `approvedByHuman`
+  // is checked as well (verifyRequest), so an issuer that ignores the flag cannot turn it into a permit.
+  async function claimAuthorization({ authorizationId, payloadDigest, x402 = false, requireHumanApproval = false } = {}) {
     if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!base) throw new Error('issuerApi is required to claim an authorization');
     if (payloadDigest !== undefined && !isPayloadDigest(payloadDigest)) return { claimed: false, reasonCode: 'PAYLOAD_DIGEST_INVALID' };
@@ -316,10 +325,12 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         // as a header: the issuer compares it with the digest the AGENT signed for this authorization and refuses the claim
         // (leaving the hold unclaimed) on any difference. Payload binding, spec 8.3.9 / 8.7.11.
         const auth = await serviceAuthHeaders('claim', authorizationId, [idempotencyKey, ...(payloadDigest ? [claimDigestField(payloadDigest)] : [])]);
+        const flags = { ...(x402 === true ? { x402: true } : {}), ...(requireHumanApproval === true ? { requireHumanApproval: true } : {}) };
+        const hasFlags = Object.keys(flags).length > 0;
         const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, {
           method: 'POST',
-          headers: { ...auth, 'idempotency-key': idempotencyKey, ...(payloadDigest ? { [PAYLOAD_DIGEST_HEADER]: payloadDigest } : {}), ...(x402 === true ? { 'Content-Type': 'application/json' } : {}) },
-          ...(x402 === true ? { body: JSON.stringify({ x402: true }) } : {}),
+          headers: { ...auth, 'idempotency-key': idempotencyKey, ...(payloadDigest ? { [PAYLOAD_DIGEST_HEADER]: payloadDigest } : {}), ...(hasFlags ? { 'Content-Type': 'application/json' } : {}) },
+          ...(hasFlags ? { body: JSON.stringify(flags) } : {}),
         });
         const body = await res.json().catch(() => null);
         // Ambiguous, so worth one retry with the same key: a 5xx, or EFFECT_TRANSITION_CONTENDED — the issuer's
@@ -336,6 +347,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
           merchant: body?.data?.merchant,
           // The digest the agent signed for this authorization (null = unbound); absent from an issuer that predates it.
           payloadDigest: body?.data?.payloadDigest,
+          // Whether a person approved this hold (§8.7.18). Only `true` counts; absent (an older issuer) is not an approval.
+          approvedByHuman: body?.data?.approvedByHuman === true,
           // The settlement token the issuer hands ONLY the caller whose claim succeeded. Once a hold is
           // claimed it can be settled below its amount, or voided, only with this token — so the Service
           // that executes must keep it and present it (captureAuthorization / releaseAuthorization).
@@ -734,13 +747,33 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // gate's job. Only claim on an actual PERMIT: escalate/block/suspend/quarantine execute
       // nothing, so there is nothing to protect and no reason to spend the hold's single use.
       let claimToken; let claimAuthenticated = false;
-      if (requireAuthorization && (final.decision === 'allow' || final.decision === 'observe')) {
+      // An ESCALATE here is "a person must decide". When the request carries an authorization, a person may already have
+      // (MAGP §8.7.18): the agent escalated, its owner approved, and the approval minted this hold — which the agent now
+      // presents with the same context that escalated it. The issuer, not the request, says whether a person approved it,
+      // so the claim asks for exactly that; anything else keeps the escalate. Only an escalate is lifted this way — a block,
+      // suspend or quarantine here is never overridden by an approval given before it. And only over an authenticated issuer
+      // channel: the grant's `approvedByHuman` is what lifts it, so it must not be forgeable in transit.
+      const reviewed = requireAuthorization && final.decision === 'escalate' && !!signed.authorizationId && issuerChannelAuthenticated;
+      let permitted = final;
+      if (requireAuthorization && (final.decision === 'allow' || final.decision === 'observe' || reviewed)) {
         // The claim states the digest of what THIS Service is about to execute — only when the agent bound one (a digest for
         // an unbound authorization is refused by the issuer: this Service would be asserting a binding that does not exist).
         const claimDigest = payloadDigest !== undefined && signedDigest !== undefined ? payloadDigest : undefined;
-        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true });
+        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true, requireHumanApproval: reviewed });
         claimToken = claim.claimToken; claimAuthenticated = claim.counterpartyAuthenticated === true;
+        // No person approved this hold: the request still needs one, exactly as before — the agent escalates and waits.
+        if (reviewed && claim.reasonCode === 'ESCALATION_NOT_APPROVED') return final;
         if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
+        if (reviewed) {
+          if (!claim.approvedByHuman) {
+            // Granted without saying a person approved it — an issuer that predates §8.7.18 ignored the flag. Never execute
+            // on that: release the claim we just took and keep the escalate.
+            const released = await releaseAuthorization({ authorizationId: signed.authorizationId, claimToken, reason: 'ESCALATION_NOT_APPROVED' }).catch((err) => ({ ok: false, reasonCode: String(err?.message ?? err) }));
+            if (!released?.ok) console.warn(`[mcp-guard] could not release claimed authorization ${signed.authorizationId} after an unapproved grant (${released?.reasonCode ?? 'unknown'}) — nothing executed; it settles by reconciliation`);
+            return final;
+          }
+          permitted = { ...final, decision: 'allow', reasonCode: 'ESCALATION_APPROVED', escalatedFor: final.reasonCode };
+        }
         // The grant states the digest the hold is bound to (null = unbound), so it must be the one this claim stated. The issuer
         // already refused a claim whose digest differed; this catches an issuer that did NOT compare — one that predates payload
         // binding ignores the header and its grant carries no digest at all, which is "not enforced", never "fine". Only
@@ -770,7 +803,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       }
       // On a claimed permit the Service that executes needs the claim token to settle or release the
       // hold afterwards (non-enumerable — see withClaim).
-      return withClaim(final, signed.authorizationId, claimToken, claimAuthenticated);
+      return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
     } catch (err) {
       return { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
     }
