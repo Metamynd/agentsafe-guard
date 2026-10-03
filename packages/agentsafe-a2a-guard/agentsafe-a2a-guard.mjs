@@ -296,6 +296,8 @@ function assertTrustedContext(tc, where) {
 
 export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, requireAuthorization = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false } = {}) {
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
+  // TLS or loopback: only then may a grant's `approvedByHuman` lift an escalate (§8.7.18) — see agentsafe-mcp-guard.
+  const issuerChannelAuthenticated = !!base && (/^https:\/\//i.test(base) || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(base));
   // With no policyPublicKey, nothing but the transport vouches for the policy bundle. Over plain http:// nothing does: a
   // proxy on the path can rewrite the rules and the guard would enforce the forged ones. A custom fetchBundle is the
   // integrator's own source, so it is left to them. (agentsafe-mcp-guard's D-08 rule, which this guard lacked until 0.13.3.)
@@ -342,7 +344,8 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
   // `x402: true` declares the hold is settled by an x402 payment (MAGP §8.7.9 / §11): the issuer records it as x402-bound, so a
   // settlement below the authorization (or a release after the claim) must be confirmed by an independent observer. It only
   // widens checks, so it is a plain body flag; unset, the claim request is exactly as before.
-  async function claimAuthorization({ authorizationId, payloadDigest, x402 = false } = {}) {
+  // `requireHumanApproval: true` (MAGP §8.7.18): grant only a hold a PERSON approved — see agentsafe-mcp-guard's own note.
+  async function claimAuthorization({ authorizationId, payloadDigest, x402 = false, requireHumanApproval = false } = {}) {
     if (!authorizationId) return { claimed: false, reasonCode: 'AUTHORIZATION_REQUIRED' };
     if (!base) throw new Error('issuerApi is required to claim an authorization');
     if (payloadDigest !== undefined && !isPayloadDigest(payloadDigest)) return { claimed: false, reasonCode: 'PAYLOAD_DIGEST_INVALID' };
@@ -355,10 +358,12 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         // header: the issuer compares it with the digest the AGENT signed for this authorization and refuses the claim (leaving the
         // hold unclaimed) on any difference. Payload binding, spec 8.3.9 / 8.7.11.
         const auth = serviceAuthHeaders('claim', authorizationId, [idempotencyKey, ...(payloadDigest ? [claimDigestField(payloadDigest)] : [])]);
+        const flags = { ...(x402 === true ? { x402: true } : {}), ...(requireHumanApproval === true ? { requireHumanApproval: true } : {}) };
+        const hasFlags = Object.keys(flags).length > 0;
         const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/effect/dispatching`, {
           method: 'POST',
-          headers: { ...auth, 'idempotency-key': idempotencyKey, ...(payloadDigest ? { [PAYLOAD_DIGEST_HEADER]: payloadDigest } : {}), ...(x402 === true ? { 'Content-Type': 'application/json' } : {}) },
-          ...(x402 === true ? { body: JSON.stringify({ x402: true }) } : {}),
+          headers: { ...auth, 'idempotency-key': idempotencyKey, ...(payloadDigest ? { [PAYLOAD_DIGEST_HEADER]: payloadDigest } : {}), ...(hasFlags ? { 'Content-Type': 'application/json' } : {}) },
+          ...(hasFlags ? { body: JSON.stringify(flags) } : {}),
         });
         const body = await res.json().catch(() => null);
         // Ambiguous, so worth one retry with the same key: a 5xx, or EFFECT_TRANSITION_CONTENDED (an overlapping
@@ -375,6 +380,8 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
           merchant: body?.data?.merchant,
           // The digest the agent signed for this authorization (null = unbound); absent from an issuer that predates it.
           payloadDigest: body?.data?.payloadDigest,
+          // Whether a person approved this hold (§8.7.18). Only `true` counts; absent (an older issuer) is not an approval.
+          approvedByHuman: body?.data?.approvedByHuman === true,
           // The settlement token the issuer hands ONLY the caller whose claim succeeded. Once a hold is
           // claimed it can be settled below its amount, or voided, only with this token — so the skill
           // that executes must keep it and present it (captureAuthorization / releaseAuthorization).
@@ -640,13 +647,26 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
           ? { ...verdict, decision: 'escalate', reasonCode: modeGate.reasonCode }
           : verdict;
       let claimToken; let claimAuthenticated = false;
-      if (requireAuthorization && (final.decision === 'allow' || final.decision === 'observe')) {
+      // An ESCALATE with an authorization attached may already have been decided by a person (MAGP §8.7.18) — the issuer
+      // says whether, never the request. Only an escalate is lifted; see agentsafe-mcp-guard's verifyRequest for the full note.
+      const reviewed = requireAuthorization && final.decision === 'escalate' && !!signed.authorizationId && issuerChannelAuthenticated;
+      let permitted = final;
+      if (requireAuthorization && (final.decision === 'allow' || final.decision === 'observe' || reviewed)) {
         // The claim states the digest of what THIS receiver is about to execute — only when the agent bound one (a digest for an
         // unbound authorization is refused by the issuer: this receiver would be asserting a binding that does not exist).
         const claimDigest = payloadDigest !== undefined && signedDigest !== undefined ? payloadDigest : undefined;
-        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true });
+        const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true, requireHumanApproval: reviewed });
         claimToken = claim.claimToken; claimAuthenticated = claim.counterpartyAuthenticated === true;
+        if (reviewed && claim.reasonCode === 'ESCALATION_NOT_APPROVED') return final;
         if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
+        if (reviewed) {
+          if (!claim.approvedByHuman) {
+            const released = await releaseAuthorization({ authorizationId: signed.authorizationId, claimToken, reason: 'ESCALATION_NOT_APPROVED' }).catch((err) => ({ ok: false, reasonCode: String(err?.message ?? err) }));
+            if (!released?.ok) console.warn(`[a2a-guard] could not release claimed authorization ${signed.authorizationId} after an unapproved grant (${released?.reasonCode ?? 'unknown'}) — nothing executed; it settles by reconciliation`);
+            return final;
+          }
+          permitted = { ...final, decision: 'allow', reasonCode: 'ESCALATION_APPROVED', escalatedFor: final.reasonCode };
+        }
         // The grant states the digest the hold is bound to (null = unbound), so it must be the one this claim stated. The issuer
         // already refused a claim whose digest differed; this catches an issuer that did NOT compare — one that predates payload
         // binding ignores the header and its grant carries no digest, which is "not enforced", never "fine". Only reachable when
@@ -658,7 +678,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         if (claim.currency !== undefined && claim.currency !== currency) return { decision: 'block', reasonCode: 'AUTHORIZATION_CURRENCY_MISMATCH' };
         if (claim.merchant !== undefined && claim.merchant !== merchant) return { decision: 'block', reasonCode: 'AUTHORIZATION_MERCHANT_MISMATCH' };
       }
-      return withClaim(final, signed.authorizationId, claimToken, claimAuthenticated);
+      return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
     } catch (err) {
       return { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
     }

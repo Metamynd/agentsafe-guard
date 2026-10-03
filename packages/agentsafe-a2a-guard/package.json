@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/agentsafe-a2a-guard",
-  "version": "0.13.3",
+  "version": "0.14.0",
   "description": "Zero-dependency trustless governance for the A2A (Agent2Agent) protocol. The RECEIVING agent independently re-verifies a calling agent's signed MAGP envelope against the caller's own published policy — so a caller that ignores its own guard still cannot make your agent act.",
   "type": "module",
   "main": "./agentsafe-a2a-guard.mjs",
@@ -25,7 +25,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node a2a-guard.smoke.mjs && node a2a-claim-token.smoke.mjs && node a2a-payload-binding.smoke.mjs && node jurisdiction.smoke.mjs && node itinerary-context.smoke.mjs && node context-signature.smoke.mjs && node bundle-authentication.smoke.mjs"
+    "test": "node a2a-guard.smoke.mjs && node a2a-claim-token.smoke.mjs && node a2a-payload-binding.smoke.mjs && node jurisdiction.smoke.mjs && node itinerary-context.smoke.mjs && node context-signature.smoke.mjs && node bundle-authentication.smoke.mjs && node a2a-approved-escalation.smoke.mjs"
   },
   "engines": {
     "node": ">=18"
