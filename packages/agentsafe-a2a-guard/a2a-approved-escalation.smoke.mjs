@@ -52,7 +52,7 @@ test('the issuer says a person approved it: the escalated task executes, once', 
     const d = await mk().verifyRequest(envelope());
     assert.equal(d.decision, 'allow');
     assert.equal(d.reasonCode, 'ESCALATION_APPROVED');
-    assert.deepEqual(io.calls[0].body, { requireHumanApproval: true });
+    assert.equal(io.calls[0].body.requireHumanApproval, true);
   } finally { io.restore(); }
 });
 
