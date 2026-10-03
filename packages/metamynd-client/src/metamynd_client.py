@@ -64,13 +64,16 @@ directly. The enforcement boundary is a SEPARATE process that holds the tool and
 credentials and re-verifies the signed request itself — `@metamynd/agentsafe-http-gateway`
 or an MCP server using `agentsafe-mcp-guard`.
 
-Parallel tool calls (0.8.0). A refused SYNC tool raises `GovernanceBlocked`; frameworks that
-run several sync tool calls of one model turn in worker threads (PydanticAI, LangGraph's
-`ToolNode`) abort the turn on that exception while sibling calls already in their threads
-keep going — they are authorized and run, and their results reach nobody. Prefer `async def`
-tools (a cancelled async call is cancelled, and a hold it created is released), or pass
-`guard_tool(..., on_refusal="return")` so a refusal comes back as a `GovernanceRefusal`
-value the framework hands to the model, and no exception aborts the turn.
+Tools you hand to an agent framework: wrap them with `guard_agent_tool` (0.9.0). A refused
+tool wrapped with plain `guard_tool` RAISES `GovernanceBlocked` — the right default for code
+that calls a tool itself, where an exception can never be mistaken for a result. But
+frameworks that run several SYNC tool calls of one model turn in worker threads (PydanticAI,
+LangGraph's `ToolNode`) abort the turn on that exception while sibling calls already in their
+threads keep going — authorized and run, with results that reach nobody, so a retried turn can
+do them twice. `guard_agent_tool` returns the refusal instead (a `GovernanceRefusal`, a dict the
+framework hands to the model as that call's result), so the turn completes and the model sees
+every outcome. `async def` tools are safe either way (a cancelled async call is cancelled, and
+a hold it was granted is released).
 
 Jurisdiction (0.6.0). Pass `jurisdiction="SG"` (ISO 3166-1 alpha-2) to `authorize` /
 `sign_request`: it is sent as a top-level field and SIGNED (the v2 message, MAGP §8.3.12 —
@@ -158,13 +161,14 @@ __all__ = [
     "PayloadNotCanonicalizable",
     "DaemonError",
     "guard_tool",
+    "guard_agent_tool",
     "current_governance",
     "governance_headers",
     "GovernanceBlocked",
     "GovernanceRefusal",
 ]
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1433,6 +1437,11 @@ class GovernanceBlocked(RuntimeError):
 # with one of these), not "the gate refused this request". Telling the model never to retry those would be wrong.
 _NO_DECISION_REASONS = frozenset({"", "UNKNOWN", "REFUSED"})
 
+# Refusals by a limit that frees itself over time: the same request can pass later, though no change of arguments makes
+# it pass now. "Do not retry" was wrong for these (pre-beta evaluation 2026-10-03, L-a: the shared sandbox's per-caller
+# share refills as its window rolls).
+_TIME_BOUND_REASONS = frozenset({"SANDBOX_CALLER_SHARE_EXCEEDED", "RATE_LIMIT_EXCEEDED", "CIRCUIT_BREAKER_OPEN"})
+
 
 def _refusal_message(verdict: Verdict, action: str) -> str:
     """The text a model reads for a refusal: what happened, and whether retrying could ever help."""
@@ -1440,6 +1449,9 @@ def _refusal_message(verdict: Verdict, action: str) -> str:
         return f"Held for human review: {verdict.reason_code}. {action} did not run. It is held for a human; do not retry it."
     if (verdict.reason_code or "") in _NO_DECISION_REASONS:
         return f"The governance gate did not give a decision, so {action} did not run. It may be retried later."
+    if verdict.reason_code in _TIME_BOUND_REASONS:
+        return (f"Refused by governance: {verdict.decision}/{verdict.reason_code}. {action} did not run. This limit is "
+                "temporary: the same request may pass later, but changing its arguments will not make it pass now.")
     return f"Refused by governance: {verdict.decision}/{verdict.reason_code}. {action} did not run. Do not retry it with different arguments."
 
 
@@ -1517,9 +1529,10 @@ def guard_tool(
     an unreachable gate and a payload that cannot be bound still raise, and the tool still never
     runs in any case:
       - `"raise"` (default): raise `GovernanceBlocked`, as above.
-      - `"return"`: return a `GovernanceRefusal` (a JSON-ready dict) instead. Use this when a
+      - `"return"`: return a `GovernanceRefusal` (a JSON-ready dict) instead — what
+        `guard_agent_tool` does, and what a tool handed to an agent framework should do. When a
         framework runs several SYNC tool calls of one model turn in parallel threads (PydanticAI,
-        LangGraph's `ToolNode`): there, one raised refusal aborts the turn while the sibling calls
+        LangGraph's `ToolNode`), one raised refusal aborts the turn while the sibling calls
         already in their threads go on — authorized and run, with results nobody receives. A
         returned refusal is just that call's result; the turn completes and the model sees every
         outcome.
@@ -1676,6 +1689,31 @@ def guard_tool(
         return result
 
     return governed
+
+
+def guard_agent_tool(client: "MetaMyndClient", action: str, fn: "Any", map_args: "Any" = None) -> "Any":
+    """Wrap a tool you hand to an AGENT FRAMEWORK so it runs ONLY on a permit (0.9.0).
+
+    Exactly `guard_tool(client, action, fn, map_args, on_refusal="return")`: a refusal comes back as a
+    `GovernanceRefusal` — a JSON-ready dict the framework gives the model as that call's result (`refused`,
+    `decision`, `reasonCode`, `escalationId`, `message`) — instead of an exception. The tool still never runs on
+    a refusal, and an unreachable gate still raises.
+
+    Why a separate name rather than a different default: code that calls a guarded tool ITSELF should get an
+    exception for a refusal, because a returned value can be mistaken for the tool's result — so `guard_tool`
+    keeps raising. A framework is the opposite case. PydanticAI and LangGraph's `ToolNode` run the SYNC tool calls
+    of one model turn in parallel threads; a raised refusal aborts the turn while the sibling calls already running
+    go on — authorized and executed, with results nobody receives, so a retried turn can do them twice. A returned
+    refusal is just one call's result: the turn completes, the model sees every outcome, and it can explain the
+    refusal or ask for approval (an escalate carries `escalationId` for `client.wait_for_escalation`).
+
+        agent.tool_plain(guard_agent_tool(client, "flight-purchase", book_flight, map_args))   # PydanticAI
+        ToolNode([guard_agent_tool(client, "purchase-order", raise_po, map_args)])              # LangGraph
+
+    Signature, type hints and sync/async-ness are preserved, so a framework builds the same tool schema it would
+    for `fn` unguarded.
+    """
+    return guard_tool(client, action, fn, map_args, on_refusal="return")
 
 
 # The signed request of the guarded tool call currently running, if any. A ContextVar, so it is

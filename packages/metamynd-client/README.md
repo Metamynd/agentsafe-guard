@@ -123,15 +123,30 @@ your agent takes, and records every decision, but code that can import `book_fli
 uses) can still call it directly. The enforcement boundary is a **separate process** that holds the tool and its
 credentials and re-verifies the signed request — see [Behind a gateway or MCP server](#behind-a-gateway-or-mcp-server).
 
-### Parallel tool calls: `on_refusal` (0.8.0)
+### Tools you hand to an agent framework: `guard_agent_tool` (0.9.0)
 
-When a model asks for several tools in one turn, PydanticAI and LangGraph's default `ToolNode` run the **sync** ones
-in worker threads. A refused call that raises `GovernanceBlocked` aborts the turn — while the sibling calls already
-in their threads keep going: authorized, run, and their results delivered to nobody. Three fixes, best first:
+**Wrap every tool you give a framework with `guard_agent_tool`; keep `guard_tool` for code that calls a tool itself.**
+
+```python
+agent.tool_plain(guard_agent_tool(client, "flight-purchase", book_flight, map_args))   # PydanticAI
+ToolNode([guard_agent_tool(client, "purchase-order", raise_po, map_args)])              # LangGraph
+```
+
+`guard_agent_tool` is `guard_tool(..., on_refusal="return")`: a refusal comes back as the call's **result** (a
+`GovernanceRefusal` the model reads) instead of an exception. Why it matters: when a model asks for several tools in
+one turn, PydanticAI and LangGraph's default `ToolNode` run the **sync** ones in worker threads. A refusal that
+*raises* aborts the turn — while the sibling calls already in their threads keep going: authorized, run, and their
+results delivered to nobody, so a retried turn can do them twice. A returned refusal is just one call's result: the
+turn completes and the model sees every outcome.
+
+`guard_tool` keeps raising by default on purpose: code that calls a guarded tool directly should get an exception
+for a refusal — a returned value could be mistaken for the tool's result.
+
+Other ways to the same end:
 
 - **Use `async def` tools.** A cancelled async guarded call is cancelled, and a hold it was already granted is
   released.
-- **`guard_tool(..., on_refusal="return")`.** A refusal is returned as a `GovernanceRefusal` — a JSON-ready dict
+- **`guard_tool(..., on_refusal="return")`** (what `guard_agent_tool` does). A refusal is returned as a `GovernanceRefusal` — a JSON-ready dict
   (`refused`, `action`, `decision`, `reasonCode`, `escalationId`, `message`; the full verdict on `.verdict`) — so it
   is just that call's result, the turn completes, and the model sees every outcome. `on_refusal=callable` gets the
   `GovernanceBlocked` and returns whatever the tool should return instead. An `async def` handler needs an `async def` tool; with a sync tool it raises `TypeError` when wrapping (0.8.1). Only governance refusals are returned: an
@@ -296,14 +311,18 @@ write failed.
 
 ## Examples
 
-Six runnable examples in
-[`docs/integration/examples`](https://github.com/Metamynd/agentsafe-guard) — each runs offline
-against a test gate, and CI runs them: `langgraph_agent.py`, `openai_agents_agent.py`,
-`crewai_agent.py`, `langchain_agent.py`, `pydantic_ai_agent.py`, and `plain_python_agent.py` (no
-framework: the whole lifecycle — authorize, hold, gateway handoff, capture, void, outcome — in one
-file). Frameworks are imported lazily, so an example still runs the governance without its
-framework installed.
-
+Six runnable examples, each a single file you can download from
+[metamynd.ai/developers/python](https://metamynd.ai/developers/python). Each runs offline against a
+test gate, and CI runs them:
+[`langgraph_agent.py`](https://metamynd.ai/examples/langgraph_agent.py),
+[`openai_agents_agent.py`](https://metamynd.ai/examples/openai_agents_agent.py),
+[`crewai_agent.py`](https://metamynd.ai/examples/crewai_agent.py),
+[`langchain_agent.py`](https://metamynd.ai/examples/langchain_agent.py),
+[`pydantic_ai_agent.py`](https://metamynd.ai/examples/pydantic_ai_agent.py), and
+[`plain_python_agent.py`](https://metamynd.ai/examples/plain_python_agent.py) (no framework: the
+whole lifecycle — authorize, hold, gateway handoff, capture, void, outcome — in one file).
+Frameworks are imported lazily, so an example still runs the governance without its framework
+installed.
 ## Scope
 
 This is the entry price, not a full SDK: it signs and submits authorize requests, returns the

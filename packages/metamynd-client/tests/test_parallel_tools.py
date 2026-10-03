@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from _support import new_agent_key
 from fake_gate import FakeGate
-from metamynd_client import GovernanceBlocked, GovernanceRefusal, MetaMyndClient, governance_headers, guard_tool
+from metamynd_client import GovernanceBlocked, GovernanceRefusal, MetaMyndClient, governance_headers, guard_agent_tool, guard_tool
 
 CTX = lambda vendor, amount: {"amount": amount, "merchant": vendor, "context": {"riskLevel": "low"}}  # noqa: E731
 HIGH = lambda vendor, amount: {"amount": amount, "merchant": vendor, "context": {"riskLevel": "high"}}  # noqa: E731
@@ -123,6 +123,17 @@ class OnRefusalReturn(_Base):
         real = GovernanceRefusal(Verdict(decision="block", reason_code="SOP_SPEND_CAP"), "book_flight")
         self.assertIn("Do not retry it with different arguments", real["message"])
 
+    def test_a_limit_that_refills_says_it_is_temporary_not_never_retry(self) -> None:
+        # L-a (2026-10-03 eval): the shared sandbox's per-caller share refills as its window rolls, so "do not retry"
+        # was wrong. Time-bound limits say the same request may pass later; arguments still cannot make it pass now.
+        from metamynd_client import Verdict
+
+        for code in ("SANDBOX_CALLER_SHARE_EXCEEDED", "RATE_LIMIT_EXCEEDED", "CIRCUIT_BREAKER_OPEN"):
+            message = GovernanceRefusal(Verdict(decision="block", reason_code=code), "book_flight")["message"]
+            self.assertIn("temporary", message, code)
+            self.assertNotIn("Do not retry", message, code)
+            self.assertIn("changing its arguments will not make it pass", message, code)
+
     def test_an_async_handler_on_a_sync_tool_is_refused_at_wrap_time(self) -> None:
         # 0.8.1: a sync tool returns the handler's result as-is, so an async handler would hand the framework an
         # un-awaited coroutine. Refused when wrapping, before anything is authorized.
@@ -173,6 +184,45 @@ class ParallelSyncCalls(_Base):
             with self.assertRaises(GovernanceBlocked):
                 list(pool.map(lambda c: c[0](*c[1]), [(raise_limit, ("skyward-air", 1)), (book, ("skyward-air", 100))]))
         self.assertEqual([a for _, a, _ in self.ran], [100], "the sibling ran anyway; its result reached nobody")
+
+
+class GuardAgentTool(_Base):
+    """`guard_agent_tool` (0.9.0): the named entry point for tools handed to an agent framework (M-5)."""
+
+    def test_it_is_guard_tool_with_refusals_returned(self) -> None:
+        result = guard_agent_tool(self.client, "permissions.update", self.tool, CTX)("skyward-air", 100)
+        self.assertIsInstance(result, GovernanceRefusal)
+        self.assertEqual(self.ran, [], "a refused tool must not run")
+        permitted = guard_agent_tool(self.client, "flight-purchase", self.tool, CTX)("skyward-air", 100)
+        self.assertEqual(permitted["pnr"], "PNR-1")
+
+    def test_a_turn_of_parallel_sync_calls_completes_with_every_outcome(self) -> None:
+        """The M-5 shape, fixed by the entry point every framework example now uses."""
+        self.gate.delay = 0.2
+        book = guard_agent_tool(self.client, "flight-purchase", self.tool, CTX)
+        raise_limit = guard_agent_tool(self.client, "permissions.update", self.tool, CTX)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda c: c[0](*c[1]), [(raise_limit, ("skyward-air", 1)), (book, ("skyward-air", 100))]))
+        self.assertIsInstance(results[0], GovernanceRefusal)
+        self.assertEqual(results[1]["pnr"], "PNR-1", "the sibling's result reached the caller")
+
+    def test_signature_and_async_ness_are_preserved_for_the_framework(self) -> None:
+        import inspect
+
+        sync_guarded = guard_agent_tool(self.client, "flight-purchase", self.tool, CTX)
+        self.assertEqual(inspect.signature(sync_guarded), inspect.signature(self.tool))
+
+        async def book(vendor: str, amount: float) -> dict:
+            return {"pnr": "PNR-A"}
+
+        async_guarded = guard_agent_tool(self.client, "flight-purchase", book, CTX)
+        self.assertTrue(inspect.iscoroutinefunction(async_guarded), "an async tool must stay async")
+        self.assertIsInstance(asyncio.run(guard_agent_tool(self.client, "permissions.update", book, CTX)("x", 1)), GovernanceRefusal)
+
+    def test_guard_tool_still_raises_by_default(self) -> None:
+        """For code that calls a tool itself: an exception can never be mistaken for a result."""
+        with self.assertRaises(GovernanceBlocked):
+            guard_tool(self.client, "permissions.update", self.tool, CTX)("skyward-air", 100)
 
 
 class LangGraphToolNode(_Base):

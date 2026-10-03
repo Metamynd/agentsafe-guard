@@ -625,6 +625,8 @@ export function createGuard(opts = {}) {
       mandate: match?.document,
       mandateFound: !!match,
       anyMandates: mandates.length > 0,
+      // Granted once and revoked (bundle `revokedActions`, §6.2.6): it only names WHICH refusal, never whether to refuse.
+      revoked: Array.isArray(b.revokedActions) && b.revokedActions.includes(action),
     };
   }
 
@@ -723,7 +725,7 @@ export function createGuard(opts = {}) {
       const sig = b?.compiledSignature ?? b?.proof?.signature;
       if (!anchor?.sigDigest || !sig || _sha256(sig) !== anchor.sigDigest) return authorize(input);
     }
-    const { mandateFound, anyMandates, ...bundleForAction } = _bundleFor(b, action);
+    const { mandateFound, anyMandates, revoked, ...bundleForAction } = _bundleFor(b, action);
     // No mandate covers this action at all — refuse outright rather than let evaluateLocally
     // silently allow (its documented "omit mandate to skip the layer" behavior is for a
     // caller that never intended a mandate check, not for one that looked and found none).
@@ -738,7 +740,7 @@ export function createGuard(opts = {}) {
         reportLocalDecision(action, local.decision, local.reasonCode);
         return local;
       }
-      const local = { decision: 'block', reasonCode: anyMandates ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE', authorizationId: null, remaining: null, proofRef: null };
+      const local = { decision: 'block', reasonCode: revoked ? 'MANDATE_REVOKED' : anyMandates ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE', authorizationId: null, remaining: null, proofRef: null };
       reportLocalDecision(action, local.decision, local.reasonCode);
       return local;
     }
