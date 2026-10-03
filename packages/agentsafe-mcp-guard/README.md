@@ -357,6 +357,25 @@ if (verdict.decision === 'allow' || verdict.decision === 'observe') await upstre
 | `PAYLOAD_DIGEST_HEADER` | `x-magp-payload-digest`, the header a claim carries it in |
 | `PayloadNotCanonicalizable` | the error class thrown above |
 
+### Serve only the agents you act for (`allowedAgents`) — since 0.20.0
+
+Every check above judges the **caller** by the **caller's own** mandate and SOPs, which the caller's owner writes. It answers
+"may this agent do this?", never "is this an agent I act for?". So a Service that holds one owner's credentials (an agent's
+own tool gateway) and is left unpinned runs them for **any** agent on the platform whose own owner granted it an action of
+the same name. With `requireAuthorization` the claim does not stop it either: the hold belongs to the caller, and the
+caller's owner chooses which services may claim it. An independent tester did exactly this (XT-1, 2026-10-03).
+
+```js
+const guard = createMcpGuard({ serviceDid, issuerApi, policyPublicKey, requireAuthorization: true,
+  allowedAgents: ['did:hedera:testnet:z5mQ…_0.0.10365442'] });   // the agent(s) this Service acts for
+```
+
+Any other agent is refused `AGENT_NOT_SERVED` (MAGP §16.3) after its signature is verified and **before** its policy is
+fetched or anything is claimed. `allowedAgents: 'any'` serves every governed agent on purpose — a public tool server, or
+one that resolves each call's credential per tenant. Left unset, the guard serves every agent as before and warns once at
+startup. A malformed value (an empty list, an empty string) throws at construction. `create-metamynd-agent` ≥ 0.14.11
+pins every gateway it scaffolds to the agent it provisioned; **a gateway scaffolded earlier is unpinned — add the line.**
+
 ### Pin the policy key (`policyPublicKey`)
 
 The bundle is what `verifyRequest` enforces, so whoever can change it in flight can change the rules. Pin MetaMynd's

@@ -122,7 +122,41 @@ for (const [label, extra] of [
       assert.match(server, new RegExp(`policyPublicKey: '${config.issuer.policyKey}'`), 'the bundle is pinned to the real issuer key, baked in at scaffold time');
     } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
   });
+
+  // XT-1 (pre-beta evaluation 2026-10-03, rerun on v1.78.0): an unpinned gateway ran its owner's tool for another tenant's
+  // agent whose own owner granted it the same action. Each gateway acts for the agent it was scaffolded for, and nobody else.
+  check(`${label}: allowedAgents pins it to the provisioned agent, on a guard that enforces the pin`, () => {
+    const out = mkdtempSync(join(tmpdir(), 'metamynd-parse-'));
+    try {
+      quiet(() => mod.scaffoldProject({
+        outDir: out, config, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false,
+        withGateway: true, ...(extra.neutral ? { demo: mod.defaultNeutralDemo() } : {}),
+      }));
+      const server = readFileSync(join(out, 'gateway', 'server.mjs'), 'utf8');
+      assert.ok(server.includes(`allowedAgents: ['${config.agentDid}']`), 'the gateway serves exactly the agent it was scaffolded for');
+      assert.ok(server.includes('if (!Array.isArray(guard.allowedAgents)) throw'), 'and refuses to start on a guard that would ignore the pin');
+      const deps = JSON.parse(readFileSync(join(out, 'gateway', 'package.json'), 'utf8')).dependencies;
+      // An mcp-guard below 0.20.0 ignores the option and serves every agent: the floor is part of the fix.
+      assert.match(deps['@metamynd/agentsafe-mcp-guard'], /^\^0\.(2\d|[3-9]\d)\./, `mcp-guard floor ${deps['@metamynd/agentsafe-mcp-guard']} enforces allowedAgents`);
+    } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+  });
 }
+
+check('a gateway is never scaffolded without the agent it serves', () => {
+  const out = mkdtempSync(join(tmpdir(), 'metamynd-parse-'));
+  try {
+    const { agentDid: _drop, ...noAgent } = config;
+    assert.throws(
+      () => quiet(() => mod.scaffoldProject({ outDir: out, config: noAgent, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: true })),
+      /agentDid/,
+    );
+    // The DID is written into the generated server as a string literal: anything but a plain DID is refused outright.
+    assert.throws(
+      () => quiet(() => mod.scaffoldProject({ outDir: out, config: { ...config, agentDid: "did:key:z6Mk'); process.exit(0); ('" }, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: true, force: true })),
+      /not a DID/,
+    );
+  } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+});
 
 // Every scaffolded gateway is pinned (2026-10-02): an unpinned one takes an interceptor's bundle as its rules. With no
 // key there is no gateway — the interactive flows fetch it first (ensurePolicyKey) or stop with the config saved.

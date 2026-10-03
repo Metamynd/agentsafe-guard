@@ -291,7 +291,32 @@ export function buildTaskStatus({ decision, reasonCode, escalationId, contextId,
  *   PRESENT one is always verified either way. Turn it on where the caller's context drives a decision and anything can
  *   sit between the caller and this agent — without it, a relay can strip the signature and rewrite the context.
  *   Overridable per skill (guardA2ATask option) and per call (verifyRequest option).
+ * @param {string[]|'any'} [cfg.allowedAgents] the agent DIDs this agent accepts tasks from (MAGP §16.3). A task signed by
+ *   any other agent is refused `AGENT_NOT_SERVED` before its policy is fetched or any authorization is claimed. Every check
+ *   judges the CALLER against the CALLER's own policy, so without this an agent that acts with its owner's credentials
+ *   does so for any agent on the platform whose own owner granted it a matching action (XT-1, ported from
+ *   agentsafe-mcp-guard). `'any'` accepts every governed agent on purpose. Left unset, it accepts every agent, as before
+ *   0.15.0, and says so once at startup.
  */
+/**
+ * The `allowedAgents` option (MAGP §16.3): `serves(agentDid)` over a verified agent DID, and `pinned` — reported as
+ * `guard.allowedAgents` (the DIDs, `'any'`, or `null` when unset). A list must name at least one DID, each a non-empty
+ * string — a typo is an agent that serves nobody or everybody, so it fails at startup. Unset accepts every agent, as
+ * before, and warns once. (Same as agentsafe-mcp-guard's.)
+ */
+export function agentAllowList(allowedAgents, label) {
+  if (allowedAgents === 'any') return { serves: () => true, pinned: 'any' };
+  if (allowedAgents === undefined || allowedAgents === null) {
+    console.warn(`[${label}] no allowedAgents: this agent accepts tasks from ANY agent whose own owner granted it the action, judged by that owner's rules. If it acts with one owner's credentials, pin allowedAgents: ['<agent DID>'] (MAGP §16.3); pass allowedAgents: 'any' to serve every governed agent on purpose.`);
+    return { serves: () => true, pinned: null };
+  }
+  if (!Array.isArray(allowedAgents) || allowedAgents.length === 0 || allowedAgents.some((d) => typeof d !== 'string' || d.trim() === '')) {
+    throw new Error(`${label}: allowedAgents must be 'any' or a non-empty array of agent DIDs`);
+  }
+  const allowed = new Set(allowedAgents.map((d) => d.trim()));
+  return { serves: (agentDid) => allowed.has(agentDid), pinned: Object.freeze([...allowed]) };
+}
+
 /**
  * A `trustedContext` this skill's author configured must be a real object, and any `riskLevel` in it a real level.
  * One that is not (a lookup that missed, a typo) means the deriver is BROKEN, and the safe reading is a refused
@@ -305,7 +330,8 @@ function assertTrustedContext(tc, where) {
   }
 }
 
-export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, requireAuthorization = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false } = {}) {
+export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, requireAuthorization = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents } = {}) {
+  const { serves: servesAgent, pinned: allowedAgentsPinned } = agentAllowList(allowedAgents, 'a2a-guard');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   // TLS or loopback: only then may a grant's `approvedByHuman` lift an escalate (§8.7.18) — see agentsafe-mcp-guard.
   const issuerChannelAuthenticated = !!base && (/^https:\/\//i.test(base) || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(base));
@@ -600,6 +626,9 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       if (!verifyDidSignature(agentDid, message, signature)) {
         return { decision: 'block', reasonCode: 'SIGNATURE_INVALID' };
       }
+      // Is this an agent this one accepts tasks from at all (§16.3)? Asked of the identity the signature just proved, before
+      // anything else: everything below judges the caller by the caller's own policy, which another owner writes.
+      if (!servesAgent(agentDid)) return { decision: 'block', reasonCode: 'AGENT_NOT_SERVED' };
       // The agent's context signature (context-claim binding), in the gate's order: after the request signature, before
       // payload binding and before any rule. The itinerary is otherwise unsigned, so without this a relay between the agent
       // and this receiver could rewrite what the rules below judge. The object hashed is the one evaluated below.
@@ -823,5 +852,5 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
     };
   }
 
-  return { verifyRequest, guardA2ATask, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, serviceDid: serviceDid ?? null };
+  return { verifyRequest, guardA2ATask, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, serviceDid: serviceDid ?? null, allowedAgents: allowedAgentsPinned };
 }
