@@ -53,6 +53,20 @@ const REQUIRE_AUTHORIZATION = process.env.AGENTSAFE_REQUIRE_AUTHORIZATION !== 'f
 // POST /transfer-funds passed through, HTTP 200) — set this when the routes file is meant to be
 // a complete allow-list, not a partial one.
 const DENY_BY_DEFAULT = process.env.AGENTSAFE_DENY_BY_DEFAULT === 'true';
+// The agents this gateway acts for (MAGP §16.3): comma-separated DIDs, or `any`. Every check the guard makes judges the
+// caller by the caller's OWN policy, so a gateway holding one owner's upstream credential, left unpinned, runs it for any
+// agent on the platform whose owner granted it a matching action (XT-1). Unset keeps serving every agent, with a warning.
+// `any` is right only where each call's credential is resolved per tenant (the Credential Vault below) or the upstream is
+// public.
+// Set but blank (an unfilled compose/k8s variable) is a startup error, never "unset": reading it as unset would quietly
+// serve every agent — the very gap the variable exists to close.
+const ALLOWED_AGENTS = (() => {
+  if (process.env.AGENTSAFE_ALLOWED_AGENTS === undefined) return undefined;
+  const raw = process.env.AGENTSAFE_ALLOWED_AGENTS.trim();
+  if (!raw) throw new Error('AGENTSAFE_ALLOWED_AGENTS is set but empty. Set it to the agent DID(s) this gateway acts for (comma-separated), or to `any`, or unset it.');
+  if (raw === 'any') return 'any';
+  return raw.split(',').map((d) => d.trim()).filter(Boolean);
+})();
 // Credential Vault (Module G) — OPTIONAL. Unset CREDENTIAL_VAULT_URL → no resolveCredential
 // hook is built at all, identical to every version of this file before this feature existed.
 //
@@ -169,7 +183,13 @@ async function main() {
     // Refuse a request whose context (itinerary/trace/materiality) the agent did not sign (CONTEXT_SIGNATURE_REQUIRED).
     // Off by default — agentsafe-guard >= 0.17.0 signs it unless `signContext: false`, older agents do not; a present one is always checked.
     requireContextSignature: process.env.AGENTSAFE_REQUIRE_CONTEXT_SIGNATURE === 'true',
+    allowedAgents: ALLOWED_AGENTS,
   });
+  // A pin the guard does not report is a pin it does not enforce: an mcp-guard below 0.20.0 (a stale lockfile) ignores the
+  // option and serves every agent. Refuse to start rather than run unpinned.
+  if (ALLOWED_AGENTS !== undefined && guard.allowedAgents == null) {
+    throw new Error(`AGENTSAFE_ALLOWED_AGENTS is set, but @metamynd/agentsafe-mcp-guard ${RESOLVED_MCP_GUARD_VERSION} does not enforce it (needs >= 0.20.0). Reinstall dependencies.`);
+  }
   const routes = loadRoutes();
   if (!DENY_BY_DEFAULT) {
     console.warn(

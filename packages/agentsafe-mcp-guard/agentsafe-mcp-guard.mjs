@@ -105,6 +105,26 @@ function assertTrustedContext(tc, where) {
 }
 
 /**
+ * The `allowedAgents` option (MAGP §16.3): `serves(agentDid)` over a verified agent DID, and `pinned` — what the guard
+ * reports as `guard.allowedAgents` (the DIDs, `'any'`, or `null` when unset), so a gateway can refuse to start on a guard
+ * that does not enforce the pin it asked for. A list must name at least one DID, each a non-empty string: a typo here is
+ * a Service that serves nobody or everybody, so it fails at startup rather than at the first request. Unset serves every
+ * agent, as before, and warns once.
+ */
+export function agentAllowList(allowedAgents, label) {
+  if (allowedAgents === 'any') return { serves: () => true, pinned: 'any' };
+  if (allowedAgents === undefined || allowedAgents === null) {
+    console.warn(`[${label}] no allowedAgents: this Service acts for ANY agent whose own owner granted it the action, judged by that owner's rules. If it holds one owner's credentials, pin allowedAgents: ['<agent DID>'] (MAGP §16.3); pass allowedAgents: 'any' to serve every governed agent on purpose.`);
+    return { serves: () => true, pinned: null };
+  }
+  if (!Array.isArray(allowedAgents) || allowedAgents.length === 0 || allowedAgents.some((d) => typeof d !== 'string' || d.trim() === '')) {
+    throw new Error(`${label}: allowedAgents must be 'any' or a non-empty array of agent DIDs`);
+  }
+  const allowed = new Set(allowedAgents.map((d) => d.trim()));
+  return { serves: (agentDid) => allowed.has(agentDid), pinned: Object.freeze([...allowed]) };
+}
+
+/**
  * The issuer could not be reached — a network failure or a 5xx on the bundle fetch. Tagged so verifyRequest refuses it
  * GATE_UNREACHABLE, the agent guard's code for the same outage, instead of the catch-all GUARD_ERROR (eval 2026-10-03, N-6).
  * A 4xx is an answer, not an outage, and stays an ordinary error.
@@ -176,9 +196,17 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   >= 0.17.0 sends it unless `signContext: false`), and a PRESENT one is always verified either way. Turn it on where the
  *   agent's context drives a decision and anything can sit between the agent and this Service — without it, a relay can
  *   strip the signature and rewrite the context. Overridable per call (verifyRequest / guardIncomingTool option).
+ * @param {string[]|'any'} [cfg.allowedAgents] the agent DIDs this Service acts for (MAGP §16.3). A request signed by any
+ *   other agent is refused `AGENT_NOT_SERVED` before its policy is fetched or any authorization is claimed. Every check
+ *   below judges the CALLER against the CALLER's own policy — so without this, a Service that holds one owner's
+ *   credentials runs them for any agent on the platform whose own owner granted it an action of the same name (found
+ *   by an independent tester, XT-1: another tenant's agent executed through an agent's own gateway). Set it whenever
+ *   this Service works for one owner. `'any'` serves every governed agent on purpose — a public tool server. Left unset,
+ *   it serves every agent, as before 0.20.0, and says so once at startup.
  */
-export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
+  const { serves: servesAgent, pinned: allowedAgentsPinned } = agentAllowList(allowedAgents, 'mcp-guard');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   // Whether a claim RESPONSE from the issuer is integrity-protected in transit: TLS, or loopback (a local development
   // issuer). Only then may a grant's `approvedByHuman` lift an escalate (§8.7.18) — that one field turns a policy
@@ -226,6 +254,13 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     if (!verifyDidSignature(st.fromDid, st.nonceB, sigA)) {
       const e = new Error('handshake PROVE signature invalid');
       e.name = 'HandshakeFailed';
+      throw e;
+    }
+    // A channel is not opened to an agent this Service does not act for (§16.3) — proven identity, but not one it serves.
+    if (!servesAgent(st.fromDid)) {
+      const e = new Error('AGENT_NOT_SERVED: this Service does not act for ' + st.fromDid);
+      e.name = 'HandshakeFailed';
+      e.code = 'AGENT_NOT_SERVED';
       throw e;
     }
     return { channelId: crypto.randomUUID(), remoteDid: st.fromDid };
@@ -683,6 +718,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       if (!verifyDidSignature(agentDid, message, signature)) {
         return { decision: 'block', reasonCode: 'SIGNATURE_INVALID' };
       }
+      // 1-. Is this an agent this Service acts for at all (§16.3)? Asked of the identity the signature just proved, and
+      // before anything else: everything below judges the caller by the caller's own policy, which another owner writes.
+      if (!servesAgent(agentDid)) return { decision: 'block', reasonCode: 'AGENT_NOT_SERVED' };
       // 1a. The agent's context signature (context-claim binding), in the gate's order: after the request signature, before
       // payload binding and before any rule. The itinerary is otherwise unsigned, so without this a relay between the agent
       // and this Service could rewrite what the rules below judge. The object hashed is the one evaluated below.
@@ -1024,7 +1062,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     cache?.close();
   }
 
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, invalidateBundle, close, serviceDid };
+  // `allowedAgents`: the pin this guard enforces (the DIDs, 'any', or null when unset) — a gateway asserts it at startup,
+  // so a stale guard that predates the option (and would ignore it) cannot run unnoticed.
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, invalidateBundle, close, serviceDid, allowedAgents: allowedAgentsPinned };
 }
 
 /**

@@ -84,6 +84,15 @@ if (result?.state) {
 `guardIncomingTool` documents for MCP, one layer down: a guard registered for many skills must not
 let a cheap skill's valid envelope run an expensive one's handler.
 
+### Accept tasks only from the agents you act for (`allowedAgents`, 0.15.0, MAGP §16.3)
+
+The re-check judges the **calling** agent by **its own** policy, which its own owner writes — "may this agent do this?",
+never "is this an agent I act for?". An agent that acts with its owner's credentials and is left unpinned does so for any
+agent on the platform whose owner granted it a matching action (XT-1, found against agentsafe-mcp-guard; same here).
+`createA2aGuard({ …, allowedAgents: ['did:…'] })` refuses every other agent `AGENT_NOT_SERVED` after its signature is
+verified and before its policy is fetched or anything is claimed. `'any'` accepts every governed agent on purpose; unset
+accepts every agent as before and warns once at startup.
+
 ### The task input is held to what the agent signed (0.6.0, MAGP §8.3.9)
 
 The eight signed fields do not cover a payee or an account number, so the input of a task is otherwise unbound. Pass

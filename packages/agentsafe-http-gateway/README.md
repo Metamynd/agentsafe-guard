@@ -35,6 +35,18 @@ guard already verifies); the gateway forwards only on `allow`/`observe`.
 ]
 ```
 
+## Serve only the agents you act for (`allowedAgents`, `AGENTSAFE_ALLOWED_AGENTS`) — since 0.19.0
+
+The guard re-checks every request against the **calling** agent's own policy, which its own owner writes. A gateway that
+holds one owner's upstream credential and is left unpinned forwards for **any** agent on the platform whose owner granted
+it a matching action, and the claim does not stop it (the caller's owner chooses who may claim its holds). Pin it:
+`createMcpGuard({ …, allowedAgents: ['did:…'] })` (agentsafe-mcp-guard ≥ 0.20.0), or for `server.mjs`
+`AGENTSAFE_ALLOWED_AGENTS=did:…,did:…`. Any other agent gets `403 AGENT_NOT_SERVED` and is never forwarded (MAGP §16.3).
+`any` serves every governed agent on purpose — right only with the Credential Vault (each call's credential resolved per
+tenant) or a public upstream. Unset serves every agent as before, with a startup warning; set but empty is a startup
+error (an unfilled deployment variable must not read as "serve everyone"), and so is a pin on an mcp-guard below 0.20.0,
+which would ignore it — `guard.allowedAgents` reports the pin a guard enforces.
+
 ## Query strings are refused on governed routes — since 0.17.1
 
 **0.17.1 — a governed route refuses a URL query string the signature does not cover (`403 QUERY_NOT_BOUND`).** The
