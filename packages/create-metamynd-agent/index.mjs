@@ -140,7 +140,8 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // AGENT_NOT_ADMITTED, and a handshake signs only a plain-token nonce. Required: every scaffolded gateway sets the owner.
 // 0.23.0: acceptCounterpartyChallenge() — a Service signs its acceptance of an owner's registration (MAGP §8.7.6). No
 // template change; required with GATEWAY_VERSION below so the gateway never resolves a second guard of its own.
-const MCP_GUARD_VERSION = '^0.23.0';
+// 0.24.0: reportOutcome() signs a reportId and an occurrence count (aggregated refusals, a durable spool).
+const MCP_GUARD_VERSION = '^0.24.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -170,7 +171,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.20.0: `reportOutcomes`, which both hosted gateway templates set; depends on agentsafe-mcp-guard ^0.21.0.
 // 0.21.0: per-route allowedAgents; depends on agentsafe-mcp-guard ^0.22.0.
 // 0.22.0: depends on agentsafe-mcp-guard ^0.23.0.
-const GATEWAY_VERSION = '^0.22.0';
+// 0.23.0: refusals aggregated with their count, and `reportSpool` (both hosted templates set it); depends on agentsafe-mcp-guard ^0.24.0.
+const GATEWAY_VERSION = '^0.23.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `
@@ -1756,6 +1758,8 @@ const gateway = createHttpGateway({
   // Every request this gateway runs or refuses is reported, signed with the identity above, to your Activity Log (MAGP
   // 16.4). It claims nothing, so without this the issuer would never see what it executed - or that another agent tried.
   reportOutcomes: true,
+  // A report the issuer could not take (it was down, say) is kept here and re-sent, so nothing it saw is lost. Gitignored.
+  reportSpool: './reports.spool.jsonl',
   forward: async (req) => {
     let args = {};
     try { args = JSON.parse(req.rawBody?.toString('utf8') || '{}'); } catch { /* empty body */ }
@@ -2193,6 +2197,8 @@ const gateway = createHttpGateway({
   // What this gateway refuses itself (another agent, a rule, a binding failure) is reported, signed, to your Activity Log
   // (MAGP 16.4). Claimed executions are already there, through the claim.
   reportOutcomes: true,
+  // A report the issuer could not take (it was down, say) is kept here and re-sent, so nothing it saw is lost. Gitignored.
+  reportSpool: './reports.spool.jsonl',
   forward: async (req) => {
     let args = {};
     try { args = JSON.parse(req.rawBody?.toString('utf8') || '{}'); } catch { /* empty body */ }
@@ -2259,7 +2265,7 @@ function gatewayEnvExample() {
 }
 
 function gatewayGitignore() {
-  return `node_modules/\n.env\nservice.metamynd.json\n`;
+  return `node_modules/\n.env\nservice.metamynd.json\nreports.spool.jsonl\nreports.spool.jsonl.flushing\n`;
 }
 
 function gatewayReadme(slug, scope, port) {

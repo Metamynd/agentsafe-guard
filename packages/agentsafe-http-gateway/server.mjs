@@ -71,6 +71,8 @@ const ALLOWED_AGENTS = (() => {
 // audit trail of the owner of the agent it acts for, signed as SERVICE_DID (MAGP §16.4). Needs SERVICE_DID + SERVICE_KEY
 // and that DID registered as a counterparty by the owner. Off unless set.
 const REPORT_OUTCOMES = process.env.AGENTSAFE_REPORT_OUTCOMES === 'true';
+// Where reports the issuer could not take are kept and re-sent (JSON lines). Unset: such a report is lost after one retry.
+const REPORT_SPOOL = process.env.AGENTSAFE_REPORT_SPOOL || undefined;
 // The principal DID that owns this gateway's upstream credentials (§16.3): required with a list of agents, each of which must
 // belong to it (GATEWAY_OWNER_MISMATCH otherwise). Not needed with `any`.
 const GATEWAY_OWNER = (process.env.AGENTSAFE_GATEWAY_OWNER || '').trim() || undefined;
@@ -212,7 +214,7 @@ async function main() {
   if (resolveCredential) {
     console.log(`[gateway] Credential Vault hook ENABLED → ${CREDENTIAL_VAULT_URL} (connector "${CREDENTIAL_VAULT_CONNECTOR_ID}", header "${CREDENTIAL_VAULT_HEADER_NAME}")`);
   }
-  const gateway = createHttpGateway({ guard, routes, forward: forwardToUpstream, denyByDefault: DENY_BY_DEFAULT, resolveCredential, reportOutcomes: REPORT_OUTCOMES });
+  const gateway = createHttpGateway({ guard, routes, forward: forwardToUpstream, denyByDefault: DENY_BY_DEFAULT, resolveCredential, reportOutcomes: REPORT_OUTCOMES, reportSpool: REPORT_SPOOL });
 
   const server = http.createServer(async (req, res) => {
     try {

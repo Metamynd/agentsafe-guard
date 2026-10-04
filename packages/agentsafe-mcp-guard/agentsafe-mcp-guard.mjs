@@ -495,7 +495,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * refused foreign agent is filed under the agent the Service works for, never under the caller's owner. Visibility only:
    * never throws, never changes a decision. Resolves `{ ok, reasonCode, status? }`.
    */
-  async function reportOutcome({ signed, outcome, reasonCode, httpStatus, servedAgentDid } = {}) {
+  async function reportOutcome({ signed, outcome, reasonCode, httpStatus, servedAgentDid, reportId, occurrences } = {}) {
     if (!base) return { ok: false, reasonCode: 'NO_ISSUER' };
     if (outcome !== 'executed' && outcome !== 'refused') return { ok: false, reasonCode: 'REPORT_OUTCOME_INVALID' };
     const s = signed ?? {};
@@ -509,15 +509,19 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     const served = servedAgentDid ?? (callerServed ? s.agentDid : otherAdmitted);
     if (!served) return { ok: false, reasonCode: 'NO_SERVED_AGENT' };
     const status = Number.isInteger(httpStatus) ? httpStatus : null;
+    // This report's own id, kept across retries (a spooled report is re-signed with a fresh nonce later, and the issuer
+    // records it once by this id). `occurrences`: a coalesced burst of identical refusals; an execution is always 1.
+    const id = typeof reportId === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(reportId) ? reportId : crypto.randomUUID();
+    const count = outcome === 'refused' && Number.isInteger(occurrences) && occurrences > 1 ? Math.min(occurrences, 100_000) : 1;
     let auth;
     try {
-      auth = await serviceAuthHeaders('report', s.nonce, [served, s.agentDid, s.action, outcome, code, status == null ? '' : String(status)]);
+      auth = await serviceAuthHeaders('report', s.nonce, [served, s.agentDid, s.action, outcome, code, status == null ? '' : String(status), id, String(count)]);
     } catch (err) {
       return signingFailed(err);
     }
     if (!auth['x-magp-service-did']) return { ok: false, reasonCode: 'SERVICE_IDENTITY_REQUIRED' };
-    const request = { agentDid: s.agentDid, action: s.action, amount: Number(s.amount ?? 0), currency: s.currency ?? 'USD', merchant: s.merchant ?? '', resource: s.resource ?? null, nonce: s.nonce, issuedAt: s.issuedAt, signature: s.signature, ...(s.jurisdiction ? { jurisdiction: s.jurisdiction } : {}) };
-    const body = JSON.stringify({ servedAgentDid: served, outcome, reasonCode: code, httpStatus: status, request });
+    const request = { agentDid: s.agentDid, action: s.action, amount: Number(s.amount ?? 0), currency: s.currency ?? 'USD', merchant: s.merchant ?? '', resource: s.resource ?? null, nonce: s.nonce, issuedAt: s.issuedAt, signature: s.signature, ...(s.jurisdiction ? { jurisdiction: s.jurisdiction } : {}), ...(typeof s.payloadDigest === 'string' ? { payloadDigest: s.payloadDigest } : {}), ...(typeof s.authorizationId === 'string' ? { authorizationId: s.authorizationId } : {}) };
+    const body = JSON.stringify({ servedAgentDid: served, outcome, reasonCode: code, httpStatus: status, request, reportId: id, occurrences: count });
     // One retry, with the SAME signed headers, on a lost answer: a report that did land is answered ALREADY_RECORDED.
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
@@ -525,13 +529,13 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         const res = await fetch(`${base}/policy/gateway-reports`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(5000) });
         if (res.status >= 500 && attempt < 2) { await sleep(150); continue; }
         const json = await res.json().catch(() => null);
-        return { ok: res.ok, status: res.status, reasonCode: json?.data?.reasonCode ?? refusalCode(json, `REPORT_HTTP_${res.status}`) };
+        return { ok: res.ok, status: res.status, reasonCode: json?.data?.reasonCode ?? refusalCode(json, `REPORT_HTTP_${res.status}`), reportId: id };
       } catch (err) {
         if (attempt < 2) { await sleep(150); continue; }
-        return { ok: false, reasonCode: 'REPORT_UNREACHABLE', error: String(err?.message ?? err) };
+        return { ok: false, reasonCode: 'REPORT_UNREACHABLE', error: String(err?.message ?? err), reportId: id };
       }
     }
-    return { ok: false, reasonCode: 'REPORT_UNREACHABLE' };
+    return { ok: false, reasonCode: 'REPORT_UNREACHABLE', reportId: id };
   }
 
   /**

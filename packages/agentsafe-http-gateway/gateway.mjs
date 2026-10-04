@@ -508,7 +508,7 @@ function withHeader(headers, name, value) {
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
  */
-export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false, requireContextSignature, settleInBackground = true, settleRetryDelaysMs = [500, 2000], reportOutcomes = false } = {}) {
+export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false, requireContextSignature, settleInBackground = true, settleRetryDelaysMs = [500, 2000], reportOutcomes = false, reportSpool, reportSpoolRetryMs = 30_000, refusalWindowMs = 60_000 } = {}) {
   if (typeof forward !== 'function') throw new Error('createHttpGateway requires a forward(req) function');
   if (reportOutcomes && typeof guard?.reportOutcome !== 'function') {
     console.warn('[gateway] reportOutcomes is set, but this guard cannot report (needs @metamynd/agentsafe-mcp-guard >= 0.21.0) — nothing will be reported');
@@ -672,10 +672,90 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
    * Report one governed request in the background (reportOutcomes, MAGP §16.4). Never throws, never awaited by the caller.
    */
   const reportWarned = new Set();
-  // Refusals are coalesced: one report per (caller, reason) per minute. A refusal's caller is whoever sent the request, so a
-  // flood of junk to a governed route would otherwise become a flood of reports burying the owner's log (A-1 review, M2).
-  const REFUSAL_COALESCE_MS = 60_000;
-  const recentRefusals = new Map(); // `${callerDid}|${reasonCode}` -> until (ms)
+  /** Run a report in the background (drainSettlements waits for it); never throws, never changes a response. */
+  function background(promise) {
+    const p = Promise.resolve(promise).catch(() => {});
+    pendingSettlements.add(p);
+    p.finally(() => pendingSettlements.delete(p));
+  }
+  /** A failure worth retrying later: the issuer unreachable or overloaded, or the local signer briefly away. */
+  const transientReportFailure = (r) => r?.reasonCode === 'REPORT_UNREACHABLE' || r?.reasonCode === 'SERVICE_SIGNING_FAILED' || r?.status === 429 || (typeof r?.status === 'number' && r.status >= 500);
+
+  // Durable reporting (refinement plan phase 3): a report that fails for a transient reason is appended to `reportSpool` (a
+  // JSON-lines file) with its reportId, and re-sent — re-signed with a fresh nonce, the same reportId, so the issuer records
+  // it once — every `reportSpoolRetryMs` and at startup. A report the issuer REFUSED (unregistered gateway, bad request) is
+  // not retried. The spool is capped; past the cap the newest report is dropped and that is said once.
+  const SPOOL_CAP = 10_000;
+  let flushing = null;
+  async function spoolReport(params) {
+    if (!reportSpool) return false;
+    try {
+      const fsp = await import('node:fs/promises');
+      const existing = await fsp.readFile(reportSpool, 'utf8').catch(() => '');
+      if (existing.split('\n').filter(Boolean).length >= SPOOL_CAP) {
+        if (!reportWarned.has('SPOOL_FULL')) { reportWarned.add('SPOOL_FULL'); console.warn(`[gateway] report spool ${reportSpool} is full (${SPOOL_CAP}); further failed reports are dropped until it drains`); }
+        return false;
+      }
+      await fsp.appendFile(reportSpool, JSON.stringify(params) + '\n', 'utf8');
+      return true;
+    } catch (err) {
+      if (!reportWarned.has('SPOOL_WRITE')) { reportWarned.add('SPOOL_WRITE'); console.warn(`[gateway] could not write the report spool ${reportSpool}: ${err?.message ?? err}`); }
+      return false;
+    }
+  }
+  async function sendReport(params, { fromSpool = false } = {}) {
+    const r = await guard.reportOutcome(params);
+    if (r && r.ok === false && transientReportFailure(r)) {
+      if (!fromSpool) await spoolReport({ ...params, reportId: r.reportId ?? params.reportId });
+      return r;
+    }
+    // Once per reason: a gateway with no signing identity, or one its owner never registered, would otherwise say so on every request.
+    if (r && r.ok === false && r.reasonCode !== 'NOTHING_TO_REPORT' && !reportWarned.has(r.reasonCode)) {
+      reportWarned.add(r.reasonCode);
+      console.warn(`[gateway] outcome reports are not being recorded (${r.reasonCode}${r.status ? `, HTTP ${r.status}` : ''}) — see README "Reporting outcomes"`);
+    }
+    return r;
+  }
+  /** Re-send every spooled report once; those that fail transiently again go back to the spool. */
+  async function flushSpool() {
+    if (!reportSpool || typeof guard?.reportOutcome !== 'function') return 0;
+    if (flushing) return flushing;
+    flushing = (async () => {
+      const fsp = await import('node:fs/promises');
+      const work = `${reportSpool}.flushing`;
+      try { await fsp.rename(reportSpool, work); } catch { return 0; } // nothing spooled
+      const lines = (await fsp.readFile(work, 'utf8').catch(() => '')).split('\n').filter(Boolean);
+      let sent = 0;
+      for (const line of lines) {
+        let params; try { params = JSON.parse(line); } catch { continue; }
+        const r = await sendReport(params, { fromSpool: true }).catch(() => ({ ok: false, reasonCode: 'REPORT_UNREACHABLE' }));
+        if (r?.ok !== false) sent++;
+        else if (transientReportFailure(r)) await fsp.appendFile(reportSpool, line + '\n', 'utf8').catch(() => {});
+      }
+      await fsp.unlink(work).catch(() => {});
+      return sent;
+    })().finally(() => { flushing = null; });
+    return flushing;
+  }
+  if (reportOutcomes && reportSpool) {
+    background(flushSpool()); // what an earlier run left behind
+    const t = setInterval(() => background(flushSpool()), reportSpoolRetryMs);
+    t.unref?.();
+  }
+
+  // Refusals are aggregated (refinement plan phase 3; A-1 review, M2): the first refusal of a caller for a reason is reported
+  // at once, and the repeats within `refusalWindowMs` become ONE report carrying their count when the window closes —
+  // nothing is dropped, and a flood of junk to a governed route cannot bury the owner's log. Executions are never coalesced.
+  const refusalWindows = new Map(); // `${callerDid}|${reasonCode}` -> { until, extra, latest, timer }
+  function closeWindow(key) {
+    const w = refusalWindows.get(key);
+    if (!w) return;
+    clearTimeout(w.timer);
+    refusalWindows.delete(key);
+    // Carried by the LATEST repeat's signed request, so the aggregate shows the most recent attempt, not a copy of the
+    // first refusal (already reported on its own).
+    if (w.extra > 0) background(sendReport({ ...w.latest, occurrences: w.extra }));
+  }
   function queueReport(trace, result, thrown) {
     if (!reportOutcomes || typeof guard?.reportOutcome !== 'function' || !trace.route || !trace.request) return;
     const executed = trace.forwarded === true;
@@ -684,25 +764,19 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     const status = Number(result?.status);
     const httpStatus = Number.isInteger(status) ? status : null;
     const reasonCode = executed ? (thrown ? 'UPSTREAM_ERROR' : 'EXECUTED') : (result?.body?.reasonCode ?? trace.decision?.reasonCode ?? 'BLOCKED');
+    const params = { signed: trace.request, outcome: executed ? 'executed' : 'refused', reasonCode, httpStatus };
     if (!executed) {
-      const now = Date.now();
       const key = `${trace.request.agentDid}|${reasonCode}`;
-      if ((recentRefusals.get(key) ?? 0) > now) return;
-      if (recentRefusals.size > 5000) for (const [k, until] of recentRefusals) if (until <= now) recentRefusals.delete(k);
-      recentRefusals.set(key, now + REFUSAL_COALESCE_MS);
+      const open = refusalWindows.get(key);
+      if (open && open.until > Date.now()) { open.extra++; open.latest = params; return; }
+      if (open) closeWindow(key);
+      if (refusalWindows.size >= 5000) for (const k of [...refusalWindows.keys()].slice(0, 500)) closeWindow(k); // bound memory
+      const w = { until: Date.now() + refusalWindowMs, extra: 0, latest: null, timer: null };
+      w.timer = setTimeout(() => closeWindow(key), refusalWindowMs);
+      w.timer.unref?.();
+      refusalWindows.set(key, w);
     }
-    const p = Promise.resolve()
-      .then(() => guard.reportOutcome({ signed: trace.request, outcome: executed ? 'executed' : 'refused', reasonCode, httpStatus }))
-      .then((r) => {
-        // Once per reason: a gateway with no signing identity, or one its owner never registered, would otherwise say so on every request.
-        if (r && r.ok === false && r.reasonCode !== 'NOTHING_TO_REPORT' && !reportWarned.has(r.reasonCode)) {
-          reportWarned.add(r.reasonCode);
-          console.warn(`[gateway] outcome reports are not being recorded (${r.reasonCode}${r.status ? `, HTTP ${r.status}` : ''}) — see README "Reporting outcomes"`);
-        }
-      })
-      .catch(() => {});
-    pendingSettlements.add(p);
-    p.finally(() => pendingSettlements.delete(p));
+    background(sendReport(params));
   }
 
   async function handle(req) {
@@ -884,6 +958,8 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     return { ...upstream, governance: decision };
   }
 
+  /** Re-send what the report spool holds now (also runs on a timer and at startup). Resolves how many were recorded. */
+  handle.flushReports = () => flushSpool();
   /** How many hold close-outs (and outcome reports) are still running after their response went back. */
   handle.pendingSettlements = () => pendingSettlements.size;
   /**
@@ -891,6 +967,8 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
    * when it gave up (0 = all done). Call it on shutdown so a restart does not strand settlements already owed.
    */
   handle.drainSettlements = async (timeoutMs = 5000) => {
+    // Close every open refusal window first, so the counts it holds are reported (or spooled) before shutdown.
+    for (const key of [...refusalWindows.keys()]) closeWindow(key);
     const deadline = Date.now() + timeoutMs;
     while (pendingSettlements.size > 0 && Date.now() < deadline) {
       await Promise.race([Promise.allSettled([...pendingSettlements]), new Promise((r) => setTimeout(r, deadline - Date.now()))]);
