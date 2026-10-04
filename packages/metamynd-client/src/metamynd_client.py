@@ -168,7 +168,7 @@ __all__ = [
     "GovernanceRefusal",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -372,6 +372,7 @@ def normalize_jurisdiction(value: Optional[str]) -> Optional[str]:
 
 PAYLOAD_BINDING_PREFIX = "MAGP-PAYLOAD-v1"
 PAYLOAD_REBIND_PREFIX = "MAGP-PAYLOAD-REBIND-v1"
+AGENT_SETTLE_PREFIX = "MAGP-SETTLE-v1"
 PAYLOAD_DIGEST_PREFIX = "sha256:"
 MAX_CANONICAL_PAYLOAD_BYTES = 256 * 1024
 _MAX_PAYLOAD_DEPTH = 32
@@ -514,6 +515,13 @@ def payload_rebind_message(agent_did: str, action: str, authorization_id: str, n
     MODIFY leaves behind. Its own domain (a signature made for one message never verifies as the other) and it names the
     authorization id, so the digest is bound to THAT hold and cannot be lifted onto another."""
     return "|".join(_escape_field(v) for v in [PAYLOAD_REBIND_PREFIX, agent_did, action, authorization_id, nonce, issued_at, digest])
+
+
+def agent_settle_message(verb: str, agent_did: str, authorization_id: str, nonce: str, issued_at: str, fields: list[str]) -> str:
+    """The UTF-8 string an agent signs to capture or void its OWN hold that nobody has claimed (MAGP §8.7.4). `fields`:
+    capture → amountCharged (as JS prints it), bookingRef, settlementTxHash; void → reason ('' when absent). Domain-separated
+    (MAGP-SETTLE-v1), naming the verb and the authorization, so it cannot be replayed as any other call."""
+    return "|".join(_escape_field(v) for v in [AGENT_SETTLE_PREFIX, verb, agent_did, authorization_id, nonce, issued_at, *fields])
 
 
 # --------------------------------------------------------------------------------------
@@ -936,6 +944,10 @@ class _LocalKeySigner:
     def sign_envelope(self, fields: Mapping[str, Any]) -> bytes:
         return self._key.sign(envelope_hash(fields).encode("utf-8"))
 
+    def sign_settle(self, fields: Mapping[str, Any]) -> bytes:
+        message = agent_settle_message(fields["verb"], fields["agentDid"], fields["authorizationId"], fields["nonce"], fields["issuedAt"], list(fields["fields"]))
+        return self._key.sign(message.encode("utf-8"))
+
 
 class _DaemonSigner:
     """Signs by asking `agentsafe-signer` — the key never enters this process."""
@@ -973,6 +985,14 @@ class _DaemonSigner:
         except DaemonError as exc:
             if exc.code == "DAEMON_UNKNOWN_OPERATION":
                 raise DaemonError("PAYLOAD_BINDING_UNSUPPORTED", "the agentsafe-signer daemon predates payload binding (sign-payload, signer 0.15.0); upgrade it, or omit `payload`") from exc
+            raise
+
+    def sign_settle(self, fields: Mapping[str, Any]) -> bytes:
+        try:
+            return self._request("sign-settle", fields)
+        except DaemonError as exc:
+            if exc.code == "DAEMON_UNKNOWN_OPERATION":
+                raise DaemonError("SETTLE_SIGNING_UNSUPPORTED", "the agentsafe-signer daemon predates sign-settle (signer 0.20.0); upgrade it to settle an unclaimed hold as the agent") from exc
             raise
 
     def sign_envelope(self, fields: Mapping[str, Any]) -> bytes:
@@ -1281,6 +1301,9 @@ class MetaMyndClient:
             body["settlementTxHash"] = settlement_tx_hash
         if pay_to:
             body["payTo"] = pay_to
+        proof = self._settle_proof("capture", authorization_id, [js_number_to_string(amount_charged), booking_ref or "", settlement_tx_hash or ""])
+        if proof:
+            body["agentProof"] = proof
         return self._settlement(f"/policy/mandate/authorize/{urllib.parse.quote(authorization_id, safe='')}/capture", body)
 
     def void(self, authorization_id: str, reason: Optional[str] = None) -> SettlementResult:
@@ -1294,6 +1317,9 @@ class MetaMyndClient:
         body: dict[str, Any] = {}
         if reason:
             body["reason"] = reason
+        proof = self._settle_proof("void", authorization_id, [reason or ""])
+        if proof:
+            body["agentProof"] = proof
         return self._settlement(f"/policy/mandate/authorize/{urllib.parse.quote(authorization_id, safe='')}/void", body)
 
     def outcome(self, authorization_id: str) -> Outcome:
@@ -1313,6 +1339,21 @@ class MetaMyndClient:
             settlement_evidence=data.get("settlementEvidence"),
             raw=data,
         )
+
+    def _settle_proof(self, verb: str, authorization_id: str, fields: list[str]) -> Optional[dict[str, str]]:
+        """This agent's MAGP-SETTLE-v1 signature over settling its own unclaimed hold (MAGP §8.7.4). The gate accepts a
+        settlement of a hold nobody has claimed only from its agent, a counterparty the owner registered, or — for an open
+        testnet owner — anyone. None when the signer cannot sign one (a daemon older than signer 0.20.0): the call then goes
+        unsigned, as before."""
+        nonce = secrets.token_hex(16)
+        issued_at = utc_now_rfc3339()
+        try:
+            signature = self._signer.sign_settle({"verb": verb, "agentDid": self.agent_did, "authorizationId": authorization_id, "nonce": nonce, "issuedAt": issued_at, "fields": fields})
+        except DaemonError as exc:
+            if exc.code == "SETTLE_SIGNING_UNSUPPORTED":
+                return None
+            raise
+        return {"agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at, "signature": signature.hex()}
 
     def _settlement(self, path: str, body: Mapping[str, Any]) -> SettlementResult:
         # A lost response to a capture or void may already have committed, so "treat as block" would

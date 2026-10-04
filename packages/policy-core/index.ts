@@ -70,6 +70,7 @@ export type {
 export { evaluate, type EvaluateInput, type RulePack } from './evaluate.js';
 export { buildAuthMessage, buildLegacyAuthMessageV1, AUTH_MESSAGE_V2_TAG, type AuthMessageFields } from './canonical.js';
 export { buildLocalDecisionMessage, type LocalDecisionMessageFields } from './canonical.js';
+export { buildAgentSettleMessage, AGENT_SETTLE_PREFIX, type AgentSettleMessageFields } from './canonical.js';
 export { buildCheckpointAnchorMessage, type CheckpointAnchorMessageFields } from './checkpoint-anchor.js';
 export { applySignedLast } from './context.js';
 // Trusted context provenance (spec §6.4.3)

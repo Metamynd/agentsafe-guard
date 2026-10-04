@@ -467,7 +467,8 @@ export function createGuard(opts = {}) {
       // if it were: refuse, and release the hold it just got (best effort; an unclaimed hold also lapses on its own).
       if (binding.payloadDigest && (data.decision === 'allow' || data.decision === 'observe' || data.decision === 'escalate') && data.payloadDigest !== binding.payloadDigest) {
         if (data.authorizationId) {
-          fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(data.authorizationId)}/void`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+          const id = data.authorizationId;
+          settleProof('void', id, ['']).then((agentProof) => fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(id)}/void`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(agentProof ? { agentProof } : {}) })).catch(() => {});
         }
         return { decision: 'block', reasonCode: 'PAYLOAD_BINDING_NOT_CONFIRMED', authorizationId: null, error: 'the gate did not confirm the payload binding (an older backend, or the digest was stripped in transit)' };
       }
@@ -493,11 +494,33 @@ export function createGuard(opts = {}) {
    * skip for non-payment tools.
    */
   async function capture(authorizationId, amountCharged, bookingRef, settlementTxHash) {
+    // Signed as this agent (MAGP-SETTLE-v1) when the key provider can: a hold nobody has claimed is settled only by its own
+    // agent, a counterparty the owner registered, or — for an open testnet owner — anyone (MAGP §8.7.4).
+    const agentProof = await settleProof('capture', authorizationId, [String(amountCharged), bookingRef ?? '', settlementTxHash ?? '']).catch(() => undefined);
     const res = await fetch(`${base}/policy/mandate/authorize/${authorizationId}/capture`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amountCharged, bookingRef, settlementTxHash }),
+      body: JSON.stringify({ amountCharged, bookingRef, settlementTxHash, ...(agentProof ? { agentProof } : {}) }),
     });
     return res.json().catch(() => ({}));
+  }
+
+  /**
+   * This agent's signature over settling its OWN unclaimed hold (MAGP-SETTLE-v1), or undefined when the key provider cannot
+   * sign one (a caller's own provider without signSettle, or a signer daemon older than 0.20.0) — the call then goes unsigned,
+   * which the issuer accepts only for an open testnet owner. `fields`: capture → amountCharged, bookingRef, settlementTxHash;
+   * void → reason ('' when none). Exactly the strings sent.
+   */
+  async function settleProof(verb, authorizationId, fields) {
+    if (typeof keyProvider.signSettle !== 'function') return undefined;
+    const nonce = crypto.randomUUID();
+    const issuedAt = new Date().toISOString();
+    try {
+      const signature = await keyProvider.signSettle({ verb, agentDid, authorizationId, nonce, issuedAt, fields });
+      return { agentDid, nonce, issuedAt, signature };
+    } catch (err) {
+      if (err?.code === 'SETTLE_SIGNING_UNSUPPORTED') return undefined;
+      throw err;
+    }
   }
 
   /**
