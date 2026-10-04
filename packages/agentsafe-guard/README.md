@@ -673,8 +673,16 @@ try {
 It throws a `GovernanceBlocked` when the escalation was not approved (rejected, modified, expired, still pending at the
 timeout, or the gate was unreachable), with the status in `err.governance`. It runs the tool only while the approved
 authorization is still unused: a second resume of the same escalation is refused `AUTHORIZATION_ALREADY_USED` without
-touching the tool. Two resumes *racing* in one in-process agent can both pass that check before either settles; a
-gateway (the default scaffold) claims the authorization atomically, which is what makes concurrent resumes exactly-once.
+touching the tool, and one started while another resume of it is still running in this process is refused
+`AUTHORIZATION_IN_USE` (0.22.0). Separate *processes* resuming the same escalation at once need a lock of their own — the
+scaffold's `npm run resume` takes its saved call with an atomic rename — or a gateway, which claims the authorization
+atomically.
+
+**An authorize whose answer never arrived** (a timeout, a dropped connection, a proxy's 5xx) may still have minted a hold:
+the gate commits it whether or not anyone is waiting, and nothing could use or settle it until its TTL. Since 0.22.0 the
+guard looks it up by the request's nonce (`GET /policy/mandate/authorize/by-request`) after 2, 10 and 30 seconds and
+releases it with its signed `void` — in the background, never keeping the process alive. `createGuard({ …,
+orphanReleaseDelaysMs: [] })` turns it off.
 
 **What `guardTool()` does with the hold an allowed call was granted.** Before 0.21.0 it did nothing, and an unclaimed
 hold lapses with its TTL: a tool that ran gave its budget back after 15 minutes, and one that failed kept it reserved

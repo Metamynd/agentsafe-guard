@@ -180,5 +180,73 @@ class Resume(unittest.TestCase):
         self.assertEqual(asyncio.run(go()), "booked")
 
 
+
+class OrphanAndRace(unittest.TestCase):
+    """0.13.0: a hold minted for a request whose answer never came is found and released; concurrent resumes are refused."""
+
+    def setUp(self) -> None:
+        key, seed = new_agent_key()
+        self.gate = FakeGate(key.public_key())
+        self.base = self.gate.start()
+        self.seed = seed
+
+    def tearDown(self) -> None:
+        self.gate.stop()
+
+    def test_a_hold_the_gate_committed_after_the_client_timed_out_is_released(self) -> None:
+        import time
+
+        from metamynd_client import GateUnreachable
+
+        client = MetaMyndClient(self.base, "did:key:z6MkOrphan", self.seed, timeout=0.3, orphan_release_delays=(0.6, 0.6, 1.0))
+        self.gate.delay = 0.5  # the gate answers after the client has given up — and commits the hold anyway
+        with self.assertRaises(GateUnreachable):
+            client.authorize("flight-purchase", 40, merchant="skyward-air", context={"riskLevel": "low"})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any(h["state"] == "voided" for h in self.gate.holds.values()):
+            time.sleep(0.1)
+        self.assertEqual([h["state"] for h in self.gate.holds.values()], ["voided"], "the orphaned hold was released, signed")
+
+    def test_orphan_release_can_be_turned_off(self) -> None:
+        import time
+
+        from metamynd_client import GateUnreachable
+
+        client = MetaMyndClient(self.base, "did:key:z6MkOrphanOff", self.seed, timeout=0.3, orphan_release_delays=())
+        self.gate.delay = 0.5
+        with self.assertRaises(GateUnreachable):
+            client.authorize("flight-purchase", 40, merchant="skyward-air", context={"riskLevel": "low"})
+        time.sleep(1.0)
+        self.assertEqual([h["state"] for h in self.gate.holds.values()], ["held"])
+
+    def test_a_concurrent_resume_of_the_same_escalation_is_refused_in_use(self) -> None:
+        client = MetaMyndClient(self.base, "did:key:z6MkRace", self.seed, timeout=5)
+        started, release = threading.Event(), threading.Event()
+        runs = []
+
+        def slow_tool(airline: str, amount: float, risk: str) -> str:
+            runs.append(1)
+            started.set()
+            release.wait(5)
+            return "booked"
+
+        book = guard_tool(client, "flight-purchase", slow_tool, FLIGHT, resume_timeout=5)
+        with self.assertRaises(GovernanceBlocked) as held:
+            book("skyward-air", 90, "high")
+        esc = held.exception.verdict.escalation_id
+        self.gate.approve(esc)
+        first: dict = {}
+        t = threading.Thread(target=lambda: first.setdefault("r", book.resume(esc, "skyward-air", 90, "high")))
+        t.start()
+        self.assertTrue(started.wait(5))
+        with self.assertRaises(GovernanceBlocked) as second:
+            book.resume(esc, "skyward-air", 90, "high")
+        self.assertEqual(second.exception.verdict.reason_code, "AUTHORIZATION_IN_USE")
+        release.set()
+        t.join(5)
+        self.assertEqual(first.get("r"), "booked")
+        self.assertEqual(len(runs), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

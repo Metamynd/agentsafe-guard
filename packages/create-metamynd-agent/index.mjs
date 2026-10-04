@@ -68,7 +68,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.21.0: guardTool() settles the hold an allowed call was granted (captured when the tool runs, released when it cannot
 // have), guard.void() releases one signed, and a gated tool's .resume(escalationId, args) runs an approved escalation once.
 // Required: the scaffold's npm run resume uses .resume().
-const GUARD_VERSION = '^0.21.0';
+// 0.22.0: a concurrent resume of one escalation in a process is refused AUTHORIZATION_IN_USE, and a hold minted for an
+// authorize whose answer never arrived is found by nonce and released. Required: npm run resume relies on the lock.
+const GUARD_VERSION = '^0.22.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -1024,7 +1026,7 @@ async function resolveHostedRulePack(base, key, { financial, perTxnMax, maxAmoun
  * dashboard registration shows its own dialog before setting the flag); see the printed message
  * either way.
  */
-async function registerGatewayCounterparty(base, token, did, label, purpose = 'claim', privateKeyHex = null) {
+async function registerGatewayCounterparty(base, token, did, label, purpose = 'claim', privateKeyHex = null, agents = null) {
   try {
     // The gateway accepts its own registration (MAGP §8.7.6): ask for a challenge naming this owner, sign it with the gateway's
     // key (generated here, so this process holds it), and register with that proof. A DID is never registered on its text.
@@ -1044,7 +1046,9 @@ async function registerGatewayCounterparty(base, token, did, label, purpose = 'c
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       // `report` (a non-financial gateway, which never claims): it may only report to this owner, and it changes nothing about
       // who may claim their holds, so it needs no enforcement confirmation (MAGP §8.7.6, §16.4).
-      body: JSON.stringify({ did, label, purpose, ...(proof ? { proof } : {}), ...(purpose === 'claim' ? { confirmEnforcementChange: true } : {}) }),
+      // `agents` (report only): the agents this gateway serves — the issuer lets it claim an approved value-less hold of THOSE
+      // agents only, never another agent of the same owner (MAGP §8.7.6).
+      body: JSON.stringify({ did, label, purpose, ...(proof ? { proof } : {}), ...(agents ? { agents } : {}), ...(purpose === 'claim' ? { confirmEnforcementChange: true } : {}) }),
     });
     const json = await res.json().catch(() => null);
     if (!res.ok || json?.success === false) return { ok: false, message: json?.message ?? `HTTP ${res.status}` };
@@ -1168,7 +1172,7 @@ function resumeBlock(tool) {
 // npm start saves an escalated call's arguments to ./escalations/<id>.json. Approve it in the dashboard (AgentSafe ->
 // Escalations), then resume it: ${tool}.resume() waits for the decision and runs the tool once, under the authorization
 // the approval minted. Your own agent does the same with the escalationId from the refusal (e.governance.escalationId).
-import { mkdirSync as __mkdir, writeFileSync as __write, readFileSync as __read, rmSync as __rm } from 'node:fs';
+import { mkdirSync as __mkdir, writeFileSync as __write, readFileSync as __read, rmSync as __rm, renameSync as __rename } from 'node:fs';
 const ESCALATIONS = new URL('./escalations/', import.meta.url);
 const escalationFile = (id) => {
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(String(id ?? ''))) throw new Error('not an escalation id: ' + id);
@@ -1180,20 +1184,28 @@ function saveEscalation(id, args) {
 }
 if (process.argv[2] === '--resume') {
   const id = process.argv[3];
-  let saved;
-  try { saved = JSON.parse(__read(escalationFile(id), 'utf8')); } catch {
-    console.error('  No saved escalation "' + (id ?? '') + '". Run npm start first, then: npm run resume -- <escalationId>');
+  // Take the saved call ATOMICALLY (a rename): a second npm run resume of the same escalation started meanwhile finds
+  // nothing to take, so two processes cannot both run it. Put back if it is still undecided; removed once it is final.
+  let saved, taken;
+  try {
+    const file = escalationFile(id);
+    taken = new URL(file.href + '.resuming');
+    __rename(file, taken);
+    saved = JSON.parse(__read(taken, 'utf8'));
+  } catch {
+    console.error('  No saved escalation "' + (id ?? '') + '" to resume (or another npm run resume is running it). Run npm start first, then: npm run resume -- <escalationId>');
     process.exit(1);
   }
   console.log('  waiting for your decision on ' + id + ' (approve it in the dashboard: AgentSafe -> Escalations) ...');
   try {
     const result = await ${tool}.resume(id, saved);
-    __rm(escalationFile(id), { force: true }); // used: a second resume has nothing to run
+    __rm(taken, { force: true }); // used: a second resume has nothing to run
     console.log('\\x1b[32m  RAN\\x1b[0m  approved, and run exactly once: ' + JSON.stringify(result));
   } catch (e) {
     const g = e.governance ?? {};
     // A final answer (rejected, already used, expired) retires the saved call; still pending or unreachable keeps it.
-    if (g.decision === 'block' && g.reasonCode !== 'GATE_UNREACHABLE') __rm(escalationFile(id), { force: true });
+    if (g.decision === 'block' && g.reasonCode !== 'GATE_UNREACHABLE') __rm(taken, { force: true });
+    else __rename(taken, escalationFile(id)); // still undecided, or the gate was unreachable: keep it for the next try
     console.log('\\x1b[31m  NOT RUN\\x1b[0m  ' + (g.reasonCode ?? e.message) + (g.status ? ' (' + g.status + ')' : ''));
     process.exitCode = 1;
   }
@@ -4368,7 +4380,7 @@ async function main() {
     const gatewayDid = buildDidKey(rawPublicKeyFromSpkiHex(gwKeypair.publicKeyHex));
     gatewayIdentity = { did: gatewayDid, keyHex: gwKeypair.privateKeyHex };
     console.log(c.dim(`\n  → registering the gateway's identity as a trusted counterparty (${financial ? "so it can claim this agent's holds and report to you" : 'so its reports reach your Activity Log'}) …`));
-    const reg = await registerGatewayCounterparty(base, token, gatewayDid, `${scope}-gateway`, financial ? 'claim' : 'report', gwKeypair.privateKeyHex);
+    const reg = await registerGatewayCounterparty(base, token, gatewayDid, `${scope}-gateway`, financial ? 'claim' : 'report', gwKeypair.privateKeyHex, financial ? null : [config.agentDid]);
     if (reg.ok) {
       console.log(`  ${c.green('✓')} gateway DID ${c.b(gatewayDid)} — ${reg.message}`);
     } else {

@@ -556,8 +556,8 @@ Service could never run an approved escalation: its own policy escalated the cal
 `honourApprovals: true` lets it claim exactly that case and nothing else. An escalated request that presents an
 `authorizationId` is claimed as an approval claim, which the issuer grants once, only for a hold a person approved, and
 only for this agent and these values. The call then runs, and the hold is settled like any claimed one. Ordinary
-allowed calls are still not claimed. A value-less agent's gateway registered as a `report` counterparty may make this
-claim, for a zero-value approved hold only (an issuer from before this release refuses it `COUNTERPARTY_NOT_REGISTERED`
+allowed calls are still not claimed. A value-less agent's gateway registered as a `report` counterparty **for that agent**
+(`agents: [agentDid]` in its registration — `create-metamynd-agent` ≥ 0.14.23 does it) may make this claim, for a zero-value approved hold only (an issuer from before this release refuses it `COUNTERPARTY_NOT_REGISTERED`
 when the owner also has claim counterparties, and the call stays escalated). `guard.honoursApprovals` reports whether approvals can lift
 an escalate on this Service.
 
