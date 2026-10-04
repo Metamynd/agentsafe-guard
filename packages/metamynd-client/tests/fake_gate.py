@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import decimal
 import json
+import urllib.parse
 import re
 import threading
 import time
@@ -187,6 +188,13 @@ class FakeGate:
         return 200, {"success": True, "message": "Payload bound", "data": {"authorizationId": auth_id, **self._ack(digest)}}
 
     def get(self, path: str) -> "tuple[int, Any]":
+        if path.startswith("/policy/mandate/authorize/by-request?"):
+            # The hold a signed request minted, by the agent and the request's nonce (an orphan an agent never heard of).
+            q = dict(urllib.parse.parse_qsl(path.split("?", 1)[1]))
+            for auth_id, h in self.holds.items():
+                if h.get("nonce") == q.get("nonce") and h.get("agentDid") == q.get("agentDid"):
+                    return 200, {"success": True, "data": {"authorizationId": auth_id}}
+            return 404, {"success": False, "message": "AUTHORIZATION_NOT_FOUND", "data": {"reasonCode": "AUTHORIZATION_NOT_FOUND"}}
         if path.startswith("/policy/escalations/") and path.endswith("/status"):
             esc_id = path.split("/")[-2]
             e = self.escalations.get(esc_id)
@@ -249,7 +257,7 @@ class FakeGate:
         if norm in ("high", "critical"):
             return self._hold("RISK_REVIEW", digest, amount, body["currency"])
         auth_id = str(uuid.uuid4())
-        self.holds[auth_id] = {"state": "held", "amount": amount, "currency": body["currency"], "payloadDigest": digest}
+        self.holds[auth_id] = {"state": "held", "amount": amount, "currency": body["currency"], "payloadDigest": digest, "nonce": body.get("nonce"), "agentDid": body.get("agentDid")}
         # A DIFFERENT id from auth_id — the real gate's anchored evidence event and the mandate hold are
         # never the same id; a test that only ever saw one value here could not catch the two being confused.
         self.last_event_id = str(uuid.uuid4())

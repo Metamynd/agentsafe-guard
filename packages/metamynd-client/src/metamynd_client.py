@@ -171,7 +171,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1022,7 +1022,7 @@ class _DaemonSigner:
 class MetaMyndClient:
     """Signs and submits authorize requests to the MetaMynd gate."""
 
-    def __init__(self, api: str, agent_did: str, agent_key: Optional[str] = None, timeout: float = 15.0, *, daemon_socket: Optional[str] = None, sign_context: bool = True):
+    def __init__(self, api: str, agent_did: str, agent_key: Optional[str] = None, timeout: float = 15.0, *, daemon_socket: Optional[str] = None, sign_context: bool = True, orphan_release_delays: "tuple[float, ...]" = (2.0, 10.0, 30.0)):
         """Exactly one of `agent_key` (the key lives in THIS process) or `daemon_socket` — a path
         to an `agentsafe-signer` daemon's socket (0.5.0) — must be given; the daemon signs without
         ever handing the key to this process. Everything else about the client is identical either
@@ -1033,7 +1033,14 @@ class MetaMyndClient:
         agent's signature over its context (MAGP §8.3.13), so the gate and any re-verifying service
         refuse a context altered in transit (`CONTEXT_SIGNATURE_INVALID`). `False` sends the request
         exactly as 0.6.x did. Services that predate it ignore the field.
+
+        `orphan_release_delays` (0.13.0): when an authorize call is sent but its answer never arrives (a timeout, a dropped
+        connection), the gate may still have committed a hold nobody can use or settle. After each of these delays (seconds)
+        the client looks it up by the request's nonce and releases it with this agent's signed void; `()` turns it off.
         """
+        self.orphan_release_delays = tuple(orphan_release_delays)
+        self._resumes_in_flight: "set[str]" = set()
+        self._resumes_lock = threading.Lock()
         self.api = api.rstrip("/")
         self.agent_did = agent_did
         self.timeout = timeout
@@ -1178,7 +1185,13 @@ class MetaMyndClient:
         """
         signed = self.sign_request(action, amount, currency, merchant, context, resource, payload=payload, jurisdiction=jurisdiction)
         # The gate is sent the request; the authorizationId only exists once it answers.
-        verdict = Verdict.from_response(self._post("/policy/mandate/authorize", dict(signed.body)))
+        try:
+            verdict = Verdict.from_response(self._post("/policy/mandate/authorize", dict(signed.body)))
+        except GateUnreachable:
+            # Sent, but the answer never came: the gate may have committed a hold anyway. Find and release it in the
+            # background (0.13.0), then fail closed as before.
+            self._release_orphan(str(signed.body.get("nonce", "")))
+            raise
         if "payloadDigest" in signed.body and verdict.decision in ("allow", "observe", "escalate") and verdict.raw.get("payloadDigest") != signed.body["payloadDigest"]:
             # The gate ACKNOWLEDGES a binding by echoing the digest it stored. A permit or escalation that does not — a proxy
             # stripped the fields, or the backend predates payload binding and ignored them — was never bound: refuse it, and
@@ -1324,6 +1337,30 @@ class MetaMyndClient:
         if proof:
             body["agentProof"] = proof
         return self._settlement(f"/policy/mandate/authorize/{urllib.parse.quote(authorization_id, safe='')}/void", body)
+
+    def _release_orphan(self, nonce: str) -> None:
+        """Release the hold an unanswered authorize may have minted (0.13.0; pre-beta rerun 3, D-7). Looked up by the request's
+        nonce (GET .../authorize/by-request), retried after each of `orphan_release_delays`, released with this agent's signed
+        void. Best effort, on a daemon thread: the hold's TTL is the backstop."""
+        if not nonce or not self.orphan_release_delays:
+            return
+
+        def _run() -> None:
+            query = urllib.parse.urlencode({"agentDid": self.agent_did, "nonce": nonce})
+            for delay in self.orphan_release_delays:
+                time.sleep(delay)
+                try:
+                    found = self._get_data(f"/policy/mandate/authorize/by-request?{query}").get("authorizationId")
+                except Exception:  # noqa: BLE001 — still unreachable, or an issuer without the route: try again
+                    continue
+                if found:
+                    try:
+                        self.void(str(found), reason="ORPHANED: the agent never received this authorization")
+                    except Exception:  # noqa: BLE001 — best effort
+                        pass
+                    return
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def outcome(self, authorization_id: str) -> Outcome:
         """What became of an authorization — did it happen, and is a retry safe? See `Outcome`."""
@@ -1734,6 +1771,21 @@ def guard_tool(
                           escalation_id=escalation_id, raw=state.raw, signed=signed)
         return verdict, payload
 
+    def _take_resume(escalation_id: str) -> None:
+        """One resume of an escalation at a time per client (0.13.0): a second, concurrent one is refused AUTHORIZATION_IN_USE
+        instead of racing the first past the "still unused?" check. Separate PROCESSES need a lock of their own, or a gateway."""
+        if not hasattr(client, "_resumes_lock"):  # a client not built by __init__ (a test double, a subclass)
+            client._resumes_lock = threading.Lock()
+            client._resumes_in_flight = set()
+        with client._resumes_lock:
+            if escalation_id in client._resumes_in_flight:
+                raise _guard_refusal(Verdict(decision="block", reason_code="AUTHORIZATION_IN_USE", escalation_id=escalation_id))
+            client._resumes_in_flight.add(escalation_id)
+
+    def _drop_resume(escalation_id: str) -> None:
+        with client._resumes_lock:
+            client._resumes_in_flight.discard(escalation_id)
+
     def _nothing_ran(exc: BaseException) -> bool:
         if not isinstance(exc, Exception):
             return False  # a cancellation or an interpreter exit says nothing about what the tool did
@@ -1829,7 +1881,11 @@ def guard_tool(
             return await _run_async(_gate, args, kwargs)
 
         async def resume_async(escalation_id: str, *args: "Any", **kwargs: "Any") -> "Any":
-            return await _run_async(lambda *a, **k: _approved(escalation_id, *a, **k), args, kwargs)
+            _take_resume(escalation_id)
+            try:
+                return await _run_async(lambda *a, **k: _approved(escalation_id, *a, **k), args, kwargs)
+            finally:
+                _drop_resume(escalation_id)
 
         governed_async.resume = resume_async  # type: ignore[attr-defined]
         return governed_async
@@ -1883,7 +1939,11 @@ def guard_tool(
         return _run(_gate, args, kwargs)
 
     def resume(escalation_id: str, *args: "Any", **kwargs: "Any") -> "Any":
-        return _run(lambda *a, **k: _approved(escalation_id, *a, **k), args, kwargs)
+        _take_resume(escalation_id)
+        try:
+            return _run(lambda *a, **k: _approved(escalation_id, *a, **k), args, kwargs)
+        finally:
+            _drop_resume(escalation_id)
 
     governed.resume = resume  # type: ignore[attr-defined]
     return governed

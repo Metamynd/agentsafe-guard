@@ -201,6 +201,58 @@ await check('a capture that cannot reach the gate is retried, so a tool that ran
   } finally { globalThis.fetch = real; f.restore(); }
 });
 
+await check('a concurrent .resume() of the same escalation in this process is refused AUTHORIZATION_IN_USE (0.22.0)', async () => {
+  const f = fakeIssuer({ escalation: [{ status: 'approved', reasonCode: 'ESCALATION_APPROVED', authorizationId: 'auth-race' }] });
+  try {
+    let runs = 0; let letGo;
+    const gate = new Promise((r) => { letGo = r; });
+    const tool = guard.guardTool('flight-purchase', async () => { runs++; await gate; return { pnr: 'RACE' }; }, mapArgs);
+    const first = tool.resume('esc-1', { amount: 15 }, { intervalMs: 10 });
+    await new Promise((r) => setTimeout(r, 50)); // the first is inside the tool now
+    const err = await tool.resume('esc-1', { amount: 15 }, { intervalMs: 10 }).catch((e) => e);
+    assert.equal(err.governance?.reasonCode, 'AUTHORIZATION_IN_USE');
+    letGo();
+    assert.equal((await first).pnr, 'RACE');
+    assert.equal(runs, 1);
+  } finally { f.restore(); }
+});
+
+await check('an authorize whose answer never arrived: the hold the gate minted anyway is found by nonce and released (0.22.0)', async () => {
+  const calls = [];
+  const real = globalThis.fetch;
+  let sentNonce;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    calls.push(u);
+    if (u.endsWith('/policy/mandate/authorize')) { sentNonce = JSON.parse(init.body).nonce; throw new Error('socket hang up'); } // sent; answer lost
+    if (u.includes('/authorize/by-request?')) {
+      assert.ok(u.includes(`nonce=${encodeURIComponent(sentNonce)}`) && u.includes(`agentDid=${encodeURIComponent(agentDid)}`));
+      return { ok: true, status: 200, json: async () => ({ success: true, data: { authorizationId: 'auth-orphan' } }) };
+    }
+    if (u.endsWith('/authorize/auth-orphan/void')) return { ok: true, status: 200, json: async () => ({ success: true, data: { voided: true, reasonCode: 'HOLD_VOIDED' } }) };
+    throw new Error('unexpected ' + u);
+  };
+  try {
+    const g = createGuard({ api: 'http://issuer.test/api/v1', agentDid, agentKey, mode: 'remote', orphanReleaseDelaysMs: [20] });
+    const d = await g.authorize({ action: 'flight-purchase', amount: 10, currency: 'USD', merchant: 'skyward-air', context: { riskLevel: 'low' } });
+    assert.equal(d.reasonCode, 'GATE_UNREACHABLE');
+    await new Promise((r) => setTimeout(r, 150));
+    assert.ok(calls.some((u) => u.endsWith('/authorize/auth-orphan/void')), 'the orphaned hold was released');
+  } finally { globalThis.fetch = real; }
+});
+
+await check('orphanReleaseDelaysMs: [] turns the orphan release off', async () => {
+  const calls = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url) => { calls.push(String(url)); throw new Error('ECONNRESET'); };
+  try {
+    const off = createGuard({ api: 'http://issuer.test/api/v1', agentDid, agentKey, mode: 'remote', orphanReleaseDelaysMs: [] });
+    await off.authorize({ action: 'flight-purchase', amount: 10, currency: 'USD', merchant: 'skyward-air', context: { riskLevel: 'low' } });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(calls.filter((u) => u.includes('by-request')).length, 0);
+  } finally { globalThis.fetch = real; }
+});
+
 await check('.resume() of a rejected, or still-pending, escalation throws and never runs the tool', async () => {
   for (const [st, decision] of [[{ status: 'denied', reasonCode: 'ESCALATION_DENIED' }, 'block'], [{ status: 'pending' }, 'escalate']]) {
     const f = fakeIssuer({ escalation: [st] });

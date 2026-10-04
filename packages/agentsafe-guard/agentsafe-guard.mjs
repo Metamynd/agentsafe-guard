@@ -331,6 +331,12 @@ export function createGuard(opts = {}) {
   const mode = opts.mode ?? cfg?.mode ?? 'local';
   const bundleUrl = opts.bundleUrl ?? cfg?.bundleUrl ?? `${base}/policy/bundle/${encodeURIComponent(agentDid)}`;
   const sealValueActions = opts.sealValueActions !== false; // default true
+  // When an authorize call fails AFTER it was sent (a timeout, a dropped connection, a proxy's 5xx), the gate may still have
+  // committed a hold this agent never heard of. It is looked up and released after these delays (ms); [] turns it off.
+  const orphanDelaysMs = Array.isArray(opts.orphanReleaseDelaysMs) ? opts.orphanReleaseDelaysMs : [2_000, 10_000, 30_000];
+  // Escalations being resumed in THIS process right now, by any gated tool of this guard: a second, concurrent resume of
+  // the same one is refused instead of racing the first past the "still unused?" check (since 0.22.0).
+  const resumesInFlight = new Set();
   // Build B — trustless currency check. When on, the guard trusts its local bundle ONLY if that
   // bundle is the LATEST one anchored on the agent's Hedera topic (read from a public mirror);
   // otherwise it defers to the authoritative remote gate. Opt-in for now.
@@ -423,6 +429,7 @@ export function createGuard(opts = {}) {
     }
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
+    let sent = false; // the request left this process: a failure from here on may follow a hold the gate committed
     try {
       // This is verified SERVER-SIDE by the gate, which independently reconstructs the signed
       // message via its own authMessage() (mandate.service.ts) — that function ALSO defaults a
@@ -447,6 +454,7 @@ export function createGuard(opts = {}) {
         envelopeSignatureFor({ action, amount, currency, merchant, context, trace, materiality, nonce, issuedAt }),
         payloadBindingFor({ action, nonce, issuedAt, payload }),
       ]);
+      sent = true;
       const res = await fetch(`${base}/policy/mandate/authorize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -461,6 +469,9 @@ export function createGuard(opts = {}) {
         }),
       });
       const body = await res.json().catch(() => null);
+      // A 5xx with no decision (a proxy that gave up, an issuer that failed after committing) is answered like a lost
+      // response: blocked here, and any hold the request minted is looked up and released.
+      if (res.status >= 500 && !body?.data?.decision) releaseOrphan(nonce);
       const data = body?.data ?? { decision: 'block', reasonCode: `GATE_HTTP_${res.status}` };
       // The gate ACKNOWLEDGES a binding by echoing the digest it stored. A permit or escalation that does not — a hop stripped
       // the fields, or the backend predates payload binding and ignored them — was never bound, and this agent must not act as
@@ -483,8 +494,35 @@ export function createGuard(opts = {}) {
       // the gate, was unreachable) — a distinct reasonCode so this doesn't read as a gate outage
       // it wasn't. Still fail-CLOSED either way, which is the property that actually matters.
       const reasonCode = err?.code?.startsWith?.('DAEMON_') ? 'SIGNER_UNREACHABLE' : 'GATE_UNREACHABLE';
+      if (sent && reasonCode === 'GATE_UNREACHABLE') releaseOrphan(nonce);
       return { decision: 'block', reasonCode, error: String(err?.message ?? err) };
     }
+  }
+
+  /**
+   * An authorize whose answer never arrived (a timeout, a dropped connection, a proxy's 5xx) may still have minted a hold:
+   * the gate commits it whether or not anyone is waiting. Nothing could use or settle it, and its budget would stay reserved
+   * until the TTL. So it is looked up by this request's nonce (GET .../authorize/by-request) and released with this agent's
+   * signed void — retried after each of `orphanReleaseDelaysMs`, since the gate may still be working on it. Best effort, in
+   * the background, and it never keeps the process alive. (Since 0.22.0; pre-beta rerun 3, D-7.)
+   */
+  function releaseOrphan(nonce) {
+    let attempt = 0;
+    const next = () => {
+      if (attempt >= orphanDelaysMs.length) return; // the hold's TTL is the backstop
+      const timer = setTimeout(async () => {
+        attempt++;
+        try {
+          const r = await fetch(`${base}/policy/mandate/authorize/by-request?agentDid=${encodeURIComponent(agentDid)}&nonce=${encodeURIComponent(nonce)}`);
+          const body = await r.json().catch(() => null);
+          const id = r.ok ? body?.data?.authorizationId : null;
+          if (id) { await voidHold(id, 'ORPHANED: the agent never received this authorization'); return; }
+        } catch { /* still unreachable — try again */ }
+        next();
+      }, orphanDelaysMs[attempt]);
+      timer.unref?.();
+    };
+    next();
   }
 
   /**
@@ -1020,11 +1058,23 @@ export function createGuard(opts = {}) {
      *
      * Once only: it runs the tool only while the approved authorization is still `not_started` (nothing has used it). A
      * second resume of the same escalation — after a run that was settled, a gateway's claim, or an expiry — is refused
-     * `AUTHORIZATION_ALREADY_USED` without touching the tool. Two resumes RACING each other in one in-process agent can
-     * both pass that check before either settles; a gateway (the default scaffold) claims the authorization atomically,
-     * which is what makes concurrent resumes exactly-once.
+     * `AUTHORIZATION_ALREADY_USED` without touching the tool, and one started while another is still running in this
+     * process is refused `AUTHORIZATION_IN_USE` (0.22.0). Separate PROCESSES resuming the same escalation at once need a
+     * lock of their own (the scaffold takes its saved call atomically) or a gateway, which claims the authorization
+     * atomically.
      */
     gated.resume = async (escalationId, args, opts = {}) => {
+      if (resumesInFlight.has(escalationId)) {
+        throw refusal({ decision: 'block', reasonCode: 'AUTHORIZATION_IN_USE', escalationId, status: 'approved' });
+      }
+      resumesInFlight.add(escalationId);
+      try {
+        return await resumeOnce(escalationId, args, opts);
+      } finally {
+        resumesInFlight.delete(escalationId);
+      }
+    };
+    const resumeOnce = async (escalationId, args, opts) => {
       const st = await waitForEscalation(escalationId, opts);
       if (st?.status !== 'approved' || !st.authorizationId) {
         throw refusal({ decision: st?.status === 'pending' ? 'escalate' : 'block', reasonCode: st?.reasonCode ?? `ESCALATION_${String(st?.status ?? 'unknown').toUpperCase()}`, escalationId, status: st?.status ?? null });
