@@ -240,8 +240,14 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   by an independent tester, XT-1: another tenant's agent executed through an agent's own gateway). Set it whenever
  *   this Service works for one owner. `'any'` serves every governed agent on purpose — a public tool server. Left unset,
  *   it serves every agent, as before 0.20.0, and says so once at startup.
+ * @param {boolean} [cfg.honourApprovals] (0.25.0) for a Service that runs WITHOUT `requireAuthorization` — a value-less
+ *   tool, whose allowed calls carry no single-use authorization to claim: still honour an owner's approval of an
+ *   ESCALATED call (MAGP §8.7.18). A request the policy escalates and that presents an `authorizationId` is claimed
+ *   as an approval claim; the issuer grants it only for a hold a person approved, for this agent and these values, and
+ *   only once, so the approved call runs exactly once and anything else stays escalated. Allowed calls are not claimed,
+ *   exactly as before. Implied by `requireAuthorization`. Off by default.
  */
-export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents, gatewayOwnerPrincipal } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents, gatewayOwnerPrincipal, honourApprovals = false } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const { serves: servesAgent, pinned: allowedAgentsPinned } = agentAllowList(allowedAgents, 'mcp-guard');
   const owner = gatewayOwnerFor(allowedAgentsPinned, gatewayOwnerPrincipal, 'mcp-guard');
@@ -933,9 +939,11 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // so the claim asks for exactly that; anything else keeps the escalate. Only an escalate is lifted this way — a block,
       // suspend or quarantine here is never overridden by an approval given before it. And only over an authenticated issuer
       // channel: the grant's `approvedByHuman` is what lifts it, so it must not be forgeable in transit.
-      const reviewed = requireAuthorization && final.decision === 'escalate' && !!signed.authorizationId && issuerChannelAuthenticated;
+      // `honourApprovals` (0.25.0) lets a Service without requireAuthorization — a value-less tool — do the same: it claims
+      // ONLY such an approval, never an ordinary allowed call.
+      const reviewed = (requireAuthorization || honourApprovals === true) && final.decision === 'escalate' && !!signed.authorizationId && issuerChannelAuthenticated;
       let permitted = final;
-      if (requireAuthorization && (final.decision === 'allow' || final.decision === 'observe' || reviewed)) {
+      if ((requireAuthorization && (final.decision === 'allow' || final.decision === 'observe')) || reviewed) {
         // The claim states the digest of what THIS Service is about to execute — only when the agent bound one (a digest for
         // an unbound authorization is refused by the issuer: this Service would be asserting a binding that does not exist).
         const claimDigest = payloadDigest !== undefined && signedDigest !== undefined ? payloadDigest : undefined;
@@ -1189,7 +1197,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
 
   // `allowedAgents`: the pin this guard enforces (the DIDs, 'any', or null when unset) — a gateway asserts it at startup,
   // so a stale guard that predates the option (and would ignore it) cannot run unnoticed.
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, reportOutcome, acceptCounterpartyChallenge, invalidateBundle, close, serviceDid, allowedAgents: allowedAgentsPinned, gatewayOwnerPrincipal: owner };
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, reportOutcome, acceptCounterpartyChallenge, invalidateBundle, close, serviceDid, allowedAgents: allowedAgentsPinned, gatewayOwnerPrincipal: owner, honoursApprovals: requireAuthorization === true || honourApprovals === true };
 }
 
 /**

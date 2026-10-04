@@ -146,7 +146,9 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.23.0: acceptCounterpartyChallenge() — a Service signs its acceptance of an owner's registration (MAGP §8.7.6). No
 // template change; required with GATEWAY_VERSION below so the gateway never resolves a second guard of its own.
 // 0.24.0: reportOutcome() signs a reportId and an occurrence count (aggregated refusals, a durable spool).
-const MCP_GUARD_VERSION = '^0.24.0';
+// 0.25.0: honourApprovals — a Service without requireAuthorization (the value-less gateway) still runs an owner-approved
+// escalation, exactly once (MAGP §8.7.18). Required: the non-financial gateway sets it and asserts guard.honoursApprovals.
+const MCP_GUARD_VERSION = '^0.25.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -177,7 +179,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.21.0: per-route allowedAgents; depends on agentsafe-mcp-guard ^0.22.0.
 // 0.22.0: depends on agentsafe-mcp-guard ^0.23.0.
 // 0.23.0: refusals aggregated with their count, and `reportSpool` (both hosted templates set it); depends on agentsafe-mcp-guard ^0.24.0.
-const GATEWAY_VERSION = '^0.23.0';
+// 0.24.0: depends on agentsafe-mcp-guard ^0.25.0 (one guard in the tree with MCP_GUARD_VERSION above). No template change.
+const GATEWAY_VERSION = '^0.24.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `
@@ -1674,7 +1677,7 @@ const gatedChangeOwnPermissions = guard.guardTool(
   changeOwnPermissions,
   (a) => ({ context: a }),
 );
-${!sandbox && !withGateway ? '\n' + resumeBlock('gatedAction') : ''}
+${!sandbox ? '\n' + resumeBlock('gatedAction') : ''}
 const STEPS = ${JSON.stringify(steps, null, 2)};
 const INPUTS = ${JSON.stringify(demo.inputs)};
 const NOT_STAGED = ${JSON.stringify(demo.notDemonstrated)};
@@ -1695,7 +1698,7 @@ async function attempt(n, total, step) {
     got = g.decision ?? 'error';
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
-      ${escalateNote(sandbox, !sandbox && !withGateway ? 'step.context' : null)}
+      ${escalateNote(sandbox, !sandbox ? 'step.context' : null)}
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? e.message));
       console.log(dim(g.eventId ? '     decided by the MetaMynd gate - your tool never ran.' : '     decided right here from your signed rules (no network call), and reported for audit - your tool never ran.'));
@@ -1818,15 +1821,20 @@ const identity = JSON.parse(readFileSync(new URL('./service.metamynd.json', impo
 // whose owner granted it this same action would run your tool with your credentials (refused AGENT_NOT_ADMITTED instead).
 // Add a DID here only for another agent you mean this gateway to act for. gatewayOwnerPrincipal binds it to YOU, the owner of
 // its credentials: an agent listed here that another principal owns is refused anyway (GATEWAY_OWNER_MISMATCH).
-const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: false, policyPublicKey: '${policyKey}', allowedAgents: ['${agentDid}'], gatewayOwnerPrincipal: '${ownerPrincipal}' });
+// honourApprovals: with requireAuthorization off this gateway claims nothing — except an escalated call that presents the
+// authorization your APPROVAL minted (Dashboard -> Escalations). That one it claims as an approval: the issuer grants it
+// once, only for a hold a person approved, for this agent and these values, so the approved call runs here exactly once.
+const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: false, policyPublicKey: '${policyKey}', allowedAgents: ['${agentDid}'], gatewayOwnerPrincipal: '${ownerPrincipal}', honourApprovals: true });
 // A guard below 0.22.0 cannot enforce both pins (below 0.20.0 it ignores allowedAgents and serves every agent; 0.22.0 added gatewayOwnerPrincipal): refuse to start on one (a stale lockfile, say).
 if (!Array.isArray(guard.allowedAgents) || !guard.gatewayOwnerPrincipal) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.22.0 to enforce allowedAgents and gatewayOwnerPrincipal - run npm install');
+// A guard below 0.25.0 ignores honourApprovals, and an approved escalation would stay escalated here: refuse to start on one.
+if (guard.honoursApprovals !== true) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.25.0 to run approved escalations - run npm install');
 
 const gateway = createHttpGateway({
   guard,
   routes,
   // Every request this gateway runs or refuses is reported, signed with the identity above, to your Activity Log (MAGP
-  // 16.4). It claims nothing, so without this the issuer would never see what it executed - or that another agent tried.
+  // 16.4). It claims only an approved escalation, so without this the issuer would never see what it executed - or that another agent tried.
   reportOutcomes: true,
   // A report the issuer could not take (it was down, say) is kept here and re-sent, so nothing it saw is lost. Gitignored.
   reportSpool: './reports.spool.jsonl',
@@ -2048,7 +2056,7 @@ ${clonedFreshSection(daemonKey)}
 
 ## Change the rules
 
-${changeRulesSection(sandbox, !sandbox && !withGateway)}
+${changeRulesSection(sandbox, !sandbox)}
 
 ## What this is not
 
@@ -2562,9 +2570,8 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
         : exampleIndexNoGateway(scope, perTxnMax, currency, paymentMerchant, !!sandbox),
     force,
   );
-  // Resumable = the index carries the resume path (resumeBlock): not the shared sandbox (nobody can approve there), and not a
-  // non-financial agent behind ./gateway (it runs without requireAuthorization, so it cannot honour an approval yet).
-  writeFileSafe(outDir, 'package.json', examplePackageJson(slug, neutral, !sandbox && (!neutral || !withGateway)), force);
+  // Resumable = the index carries the resume path (resumeBlock): every agent but the shared sandbox, where nobody can approve.
+  writeFileSafe(outDir, 'package.json', examplePackageJson(slug, neutral, !sandbox), force);
   writeFileSafe(outDir, '.gitignore', gitignore(), force);
   writeFileSafe(
     outDir,
