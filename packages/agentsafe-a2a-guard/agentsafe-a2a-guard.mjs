@@ -19,7 +19,7 @@
 // bundles (policy-core.mjs, magp-did.mjs) plus a hand-written one (magp-policy.mjs, identical copy
 // to the MCP guard's — see that file's own header for why it's duplicated rather than shared).
 import crypto from 'node:crypto';
-import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, effectiveRiskFloor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 
 /**
@@ -591,7 +591,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         unsigned: context,
         signed: { action, agentDid, amount, currency, merchant, resource, ...(jurisdiction ? { jurisdiction } : {}) },
         gatewayDerived: trustedContext,
-        riskFloor: riskFloorFor(mandate, action),
+        riskFloor: effectiveRiskFloor(mandate, action, amount),
       }),
       mandateRequest: {
         target: action,
@@ -702,7 +702,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       }
       // The EFFECTIVE risk: the owner's tier and this skill's own derivation are floors under the agent's claim.
       const mandateForRisk = (bundle?.mandates ?? []).find((m) => m.action === action)?.document;
-      const effectiveRisk = maxRisk(riskFloorFor(mandateForRisk, action), normalizeRiskLevel(trustedContext?.riskLevel), normalizeRiskLevel(itinerary.riskLevel)) ?? undefined;
+      const effectiveRisk = maxRisk(effectiveRiskFloor(mandateForRisk, action, amount), normalizeRiskLevel(trustedContext?.riskLevel), normalizeRiskLevel(itinerary.riskLevel)) ?? undefined;
       const modeGate = operatingModeGate(bundle?.__operatingMode?.mode, { amount, riskLevel: effectiveRisk });
       if (modeGate.decision === 'block') return { decision: 'block', reasonCode: modeGate.reasonCode };
       if (policyPublicKey) {

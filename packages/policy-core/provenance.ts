@@ -115,6 +115,99 @@ export function riskFloorFor(
   return floor;
 }
 
+// ─── risk the agent cannot lower (MAGP §6.4.3) ───────────────────────────────────────────────────────
+
+/**
+ * A single payment at or above this share of the action's per-transaction cap is HIGH risk, whatever the agent claims.
+ * The owner tunes it per grant (`permission[].riskSignals.amountShare`, a fraction in (0, 1], or `false` to turn it off).
+ */
+export const DEFAULT_AMOUNT_SHARE_HIGH = 0.7;
+
+/** One reason the effective risk is what it is — recorded with the decision so it explains itself. */
+export interface RiskSignal {
+  signal: 'owner-tier' | 'amount-share' | 'new-merchant';
+  level: RiskLevel;
+  /** Human-readable, e.g. "82% of the 500 per-transaction cap". Never an amount the agent did not sign. */
+  detail?: string;
+}
+
+type GrantLike = { target?: string; riskTier?: unknown; riskSignals?: unknown; constraint?: { leftOperand?: unknown; operator?: unknown; rightOperand?: unknown }[] };
+type MandateLike = { target?: string; permission?: GrantLike[] } | null | undefined;
+
+function grantsFor(mandate: MandateLike, target: string): GrantLike[] {
+  return (mandate?.permission ?? []).filter((p) => !!p && typeof p === 'object' && (p.target ?? mandate?.target) === target);
+}
+
+/** The tightest per-transaction cap (`mm:payAmount`) the grants of `target` set, or null when none does. */
+export function perTxnCapFor(mandate: MandateLike, target: string): number | null {
+  let cap: number | null = null;
+  for (const p of grantsFor(mandate, target)) {
+    for (const c of p.constraint ?? []) {
+      if (c?.leftOperand !== 'mm:payAmount') continue;
+      const n = Number(c.rightOperand);
+      if (Number.isFinite(n) && n > 0 && (cap === null || n < cap)) cap = n;
+    }
+  }
+  return cap;
+}
+
+/** Whether the owner listed the merchants this action may pay (`mm:merchant`): a listed merchant is already vetted. */
+export function hasMerchantAllowList(mandate: MandateLike, target: string): boolean {
+  return grantsFor(mandate, target).some((p) => (p.constraint ?? []).some((c) => c?.leftOperand === 'mm:merchant'));
+}
+
+/**
+ * The owner's settings for derived risk on `target`: `permission[].riskSignals` is `false` (no derived risk at all) or
+ * `{ amountShare?: number | false, newMerchant?: boolean }`. Unset = the defaults (amount share 0.7, new merchant on). The
+ * strictest grant wins: the smallest share, and new-merchant on if any grant leaves it on.
+ */
+export function riskSignalSettings(mandate: MandateLike, target: string): { amountShare: number | null; newMerchant: boolean } {
+  const grants = grantsFor(mandate, target);
+  if (grants.length === 0) return { amountShare: DEFAULT_AMOUNT_SHARE_HIGH, newMerchant: true };
+  let amountShare: number | null = null;
+  let newMerchant = false;
+  for (const p of grants) {
+    const s = p.riskSignals;
+    if (s === false) continue; // this grant opts out entirely
+    const cfg = s && typeof s === 'object' ? (s as { amountShare?: unknown; newMerchant?: unknown }) : {};
+    const share = cfg.amountShare === false ? null : cfg.amountShare === undefined ? DEFAULT_AMOUNT_SHARE_HIGH : Number(cfg.amountShare);
+    if (share !== null && Number.isFinite(share) && share > 0 && share <= 1 && (amountShare === null || share < amountShare)) amountShare = share;
+    if (cfg.newMerchant !== false) newMerchant = true;
+  }
+  return { amountShare, newMerchant };
+}
+
+/**
+ * Why `target`'s risk is at least what it is — every source the agent CANNOT lower:
+ *   - `owner-tier`: the mandate owner's `riskTier` (riskFloorFor);
+ *   - `amount-share`: a signed amount at or above the owner's share (default 70%) of the per-transaction cap is HIGH;
+ *   - `new-merchant`: the first payment to an UNVETTED merchant is HIGH. Never where the mandate lists the merchants this
+ *     action may pay (a listed merchant is already vetted). Only the issuer knows the rest — the owner's payee directory
+ *     and the payment history — so only it passes `newMerchant: true`, and only for a merchant that is neither a registered
+ *     payee nor paid before. A guard or gateway derives the other two from the same signed mandate and so agrees.
+ * Pure. The agent's own `riskLevel` claim is then merged ABOVE these (buildRuleContext): it can raise risk, never lower it.
+ */
+export function riskSignalsFor(mandate: MandateLike, target: string, amount?: unknown, opts: { newMerchant?: boolean } = {}): RiskSignal[] {
+  const out: RiskSignal[] = [];
+  const tier = riskFloorFor(mandate as Parameters<typeof riskFloorFor>[0], target);
+  if (tier) out.push({ signal: 'owner-tier', level: tier, detail: `the owner's risk tier for ${target}` });
+  const settings = riskSignalSettings(mandate, target);
+  const n = typeof amount === 'number' ? amount : Number(amount);
+  const cap = perTxnCapFor(mandate, target);
+  if (settings.amountShare !== null && cap !== null && Number.isFinite(n) && n > 0 && n >= settings.amountShare * cap) {
+    out.push({ signal: 'amount-share', level: 'high', detail: `${Math.round((n / cap) * 100)}% of the ${cap} per-transaction cap (review from ${Math.round(settings.amountShare * 100)}%)` });
+  }
+  if (opts.newMerchant === true && settings.newMerchant && !hasMerchantAllowList(mandate, target)) {
+    out.push({ signal: 'new-merchant', level: 'high', detail: 'the first payment to this merchant' });
+  }
+  return out;
+}
+
+/** The risk floor for `target` the agent cannot lower: the highest of `riskSignalsFor`, or null when none applies. */
+export function effectiveRiskFloor(mandate: MandateLike, target: string, amount?: unknown, opts: { newMerchant?: boolean } = {}): RiskLevel | null {
+  return maxRisk(...riskSignalsFor(mandate, target, amount, opts).map((s) => s.level));
+}
+
 /**
  * Does the owner require this action's payload to be bound (`permission[].requirePayloadBinding`)? True if ANY grant of the
  * target says so — the strict reading, like the highest-tier-wins rule above. Only a literal `true` counts: a hand-authored

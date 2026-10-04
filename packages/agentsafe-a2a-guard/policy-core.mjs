@@ -43,6 +43,57 @@ function riskFloorFor(mandate, target) {
   }
   return floor;
 }
+var DEFAULT_AMOUNT_SHARE_HIGH = 0.7;
+function grantsFor(mandate, target) {
+  return (mandate?.permission ?? []).filter((p) => !!p && typeof p === "object" && (p.target ?? mandate?.target) === target);
+}
+function perTxnCapFor(mandate, target) {
+  let cap = null;
+  for (const p of grantsFor(mandate, target)) {
+    for (const c of p.constraint ?? []) {
+      if (c?.leftOperand !== "mm:payAmount") continue;
+      const n = Number(c.rightOperand);
+      if (Number.isFinite(n) && n > 0 && (cap === null || n < cap)) cap = n;
+    }
+  }
+  return cap;
+}
+function hasMerchantAllowList(mandate, target) {
+  return grantsFor(mandate, target).some((p) => (p.constraint ?? []).some((c) => c?.leftOperand === "mm:merchant"));
+}
+function riskSignalSettings(mandate, target) {
+  const grants = grantsFor(mandate, target);
+  if (grants.length === 0) return { amountShare: DEFAULT_AMOUNT_SHARE_HIGH, newMerchant: true };
+  let amountShare = null;
+  let newMerchant = false;
+  for (const p of grants) {
+    const s = p.riskSignals;
+    if (s === false) continue;
+    const cfg = s && typeof s === "object" ? s : {};
+    const share = cfg.amountShare === false ? null : cfg.amountShare === void 0 ? DEFAULT_AMOUNT_SHARE_HIGH : Number(cfg.amountShare);
+    if (share !== null && Number.isFinite(share) && share > 0 && share <= 1 && (amountShare === null || share < amountShare)) amountShare = share;
+    if (cfg.newMerchant !== false) newMerchant = true;
+  }
+  return { amountShare, newMerchant };
+}
+function riskSignalsFor(mandate, target, amount, opts = {}) {
+  const out = [];
+  const tier = riskFloorFor(mandate, target);
+  if (tier) out.push({ signal: "owner-tier", level: tier, detail: `the owner's risk tier for ${target}` });
+  const settings = riskSignalSettings(mandate, target);
+  const n = typeof amount === "number" ? amount : Number(amount);
+  const cap = perTxnCapFor(mandate, target);
+  if (settings.amountShare !== null && cap !== null && Number.isFinite(n) && n > 0 && n >= settings.amountShare * cap) {
+    out.push({ signal: "amount-share", level: "high", detail: `${Math.round(n / cap * 100)}% of the ${cap} per-transaction cap (review from ${Math.round(settings.amountShare * 100)}%)` });
+  }
+  if (opts.newMerchant === true && settings.newMerchant && !hasMerchantAllowList(mandate, target)) {
+    out.push({ signal: "new-merchant", level: "high", detail: "the first payment to this merchant" });
+  }
+  return out;
+}
+function effectiveRiskFloor(mandate, target, amount, opts = {}) {
+  return maxRisk(...riskSignalsFor(mandate, target, amount, opts).map((s) => s.level));
+}
 function requiresPayloadBindingFor(mandate, target) {
   if (!mandate) return false;
   for (const p of mandate.permission ?? []) {
@@ -732,6 +783,10 @@ function buildLegacyAuthMessageV1(f) {
 function buildLocalDecisionMessage(f) {
   return [f.agentDid, f.action, f.decision, f.reasonCode, f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
 }
+var AGENT_SETTLE_PREFIX = "MAGP-SETTLE-v1";
+function buildAgentSettleMessage(f) {
+  return [AGENT_SETTLE_PREFIX, f.verb, f.agentDid, f.authorizationId, f.nonce, f.issuedAt, ...f.fields].map((v) => escapeField(String(v))).join("|");
+}
 
 // src/policy-core/checkpoint-anchor.ts
 function buildCheckpointAnchorMessage(f) {
@@ -782,12 +837,14 @@ function operatingModeGate(mode, ctx) {
   }
 }
 export {
+  AGENT_SETTLE_PREFIX,
   ATOM_DEFAULT_REQUIRED_CONTEXT,
   ATOM_REGISTRY,
   ATOM_SPECS,
   AUTH_MESSAGE_V2_TAG,
   CATALOGUED_ATOMS,
   CONTEXT_UNVERIFIABLE,
+  DEFAULT_AMOUNT_SHARE_HIGH,
   JURISDICTION_ATOM,
   MODES_BY_RANK,
   MODE_RANK,
@@ -801,6 +858,7 @@ export {
   applySignedLast,
   asOperatingMode,
   authorityFailure,
+  buildAgentSettleMessage,
   buildAuthMessage,
   buildCheckpointAnchorMessage,
   buildLegacyAuthMessageV1,
@@ -809,10 +867,12 @@ export {
   canAuthorize,
   contextFieldProblem,
   documentEnforcesJurisdiction,
+  effectiveRiskFloor,
   evaluate,
   evaluateBoundStandards,
   evaluateMandate,
   evaluateStandardRules,
+  hasMerchantAllowList,
   isAuthorityFailure,
   isOperatingMode,
   isProvenance,
@@ -823,6 +883,7 @@ export {
   moreRestrictive,
   normalizeRiskLevel,
   operatingModeGate,
+  perTxnCapFor,
   provenanceOf,
   releaseHold,
   remainingBudget,
@@ -830,6 +891,8 @@ export {
   requiredContextOf,
   requiresPayloadBindingFor,
   riskFloorFor,
+  riskSignalSettings,
+  riskSignalsFor,
   sumEventField,
   validateMolecules
 };
