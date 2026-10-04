@@ -14,6 +14,7 @@ import { resolve as resolvePath } from 'node:path';
 import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, effectiveRiskFloor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
+import { resumeRequestDigest } from './resume-binding.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
 import { resolveKeyProvider, decryptAgentKeyWithPassword } from './key-providers.mjs';
@@ -334,6 +335,7 @@ export function createGuard(opts = {}) {
   // When an authorize call fails AFTER it was sent (a timeout, a dropped connection, a proxy's 5xx), the gate may still have
   // committed a hold this agent never heard of. It is looked up and released after these delays (ms); [] turns it off.
   const orphanDelaysMs = Array.isArray(opts.orphanReleaseDelaysMs) ? opts.orphanReleaseDelaysMs : [2_000, 10_000, 30_000];
+  let warnedNoRequestDigest = false; // once per guard: the gate predates the resume binding (§9a.5)
   // Escalations being resumed in THIS process right now, by any gated tool of this guard: a second, concurrent resume of
   // the same one is refused instead of racing the first past the "still unused?" check (since 0.22.0).
   const resumesInFlight = new Set();
@@ -1063,6 +1065,27 @@ export function createGuard(opts = {}) {
      * lock of their own (the scaffold takes its saved call atomically) or a gateway, which claims the authorization
      * atomically.
      */
+    // The resume binding of the request these args map to, under the approval's authorization. The payload counts only
+    // when the hold carries one (`payloadBound`); a hold a reviewer's MODIFY minted has none until it is bound.
+    const resumeDigestFor = (st, mapped) => {
+      let payloadDigest = '';
+      if (st.payloadBound && mapped.payload !== undefined) {
+        try {
+          payloadDigest = payloadDigestOf(toWireJson(mapped.payload));
+        } catch {
+          payloadDigest = 'unbindable';
+        }
+      }
+      return resumeRequestDigest({
+        authorizationId: st.authorizationId,
+        action,
+        amount: mapped.amount,
+        currency: mapped.currency ?? 'USD',
+        merchant: mapped.merchant ?? '',
+        resource: mapped.resource ?? '',
+        payloadDigest,
+      });
+    };
     gated.resume = async (escalationId, args, opts = {}) => {
       if (resumesInFlight.has(escalationId)) {
         throw refusal({ decision: 'block', reasonCode: 'AUTHORIZATION_IN_USE', escalationId, status: 'approved' });
@@ -1085,6 +1108,15 @@ export function createGuard(opts = {}) {
         throw refusal({ decision: 'block', reasonCode: unreachable ? 'GATE_UNREACHABLE' : 'AUTHORIZATION_ALREADY_USED', escalationId, authorizationId: st.authorizationId, status: 'approved', outcome: fx?.outcome ?? null });
       }
       const mapped = mapArgs(args);
+      // Only what was approved (0.24.0, §9a.5): the approval's hold is for ONE request. A gateway re-verifies it, but an
+      // in-process tool has nothing else between these args and the tool, so they must reproduce the hold's requestDigest.
+      if (!st.requestDigest && !warnedNoRequestDigest) {
+        warnedNoRequestDigest = true;
+        console.warn('[agentsafe] this gate returns no requestDigest (it predates MAGP §9a.5): resume() cannot check its args against the approved request, so pass the SAME args; a gateway still re-verifies them');
+      }
+      if (st.requestDigest && resumeDigestFor(st, mapped) !== st.requestDigest) {
+        throw refusal({ decision: 'block', reasonCode: 'ESCALATION_REQUEST_MISMATCH', escalationId, authorizationId: st.authorizationId, status: 'approved' });
+      }
       return run(args, { decision: 'allow', reasonCode: st.reasonCode ?? 'ESCALATION_APPROVED', authorizationId: st.authorizationId, escalationId }, mapped);
     };
     return gated;

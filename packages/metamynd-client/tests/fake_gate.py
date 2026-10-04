@@ -23,6 +23,7 @@ Escalations stay `pending` until `approve()` is called. Endpoints: POST /policy/
 from __future__ import annotations
 
 import decimal
+import hashlib
 import json
 import urllib.parse
 import re
@@ -84,6 +85,7 @@ class FakeGate:
         self.bind_requests: List[Dict[str, Any]] = []  # every late-binding request received
         self.signature_failures = 0  # requests whose eight-field signature did not verify
         self.payload_failures = 0  # requests whose payload-binding signature did not verify
+        self.resume_binding = True  # a gate that predates MAGP 9a.5 returns no requestDigest; False plays that gate
         self.echo_payload_digest = True  # a gate that predates binding (or a proxy that strips it) does not acknowledge the digest
         self.holds: Dict[str, Dict[str, Any]] = {}
         self.escalations: Dict[str, Dict[str, Any]] = {}
@@ -203,6 +205,9 @@ class FakeGate:
             data = {"status": e["status"], "reasonCode": "APPROVED" if e["status"] == "approved" else "ESCALATION_PENDING", "approvals": 1 if e["status"] == "approved" else 0, "required": 1}
             if e["status"] == "approved":
                 data["authorizationId"] = e["authorizationId"]
+                data["payloadBound"] = e.get("payloadDigest") is not None
+                if self.resume_binding:
+                    data["requestDigest"] = self._request_digest(e)
             if e["status"] == "modified":
                 data["reasonCode"] = "MODIFIED"
                 data["nextEscalationId"] = "esc-next"
@@ -253,15 +258,25 @@ class FakeGate:
             return self._refuse("block", "SOP_SPEND_CAP")
         norm = risk.strip().lower() if isinstance(risk, str) else None
         if norm not in RISK_LEVELS:
-            return self._hold("CONTEXT_UNVERIFIABLE", digest, amount, body["currency"])
+            return self._hold("CONTEXT_UNVERIFIABLE", digest, amount, body["currency"], body)
         if norm in ("high", "critical"):
-            return self._hold("RISK_REVIEW", digest, amount, body["currency"])
+            return self._hold("RISK_REVIEW", digest, amount, body["currency"], body)
         auth_id = str(uuid.uuid4())
         self.holds[auth_id] = {"state": "held", "amount": amount, "currency": body["currency"], "payloadDigest": digest, "nonce": body.get("nonce"), "agentDid": body.get("agentDid")}
         # A DIFFERENT id from auth_id — the real gate's anchored evidence event and the mandate hold are
         # never the same id; a test that only ever saw one value here could not catch the two being confused.
         self.last_event_id = str(uuid.uuid4())
         return 200, {"success": True, "data": {"decision": "allow", "reasonCode": "AUTHORIZED", "authorizationId": auth_id, "eventId": self.last_event_id, **self._ack(digest)}}
+
+    @staticmethod
+    def _request_digest(e: Mapping[str, Any]) -> str:
+        """The resume binding (MAGP 9a.5) rebuilt BY HAND, never with the client's own builder."""
+        esc = lambda v: v.replace("\\", "\\\\").replace("|", "\\|")  # noqa: E731
+        amount = float(e.get("amount") or 0)
+        text = "" if amount == 0 else (str(int(amount)) if amount.is_integer() else repr(amount))
+        fields = ["MAGP-RESUME-BIND-v1", e["authorizationId"], e.get("action", ""), text, e.get("currency", "") if text else "",
+                  e.get("merchant") or "", e.get("resource") or "", e.get("payloadDigest") or ""]
+        return "sha256:" + hashlib.sha256("|".join(esc(str(f)) for f in fields).encode("utf-8")).hexdigest()
 
     def _refuse(self, decision: str, code: str) -> "tuple[int, Any]":
         return 403, {"success": False, "data": {"decision": decision, "reasonCode": code}}
@@ -270,9 +285,10 @@ class FakeGate:
         """The gate ACKNOWLEDGES a binding by echoing the digest it stored (null when unbound)."""
         return {"payloadDigest": digest} if self.echo_payload_digest else {}
 
-    def _hold(self, code: str, digest: Optional[str] = None, amount: float = 0.0, currency: str = "USD") -> "tuple[int, Any]":
+    def _hold(self, code: str, digest: Optional[str] = None, amount: float = 0.0, currency: str = "USD", request: Optional[Mapping[str, Any]] = None) -> "tuple[int, Any]":
         esc_id = str(uuid.uuid4())
-        self.escalations[esc_id] = {"status": "pending", "authorizationId": str(uuid.uuid4()), "amount": amount, "currency": currency, "payloadDigest": digest}
+        self.escalations[esc_id] = {"status": "pending", "authorizationId": str(uuid.uuid4()), "amount": amount, "currency": currency, "payloadDigest": digest,
+                                   "action": (request or {}).get("action", ""), "merchant": (request or {}).get("merchant", ""), "resource": (request or {}).get("resource") or ""}
         return 403, {"success": False, "data": {"decision": "escalate", "reasonCode": code, "escalationId": esc_id, **self._ack(digest)}}
 
     @staticmethod

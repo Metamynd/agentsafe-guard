@@ -121,6 +121,7 @@ import functools
 import hashlib
 import inspect
 import json
+import math
 import os
 import secrets
 import socket
@@ -130,6 +131,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Union
@@ -171,7 +173,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -471,6 +473,38 @@ def canonical_payload(value: Any) -> str:
 def payload_digest(value: Any) -> str:
     """`sha256:` + the hex SHA-256 of the canonical text — what the agent signs and the executing service compares."""
     return PAYLOAD_DIGEST_PREFIX + hashlib.sha256(canonical_payload(value).encode("utf-8")).hexdigest()
+
+
+RESUME_BINDING_PREFIX = "MAGP-RESUME-BIND-v1"
+
+
+def _resume_amount(amount: Any) -> str:
+    """The amount as the resume binding spells it: JavaScript number text, empty for none or 0, other text kept as is."""
+    if amount is None or amount == "" or isinstance(amount, bool):
+        return "" if amount is None or amount == "" else str(amount)
+    try:
+        number = float(amount)
+    except (TypeError, ValueError):
+        return str(amount)
+    if not math.isfinite(number):
+        return str(amount)
+    if number == 0:
+        return ""
+    return js_number_to_string(int(number) if number.is_integer() and abs(number) <= 2**53 else number)
+
+
+def resume_request_digest(authorization_id: str, action: str, amount: Any = None, currency: Optional[str] = None,
+                          merchant: Optional[str] = None, resource: Optional[str] = None, payload_digest_value: Optional[str] = None) -> str:
+    """The digest of the request an approval's hold authorizes (MAGP 9a.5), byte-for-byte the gate's `resumeRequestDigest`.
+
+    The escalation status returns it as `requestDigest`; `resume()` recomputes it from the call it is about to run and refuses
+    a mismatch, so an owner's approval runs only what the owner approved. Pinned by docs/protocol/resume-binding-vectors.json.
+    """
+    amount_text = _resume_amount(amount)
+    fields = [RESUME_BINDING_PREFIX, authorization_id, action, amount_text, (currency or "") if amount_text else "",
+              merchant or "", resource or "", payload_digest_value or ""]
+    message = "|".join(_escape_field(str(f)) for f in fields)
+    return "sha256:" + hashlib.sha256(message.encode("utf-8")).hexdigest()
 
 
 ENVELOPE_VERSION = "1.0"
@@ -1735,6 +1769,17 @@ def guard_tool(
         refused.raised_by_guard = True  # type: ignore[attr-defined]
         return refused
 
+    def _resume_digest_for(state: "EscalationStatus", payload: "Mapping[str, Any]") -> str:
+        """The resume binding of the call these args map to. The payload counts only when the hold carries one."""
+        bound_payload = ""
+        if state.raw.get("payloadBound") and payload.get("payload", NO_PAYLOAD) is not NO_PAYLOAD:
+            try:
+                bound_payload = payload_digest(payload["payload"])
+            except PayloadNotCanonicalizable:
+                bound_payload = "unbindable"
+        return resume_request_digest(state.authorization_id or "", action, payload.get("amount"), payload.get("currency") or "USD",
+                                     payload.get("merchant", ""), payload.get("resource"), bound_payload)
+
     def _approved(escalation_id: str, *args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any]]":
         """The permit an owner's approval minted, as if the gate had allowed the call itself — or GovernanceBlocked."""
         payload = map_args(*args, **kwargs) if map_args else {}
@@ -1754,6 +1799,16 @@ def guard_tool(
         if used.outcome != "not_started":
             raise _guard_refusal(Verdict(decision="block", reason_code="AUTHORIZATION_ALREADY_USED", authorization_id=state.authorization_id,
                                          escalation_id=escalation_id, hint=f"outcome: {used.outcome}"))
+        # Only what was approved (0.14.0, MAGP 9a.5): the approval's hold is for ONE request. A gateway re-verifies it, but an
+        # in-process tool has nothing else between these args and the tool, so they must reproduce the hold's requestDigest.
+        expected = state.raw.get("requestDigest")
+        if not expected and not getattr(client, "_warned_no_request_digest", False):
+            client._warned_no_request_digest = True
+            warnings.warn("this gate returns no requestDigest (it predates MAGP 9a.5): resume() cannot check its arguments against the "
+                          "approved request, so pass the SAME args; a gateway still re-verifies them", stacklevel=3)
+        if expected and _resume_digest_for(state, payload) != expected:
+            raise _guard_refusal(Verdict(decision="block", reason_code="ESCALATION_REQUEST_MISMATCH", authorization_id=state.authorization_id,
+                                         escalation_id=escalation_id, hint="these arguments are not the request the owner approved"))
         # The original signed request is old by now (a service refuses one older than a few minutes): sign the SAME
         # request again, carrying the approval's authorization, for governance_headers() to hand to a gateway.
         signed = client.sign_request(

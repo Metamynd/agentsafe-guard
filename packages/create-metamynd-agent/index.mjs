@@ -72,7 +72,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // authorize whose answer never arrived is found by nonce and released. Required: npm run resume relies on the lock.
 // 0.23.0: the guard derives the same risk floor as the gate (owner tier + a payment at or above the owner's share of the
 // per-transaction cap is HIGH), so a local check and the gate agree on a large payment's review. No template change.
-const GUARD_VERSION = '^0.23.0';
+// 0.24.0: .resume() runs only the request the owner approved: args that do not reproduce the approval's requestDigest are
+// refused ESCALATION_REQUEST_MISMATCH before the tool runs. Required: npm run resume must never run what was not approved.
+const GUARD_VERSION = '^0.24.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -1291,7 +1293,7 @@ const WHY = {
   // action. Which one you see depends on whether the verdict was reached here or at the
   // gate, and neither of them depends on the amount.
   NO_PERMISSION_FOR_ACTION: 'the mandate never granted this action - at any amount',
-  NO_MANDATE: 'there is no mandate for this action at all',
+  NO_MANDATE: 'there is no mandate for this action at all',
   MANDATE_REVOKED: 'the owner revoked the mandate for this action',
 };
 
@@ -1498,7 +1500,7 @@ const WHY = {
   // action. Which one you see depends on whether the verdict was reached here or at the
   // gate, and neither of them depends on the amount.
   NO_PERMISSION_FOR_ACTION: 'the mandate never granted this action - at any amount',
-  NO_MANDATE: 'there is no mandate for this action at all',
+  NO_MANDATE: 'there is no mandate for this action at all',
   MANDATE_REVOKED: 'the owner revoked the mandate for this action',
 };
 
@@ -3474,7 +3476,7 @@ const WHY = {
   RISK_REVIEW: 'your SOP sends high-risk actions to a human first',
   MERCHANT_NOT_ALLOWED: 'the mandate lists which merchants this agent may pay',
   NO_PERMISSION_FOR_ACTION: 'the mandate never granted this action - at any amount',
-  NO_MANDATE: 'there is no mandate for this action at all',
+  NO_MANDATE: 'there is no mandate for this action at all',
   MANDATE_REVOKED: 'the owner revoked the mandate for this action',
 };
 
