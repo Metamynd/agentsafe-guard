@@ -678,6 +678,13 @@ touching the tool, and one started while another resume of it is still running i
 scaffold's `npm run resume` takes its saved call with an atomic rename — or a gateway, which claims the authorization
 atomically.
 
+**Only what was approved** (0.24.0). The approval is for one request: this amount, this merchant, this payload. The
+escalation status carries a `requestDigest` of it, and `.resume()` recomputes that digest from the args it is given. Args
+that do not reproduce it — a different amount, another merchant, a different payload — are refused
+`ESCALATION_REQUEST_MISMATCH` before the tool runs, and the approved hold is left for the right request. The agent's own
+`riskLevel` is not part of it (it is not what the hold authorizes). A gateway re-verifies all of this at claim time anyway;
+the check matters for a tool that runs in this process, where nothing else stands between the args and the tool.
+
 **An authorize whose answer never arrived** (a timeout, a dropped connection, a proxy's 5xx) may still have minted a hold:
 the gate commits it whether or not anyone is waiting, and nothing could use or settle it until its TTL. Since 0.22.0 the
 guard looks it up by the request's nonce (`GET /policy/mandate/authorize/by-request`) after 2, 10 and 30 seconds and
