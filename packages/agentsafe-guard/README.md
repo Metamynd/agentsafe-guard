@@ -224,6 +224,22 @@ now labels every context field with where it came from (`agent_asserted`, `agent
 The claim itself is still the agent's word when no owner tier, gateway derivation or `requireProvenance`
 exists: this closes hiding and garbling risk, and gives owners the means to close understating it.
 
+**Risk the agent cannot lower (gate v1.81+, MAGP §6.4.3).** The issuer now derives a floor under every
+claim, by default, so an agent that says `low` cannot talk its way past review:
+
+| Signal | When it applies | Owner setting |
+|---|---|---|
+| `amount-share` | a payment at or above **70%** of the action's per-transaction cap (`mm:payAmount`) | `--amount-review <share\|off>`; mandate `riskSignals: { amountShare }` |
+| `new-merchant` | the **first payment** to a merchant that is not on the mandate's merchant list, not a registered payee and never paid before (only where the mandate lists no merchants) | mandate `riskSignals: { newMerchant: false }` |
+| `owner-tier` | the owner's `riskTier` for the action | `--risk-tier <level>` |
+
+Each is `high` (the tier is whatever the owner set). Only the owner can change them, per grant; an agent
+putting `riskSignals` or `riskTier` in its own context changes nothing. An escalation caused this way says so:
+the verdict carries `riskSignals` (each `{ signal, level, detail }`, e.g. `amount-share`, `"70% of the 150
+per-transaction cap (review from 70%)"`), the guard's refusal message names it (0.25.0), and the owner's
+escalation card in the dashboard shows it next to the agent's own claim. Without `riskSignals`, a
+`RISK_REVIEW` came from the agent's own `riskLevel`.
+
 ```yaml
 # .github/workflows/governance.yml
 name: Governance

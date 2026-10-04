@@ -74,7 +74,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // per-transaction cap is HIGH), so a local check and the gate agree on a large payment's review. No template change.
 // 0.24.0: .resume() runs only the request the owner approved: args that do not reproduce the approval's requestDigest are
 // refused ESCALATION_REQUEST_MISMATCH before the tool runs. Required: npm run resume must never run what was not approved.
-const GUARD_VERSION = '^0.24.0';
+// 0.25.0: a refusal names the risk the issuer derived (err.governance.riskSignals, and in the message), so the demo's
+// escalation explains a held 'low' call. Required: the scaffold README promises it.
+const GUARD_VERSION = '^0.25.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -427,8 +429,12 @@ function loadConfigFile(path) {
 const RISK_LEVEL_NOTE = `## Risk level: the agent's own claim
 
 \`riskLevel\` is **the agent's own claim**. It travels in the request's context: the agent's key may sign that context,
-which proves who said it, not that it is true, and nothing checks the value unless your owner configures provenance for it (an owner-set \`riskTier\` on the mandate permission, or a
-gateway route's \`trustedContext\`). \`index.mjs\` passes the tool call's own \`riskLevel\` through unchanged —
+which proves who said it, not that it is true. So it can only RAISE the risk. The issuer derives a floor the agent cannot
+lower (MAGP §6.4.3): a payment at or above **70% of the per-transaction cap** is high, as is the **first payment to a
+merchant** that is not on the mandate's merchant list, not a registered payee and never paid before, and so is anything at
+or above an owner-set \`riskTier\`. A call that says \`low\` can therefore still be held for review: the refusal names the
+cause (\`err.governance.riskSignals\`), and so does the escalation in your dashboard. Tune it when provisioning with
+\`--amount-review <share|off>\` and \`--risk-tier <level>\`; a gateway route can also derive risk with \`trustedContext\`. \`index.mjs\` passes the tool call's own \`riskLevel\` through unchanged —
 there is **no default**. A call that does not state one (or states one the gate does not recognise) is **sent
 for review** (\`CONTEXT_UNVERIFIABLE\`), never treated as \`low\`. The demo steps each state their risk explicitly.`;
 
@@ -1254,8 +1260,8 @@ const gatedBookFlight = guard.guardTool(
     amount: a.amount,
     currency: '${currency}',
     merchant: a.merchant,
-    // riskLevel is the agent's OWN claim: signing it proves who said it, not that it is true, and nothing checks it unless
-    // the owner configures provenance. Passed through as-is: when the agent does not say, it stays absent and the gate sends
+    // riskLevel is the agent's OWN claim: signing it proves who said it, not that it is true, so it can only RAISE risk; the
+    // issuer derives a floor it cannot lower (70% of the cap, a new merchant, the owner's tier — see README). Passed through as-is: when the agent does not say, it stays absent and the gate sends
     // the action for review — never 'low'.
     context: { tool: 'book-flight', riskLevel: a.riskLevel },
   }),
@@ -1457,8 +1463,8 @@ const gatedBookFlight = guard.guardTool(
     amount: a.amount,
     currency: a.currency ?? '${currency}',
     merchant: a.merchant,
-    // riskLevel is the agent's OWN claim: signing it proves who said it, not that it is true, and nothing checks it unless
-    // the owner configures provenance. Passed through as-is: when the agent does not say, it stays absent and the gate sends
+    // riskLevel is the agent's OWN claim: signing it proves who said it, not that it is true, so it can only RAISE risk; the
+    // issuer derives a floor it cannot lower (70% of the cap, a new merchant, the owner's tier — see README). Passed through as-is: when the agent does not say, it stays absent and the gate sends
     // the action for review — never 'low'.
     context: { tool: 'book-flight', riskLevel: a.riskLevel },
     // The authorization is bound to the SAME body bookFlightViaGateway() sends, so the gate records what this agent
@@ -3445,8 +3451,8 @@ const gatedBookFlight = guard.guardToolLocal(
     amount: a.amount,
     currency: a.currency ?? '${currency}',
     merchant: a.merchant,
-    // riskLevel is the agent's OWN claim: signing it proves who said it, not that it is true, and nothing checks it unless
-    // the owner configures provenance. Passed through as-is: when the agent does not say, it stays absent and the gate sends
+    // riskLevel is the agent's OWN claim: signing it proves who said it, not that it is true, so it can only RAISE risk; the
+    // issuer derives a floor it cannot lower (70% of the cap, a new merchant, the owner's tier — see README). Passed through as-is: when the agent does not say, it stays absent and the gate sends
     // the action for review — never 'low'.
     context: { tool: 'book-flight', riskLevel: a.riskLevel },
   }),

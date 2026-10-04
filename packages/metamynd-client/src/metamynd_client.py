@@ -52,10 +52,13 @@ Risk. A rule that judges `riskLevel` escalates a request that carries none (or a
 unrecognised one) — an agent that omits its risk is indistinguishable from one hiding it.
 Send an honest `riskLevel` in `context`, or have your mandate's owner set a `riskTier` so
 it does not depend on you (MAGP §6.3). `guard_tool` never invents one. Whatever you send is
-the agent's OWN claim: signing the context proves who said it, not that it is true, and
-nothing checks the value unless the owner configures provenance for it. Never default a
-missing one to "low" in a `map_args` — pass it through, so a call that does not say is
-sent for review.
+the agent's OWN claim: signing the context proves who said it, not that it is true, so it
+can only RAISE the risk. The gate derives a floor the agent cannot lower (MAGP 6.4.3): a
+payment at or above 70% of the per-transaction cap is high, as is the first payment to a
+merchant that is not on the mandate's list, not a registered payee and never paid before,
+and anything at or above an owner-set `riskTier`. A "low" call can still be held: the
+verdict names the cause (`verdict.risk_signals`). Never default a missing one to "low" in
+a `map_args` — pass it through, so a call that does not say is sent for review.
 
 In-process, cooperative. `guard_tool` runs in YOUR process: it is the agent declining to
 call a tool the gate refused, which stops a well-behaved agent and records every decision,
@@ -173,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -624,6 +627,14 @@ class Verdict:
     def permitted(self) -> bool:
         """True only for the dispositions that permit execution. Fail closed on anything else."""
         return self.decision in PERMITTING_DECISIONS
+
+    @property
+    def risk_signals(self) -> "list[Mapping[str, Any]]":
+        """The risk the ISSUER derived and the agent cannot lower (MAGP 6.4.3; gate v1.82+), on an escalate: `owner-tier`,
+        `amount-share` (at or above the owner's share of the per-transaction cap) or `new-merchant`, each with a `detail`.
+        Empty when none applied: then a RISK_REVIEW came from the agent's own riskLevel claim."""
+        signals = self.raw.get("riskSignals") if isinstance(self.raw, Mapping) else None
+        return [s for s in signals if isinstance(s, Mapping)] if isinstance(signals, list) else []
 
     @property
     def jurisdiction_refused(self) -> bool:
@@ -1578,7 +1589,9 @@ _TIME_BOUND_REASONS = frozenset({"SANDBOX_CALLER_SHARE_EXCEEDED", "RATE_LIMIT_EX
 def _refusal_message(verdict: Verdict, action: str) -> str:
     """The text a model reads for a refusal: what happened, and whether retrying could ever help."""
     if verdict.decision == "escalate":
-        return f"Held for human review: {verdict.reason_code}. {action} did not run. It is held for a human; do not retry it."
+        derived = "; ".join(f"{s.get('signal')}: {s.get('detail') or s.get('level')}" for s in verdict.risk_signals)
+        why = f" Risk derived by the issuer: {derived}." if derived else ""
+        return f"Held for human review: {verdict.reason_code}.{why} {action} did not run. It is held for a human; do not retry it."
     if (verdict.reason_code or "") in _NO_DECISION_REASONS:
         return f"The governance gate did not give a decision, so {action} did not run. It may be retried later."
     if verdict.reason_code in _TIME_BOUND_REASONS:
@@ -1606,6 +1619,9 @@ class GovernanceRefusal(dict):
             escalationId=verdict.escalation_id,
             message=_refusal_message(verdict, action),
         )
+        # Only when the issuer derived the risk (0.15.0), so every other refusal keeps its shape.
+        if verdict.risk_signals:
+            self["riskSignals"] = verdict.risk_signals
         self.verdict = verdict
         self.action = action
 
