@@ -29,7 +29,7 @@ const bundles = {
   purpose: { subject: did, standards: [], sops: [], mandates: [{ action: 'book', document: { permission: [{ target: 'book', constraint: [{ leftOperand: 'purpose', operator: 'isAnyOf', rightOperand: ['travel'] }] }] } }] },
 };
 let bundle;
-const receiver = createA2aGuard({ fetchBundle: async () => bundle });
+const receiver = createA2aGuard({ allowedAgents: 'any', fetchBundle: async () => bundle });
 const task = receiver.guardA2ATask('book', async () => 'RAN');
 
 let failed = 0;

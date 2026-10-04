@@ -60,10 +60,10 @@ const DENY_BY_DEFAULT = process.env.AGENTSAFE_DENY_BY_DEFAULT === 'true';
 // public.
 // Set but blank (an unfilled compose/k8s variable) is a startup error, never "unset": reading it as unset would quietly
 // serve every agent — the very gap the variable exists to close.
+// Required (pre-beta refinement plan, 2026-10-04): a gateway names whom it acts for. Unset or blank is a startup error.
 const ALLOWED_AGENTS = (() => {
-  if (process.env.AGENTSAFE_ALLOWED_AGENTS === undefined) return undefined;
-  const raw = process.env.AGENTSAFE_ALLOWED_AGENTS.trim();
-  if (!raw) throw new Error('AGENTSAFE_ALLOWED_AGENTS is set but empty. Set it to the agent DID(s) this gateway acts for (comma-separated), or to `any`, or unset it.');
+  const raw = (process.env.AGENTSAFE_ALLOWED_AGENTS ?? '').trim();
+  if (!raw) throw new Error('AGENTSAFE_ALLOWED_AGENTS is required: the agent DID(s) this gateway acts for (comma-separated), or `any` for a gateway that holds no one owner\'s credentials (the Credential Vault, a public tool).');
   if (raw === 'any') return 'any';
   return raw.split(',').map((d) => d.trim()).filter(Boolean);
 })();
@@ -71,6 +71,9 @@ const ALLOWED_AGENTS = (() => {
 // audit trail of the owner of the agent it acts for, signed as SERVICE_DID (MAGP §16.4). Needs SERVICE_DID + SERVICE_KEY
 // and that DID registered as a counterparty by the owner. Off unless set.
 const REPORT_OUTCOMES = process.env.AGENTSAFE_REPORT_OUTCOMES === 'true';
+// The principal DID that owns this gateway's upstream credentials (§16.3): required with a list of agents, each of which must
+// belong to it (GATEWAY_OWNER_MISMATCH otherwise). Not needed with `any`.
+const GATEWAY_OWNER = (process.env.AGENTSAFE_GATEWAY_OWNER || '').trim() || undefined;
 // Credential Vault (Module G) — OPTIONAL. Unset CREDENTIAL_VAULT_URL → no resolveCredential
 // hook is built at all, identical to every version of this file before this feature existed.
 //
@@ -188,11 +191,12 @@ async function main() {
     // Off by default — agentsafe-guard >= 0.17.0 signs it unless `signContext: false`, older agents do not; a present one is always checked.
     requireContextSignature: process.env.AGENTSAFE_REQUIRE_CONTEXT_SIGNATURE === 'true',
     allowedAgents: ALLOWED_AGENTS,
+    gatewayOwnerPrincipal: GATEWAY_OWNER,
   });
   // A pin the guard does not report is a pin it does not enforce: an mcp-guard below 0.20.0 (a stale lockfile) ignores the
   // option and serves every agent. Refuse to start rather than run unpinned.
-  if (ALLOWED_AGENTS !== undefined && guard.allowedAgents == null) {
-    throw new Error(`AGENTSAFE_ALLOWED_AGENTS is set, but @metamynd/agentsafe-mcp-guard ${RESOLVED_MCP_GUARD_VERSION} does not enforce it (needs >= 0.20.0). Reinstall dependencies.`);
+  if (guard.allowedAgents == null || (ALLOWED_AGENTS !== 'any' && guard.gatewayOwnerPrincipal == null)) {
+    throw new Error(`@metamynd/agentsafe-mcp-guard ${RESOLVED_MCP_GUARD_VERSION} does not enforce AGENTSAFE_ALLOWED_AGENTS / AGENTSAFE_GATEWAY_OWNER (needs >= 0.22.0). Reinstall dependencies.`);
   }
   const routes = loadRoutes();
   if (!DENY_BY_DEFAULT) {

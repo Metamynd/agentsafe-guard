@@ -52,7 +52,7 @@ function assertParses(dir) {
 }
 
 const quiet = (fn) => { const log = console.log; console.log = () => {}; try { return fn(); } finally { console.log = log; } };
-const config = { apiBase: 'http://127.0.0.1:1', agentDid: 'did:key:zStub', agentKey: 'aa', identityId: 'stub', keyVerified: true, mandate: { scope: 'flight-purchase' }, issuer: { policyKey: 'ab'.repeat(32), bbsKey: null } };
+const config = { apiBase: 'http://127.0.0.1:1', agentDid: 'did:key:zStub', ownerPrincipal: 'did:hedera:testnet:zOwnerStub_0.0.900', agentKey: 'aa', identityId: 'stub', keyVerified: true, mandate: { scope: 'flight-purchase' }, issuer: { policyKey: 'ab'.repeat(32), bbsKey: null } };
 
 // --- the hosted scaffolds (agent, and gateway when there is one) ---
 for (const [label, extra] of [
@@ -133,8 +133,8 @@ for (const [label, extra] of [
         withGateway: true, ...(extra.neutral ? { demo: mod.defaultNeutralDemo() } : {}),
       }));
       const server = readFileSync(join(out, 'gateway', 'server.mjs'), 'utf8');
-      assert.ok(server.includes(`allowedAgents: ['${config.agentDid}']`), 'the gateway serves exactly the agent it was scaffolded for');
-      assert.ok(server.includes('if (!Array.isArray(guard.allowedAgents)) throw'), 'and refuses to start on a guard that would ignore the pin');
+      assert.ok(server.includes(`allowedAgents: ['${config.agentDid}'], gatewayOwnerPrincipal: '${config.ownerPrincipal}'`), 'the gateway admits exactly the agent it was scaffolded for, bound to its owner');
+      assert.ok(server.includes('if (!Array.isArray(guard.allowedAgents) || !guard.gatewayOwnerPrincipal) throw'), 'and refuses to start on a guard that would ignore either');
       // A-1: what it runs or refuses reaches the owner's Activity Log, signed with its own registered identity (MAGP §16.4).
       assert.ok(server.includes('reportOutcomes: true'), 'the gateway reports its outcomes');
       assert.ok(server.includes('serviceKey: identity.serviceKey'), 'signed with its own key');
@@ -154,6 +154,12 @@ check('a gateway is never scaffolded without the agent it serves', () => {
     assert.throws(
       () => quiet(() => mod.scaffoldProject({ outDir: out, config: noAgent, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: true })),
       /agentDid/,
+    );
+    // Nor without the principal that owns its credentials (gatewayOwnerPrincipal, MAGP §16.3).
+    const { ownerPrincipal: _o, ...noOwner } = config;
+    assert.throws(
+      () => quiet(() => mod.scaffoldProject({ outDir: out, config: noOwner, slug: 'p', scope: 'flight-purchase', perTxnMax: 500, currency: 'USD', merchant: 'skyward-air', sandbox: false, withGateway: true, force: true })),
+      /ownerPrincipal/,
     );
     // The DID is written into the generated server as a string literal: anything but a plain DID is refused outright.
     assert.throws(

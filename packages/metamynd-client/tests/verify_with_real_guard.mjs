@@ -38,7 +38,7 @@ const bundle = {
   ],
 };
 
-const guard = createMcpGuard({ serviceDid: 'did:local:python-conformance', fetchBundle: async () => bundle });
+const guard = createMcpGuard({ allowedAgents: 'any', serviceDid: 'did:local:python-conformance', fetchBundle: async () => bundle });
 
 const forwarded = [];
 const gateway = createHttpGateway({

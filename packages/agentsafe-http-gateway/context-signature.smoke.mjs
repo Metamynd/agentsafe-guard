@@ -29,7 +29,7 @@ const bundle = {
   sops: [{ id: 't', document: { molecules: [mol('t', 'tool-not-allowed', { allowed: ['lookup'] }, 'block', 'TOOL_BLOCKED')] } }],
   mandates: [{ action: 'report', document: { permission: [{ target: 'report', constraint: [] }] } }],
 };
-const guard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
+const guard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
 let forwarded = 0;
 const forward = async () => { forwarded++; return { status: 200, body: { ok: true } }; };
 const route = { method: 'POST', path: '/report', action: 'report', valueFields: [], allowedFields: [] };

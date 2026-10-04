@@ -46,7 +46,7 @@ function issuer(claim) {
 }
 /** The victim's hold, as the issuer would grant it. */
 const victimGrant = (extra = {}) => ({ status: 200, body: { success: true, data: { ok: true, agentDid: victim.did, action: 'flight-purchase', amount: 200, currency: 'USD', merchant: 'skyward-air', payloadDigest: null, claimToken: 'tok-v', ...extra } } });
-const mk = (subject) => createMcpGuard({ serviceDid: service.did, fetchBundle: async () => bundleFor(subject), issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true });
+const mk = (subject) => createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, fetchBundle: async () => bundleFor(subject), issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true });
 
 const t = [];
 const test = (name, fn) => t.push([name, fn]);

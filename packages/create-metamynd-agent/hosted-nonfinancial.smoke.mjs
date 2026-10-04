@@ -57,6 +57,7 @@ const AGENT_DID = harnessAgentDid(publicKeyHex);
 const molecules = RULES.map(ruleToMolecule);
 const bundle = {
   subject: AGENT_DID,
+  ownerPrincipal: 'did:hedera:testnet:zStandInOwner_0.0.900', // the principal that owns this agent (MAGP §16.3) — the gateway is bound to it
   issuedAt: new Date().toISOString(),
   maxStaleness: 'PT5M',
   standards: [],
@@ -150,7 +151,7 @@ async function gateDecide(signed) {
 }
 
 const workdir = mkdtempSync(join(tmpdir(), 'metamynd-hosted-nf-'));
-const config = { apiBase: ISSUER, agentDid: AGENT_DID, agentKey: privateKeyHex, identityId: 'stand-in', keyVerified: true, mandate: { scope: SCOPE }, issuer: { policyKey: POLICY_KEY } };
+const config = { apiBase: ISSUER, agentDid: AGENT_DID, ownerPrincipal: 'did:hedera:testnet:zStandInOwner_0.0.900', agentKey: privateKeyHex, identityId: 'stand-in', keyVerified: true, mandate: { scope: SCOPE }, issuer: { policyKey: POLICY_KEY } };
 
 /** node_modules/<pkg> -> the real package source, so generated code resolves it as a user's would. */
 function link(dir, pkg, target) {

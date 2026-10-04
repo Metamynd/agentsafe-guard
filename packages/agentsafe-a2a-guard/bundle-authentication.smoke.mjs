@@ -55,7 +55,7 @@ const check = (name, ok, detail) => {
 };
 
 try {
-  const unpinned = createA2aGuard({ issuerApi });
+  const unpinned = createA2aGuard({ allowedAgents: 'any', issuerApi });
   check('an unpinned guard over plain http warns at construction', warnings.some((w) => w.includes('POLICY_BUNDLE_UNVERIFIED')));
 
   let v = await unpinned.verifyRequest(signed('wire-transfer', 5000));
@@ -65,18 +65,18 @@ try {
   check('an amount-0 action the forged bundle granted → refused too', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
 
   warnings.length = 0;
-  const optedOut = createA2aGuard({ issuerApi, allowUnverifiedBundle: true });
+  const optedOut = createA2aGuard({ allowedAgents: 'any', issuerApi, allowUnverifiedBundle: true });
   v = await optedOut.verifyRequest(signed('permissions.update', 0));
   check('allowUnverifiedBundle: true restores the old behaviour (explicit, local dev only)', v.reasonCode !== 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
   check('...and still says so at construction', warnings.some((w) => w.includes('allowUnverifiedBundle is set')));
 
   warnings.length = 0;
-  const custom = createA2aGuard({ fetchBundle: async () => forgedBundle });
+  const custom = createA2aGuard({ allowedAgents: 'any', fetchBundle: async () => forgedBundle });
   v = await custom.verifyRequest(signed('permissions.update', 0));
   check("a custom fetchBundle is the integrator's own source: not refused by this rule", v.reasonCode !== 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
 
   warnings.length = 0;
-  createA2aGuard({ issuerApi: 'https://metamynd.ai/api/v1' });
+  createA2aGuard({ allowedAgents: 'any', issuerApi: 'https://metamynd.ai/api/v1' });
   check('an https issuer with no key is warned about, not refused (TLS authenticates the issuer)', warnings.some((w) => w.includes('TLS alone')) && !warnings.some((w) => w.includes('POLICY_BUNDLE_UNVERIFIED')));
 } finally {
   console.warn = realWarn;

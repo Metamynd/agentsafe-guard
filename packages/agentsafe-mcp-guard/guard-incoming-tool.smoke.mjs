@@ -42,7 +42,7 @@ const bundle = {
   ],
 };
 
-const guard = createMcpGuard({ serviceDid: service.did, fetchBundle: async () => bundle });
+const guard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, fetchBundle: async () => bundle });
 
 function signedRequest(action, amount = 0) {
   const nonce = crypto.randomUUID();

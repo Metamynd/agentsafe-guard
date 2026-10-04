@@ -72,7 +72,7 @@ const router = (over = {}) => (path) => {
   if (path.endsWith('/effect/unknown')) return over.unknown ?? ok({ effectState: 'unknown' });
   throw new Error('unexpected issuer call ' + path);
 };
-const mk = (opts = {}) => createMcpGuard({ serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
+const mk = (opts = {}) => createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
 
 const t = [];
 const test = (name, fn) => t.push([name, fn]);
@@ -322,7 +322,7 @@ const svcKeys = crypto.generateKeyPairSync('ed25519');
 const svcRaw = svcKeys.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
 const SVC_DID = buildHederaDid('testnet', svcRaw, '0.0.4242');
 const SVC_KEY_HEX = svcKeys.privateKey.export({ type: 'pkcs8', format: 'der' }).toString('hex');
-const mkSigned = (opts = {}) => createMcpGuard({ serviceDid: SVC_DID, serviceKey: SVC_KEY_HEX, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
+const mkSigned = (opts = {}) => createMcpGuard({ allowedAgents: 'any', serviceDid: SVC_DID, serviceKey: SVC_KEY_HEX, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
 const claimNoToken = claimOk(); // an authenticated claim is answered without a bearer token
 const escapeField = (v) => String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 /** Independently verify a signed call the way the issuer does: rebuild the message, check it against the key in the DID. */
@@ -549,7 +549,7 @@ test('refundAuthorization refuses bad input locally and reports issuer refusals 
   try { assert.equal((await mk().refundAuthorization({ authorizationId: 'a9' })).reasonCode, 'ISSUER_UNREACHABLE'); } finally { d.restore(); }
   const failing = mockIssuer(() => ok({}));
   try {
-    const g = createMcpGuard({ serviceDid: SVC_DID, keyProvider: { signHandshakeNonce: async () => '00', signServiceMessage: async () => { throw new Error('daemon down'); } }, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1' });
+    const g = createMcpGuard({ allowedAgents: 'any', serviceDid: SVC_DID, keyProvider: { signHandshakeNonce: async () => '00', signServiceMessage: async () => { throw new Error('daemon down'); } }, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1' });
     assert.equal((await g.refundAuthorization({ authorizationId: 'a9' })).reasonCode, 'SERVICE_SIGNING_FAILED');
     assert.equal(failing.calls.length, 0, 'a signing failure never sends the call anonymously');
   } finally { failing.restore(); }

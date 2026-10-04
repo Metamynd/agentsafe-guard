@@ -31,7 +31,7 @@ async function main() {
   const socketPath = path.join(stateDir, 'signer.sock');
   await daemon.startSigningServer(socketPath);
 
-  const guard = createMcpGuard({ serviceDid, keyProvider: 'daemon', daemonSocketPath: socketPath });
+  const guard = createMcpGuard({ allowedAgents: 'any', serviceDid, keyProvider: 'daemon', daemonSocketPath: socketPath });
 
   const nonceA = crypto.randomUUID();
   const challenge = await guard.handshakeChallenge({ fromDid: 'did:key:zSomeAgent', nonceA, protoVersion: '1.0' });
@@ -65,7 +65,7 @@ async function main() {
     return { ok: true, status: 200, json: async () => ({ success: true, data }) };
   };
   try {
-    const signingGuard = createMcpGuard({ serviceDid, keyProvider: 'daemon', daemonSocketPath: socketPath, issuerApi: ISSUER });
+    const signingGuard = createMcpGuard({ allowedAgents: 'any', serviceDid, keyProvider: 'daemon', daemonSocketPath: socketPath, issuerApi: ISSUER });
     const authId = crypto.randomUUID();
     const claimed = await signingGuard.claimAuthorization({ authorizationId: authId });
     const ch = calls[0]?.headers ?? {};
@@ -82,7 +82,7 @@ async function main() {
     // A Service whose daemon is down must not quietly fall back to an anonymous call (refused on mainnet anyway,
     // and it would hide the real fault): nothing is sent, and the helpers report SERVICE_SIGNING_FAILED without throwing.
     const before = calls.length;
-    const downGuard = createMcpGuard({ serviceDid, keyProvider: 'daemon', daemonSocketPath: path.join(stateDir, 'no-such.sock'), issuerApi: ISSUER });
+    const downGuard = createMcpGuard({ allowedAgents: 'any', serviceDid, keyProvider: 'daemon', daemonSocketPath: path.join(stateDir, 'no-such.sock'), issuerApi: ISSUER });
     const downClaim = await downGuard.claimAuthorization({ authorizationId: crypto.randomUUID() });
     const downCap = await downGuard.captureAuthorization({ authorizationId: authId, amountCharged: 200 });
     const downVoid = await downGuard.releaseAuthorization({ authorizationId: authId, reason: 'x' });
@@ -93,7 +93,7 @@ async function main() {
 
     // A daemon bound to a DIFFERENT identity than the guard's serviceDid refuses to sign (DAEMON_IDENTITY_MISMATCH).
     const wrongDid = buildHederaDid('testnet', crypto.generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' }).subarray(-32), '0.0.201');
-    const wrongGuard = createMcpGuard({ serviceDid: wrongDid, keyProvider: 'daemon', daemonSocketPath: socketPath, issuerApi: ISSUER });
+    const wrongGuard = createMcpGuard({ allowedAgents: 'any', serviceDid: wrongDid, keyProvider: 'daemon', daemonSocketPath: socketPath, issuerApi: ISSUER });
     const wrong = await wrongGuard.captureAuthorization({ authorizationId: authId, amountCharged: 1 });
     check(wrong.ok === false && wrong.reasonCode === 'SERVICE_SIGNING_FAILED' && /DAEMON_IDENTITY_MISMATCH|IDENTITY_MISMATCH/.test(wrong.error ?? ''),
       "a serviceDid that is not the daemon's own identity is refused by the daemon, not sent with a signature the issuer would reject");

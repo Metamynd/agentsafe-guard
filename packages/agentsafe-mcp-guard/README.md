@@ -357,24 +357,53 @@ if (verdict.decision === 'allow' || verdict.decision === 'observe') await upstre
 | `PAYLOAD_DIGEST_HEADER` | `x-magp-payload-digest`, the header a claim carries it in |
 | `PayloadNotCanonicalizable` | the error class thrown above |
 
-### Serve only the agents you act for (`allowedAgents`) — since 0.20.0
+### Whom this Service acts for (`allowedAgents`, `gatewayOwnerPrincipal`) — required since 0.22.0
 
 Every check above judges the **caller** by the **caller's own** mandate and SOPs, which the caller's owner writes. It answers
 "may this agent do this?", never "is this an agent I act for?". So a Service that holds one owner's credentials (an agent's
-own tool gateway) and is left unpinned runs them for **any** agent on the platform whose own owner granted it an action of
-the same name. With `requireAuthorization` the claim does not stop it either: the hold belongs to the caller, and the
-caller's owner chooses which services may claim it. An independent tester did exactly this (XT-1, 2026-10-03).
+own tool gateway) and does not say whom it acts for runs them for **any** agent on the platform whose own owner granted it
+an action of the same name — and with `requireAuthorization` the claim does not stop it, because the hold belongs to the
+caller. An independent tester did exactly this (XT-1, 2026-10-03). MAGP §16.3:
 
 ```js
 const guard = createMcpGuard({ serviceDid, issuerApi, policyPublicKey, requireAuthorization: true,
-  allowedAgents: ['did:hedera:testnet:z5mQ…_0.0.10365442'] });   // the agent(s) this Service acts for
+  allowedAgents: ['did:hedera:testnet:z5mQ…_0.0.10365442'],           // the agents this Service acts for
+  gatewayOwnerPrincipal: 'did:hedera:testnet:z3eyu…_0.0.10389396' });  // the principal that owns its credentials
+
+guard.guardIncomingTool('payroll-run', handler, { allowedAgents: [payrollAgentDid] }); // a narrower credential profile
 ```
 
-Any other agent is refused `AGENT_NOT_SERVED` (MAGP §16.3) after its signature is verified and **before** its policy is
-fetched or anything is claimed. `allowedAgents: 'any'` serves every governed agent on purpose — a public tool server, or
-one that resolves each call's credential per tenant. Left unset, the guard serves every agent as before and warns once at
-startup. A malformed value (an empty list, an empty string) throws at construction. `create-metamynd-agent` ≥ 0.14.11
-pins every gateway it scaffolds to the agent it provisioned; **a gateway scaffolded earlier is unpinned — add the line.**
+- **Admission.** Any other agent is refused `AGENT_NOT_ADMITTED` after its signature is verified and **before** its policy
+  is fetched or anything is claimed. `allowedAgents` is **required**: leaving it out is a startup error (it used to serve
+  everyone). `'any'` serves every governed agent on purpose — only for a public tool, or one that resolves each caller's
+  own credential (the Credential Vault) — and says so at startup.
+- **Owner binding.** With a list, `gatewayOwnerPrincipal` is **required** (`GATEWAY_OWNER_UNBOUND` at startup). An admitted
+  agent whose **signed** bundle names another owner (`ownerPrincipal`, §6.2.7), or none, is refused
+  `GATEWAY_OWNER_MISMATCH` before any claim — listing another tenant's agent does not admit it.
+- **Credential profiles.** A tool (`guardIncomingTool(…, { allowedAgents })`) or a call (`verifyRequest(…, { allowedAgents })`)
+  may admit fewer agents than the Service: `CREDENTIAL_PROFILE_NOT_PERMITTED`.
+- `guard.allowedAgents` / `guard.gatewayOwnerPrincipal` report what is enforced; a gateway asserts both at startup.
+
+`create-metamynd-agent` ≥ 0.14.14 admits the agent it provisioned and binds the gateway to that agent's owner. **A gateway
+scaffolded earlier is not bound — add both lines and upgrade to 0.22.0.**
+
+**Handshake (0.22.0).** `handshakeChallenge` and `createHandshakeInitiator().prove` sign only a plain-token nonce (16–128 of
+`A-Z a-z 0-9 _ -`, `HANDSHAKE_NONCE`): before, a peer could send a canonical MAGP message as its "nonce" and obtain this
+Service's signature on its own claims (MAGP §16.2).
+
+### Accept an owner's registration (`acceptCounterpartyChallenge`) — since 0.23.0
+
+An owner registers your Service as a counterparty (a claimant of their holds, or a reporter) only with **your** consent
+(MAGP §8.7.6): they get a challenge from MetaMynd and hand you its message; you sign it and give them the signature.
+
+```js
+const signature = await guard.acceptCounterpartyChallenge(message); // hex; give it back to the owner
+```
+
+It signs only a `MAGP-COUNTERPARTY-ACCEPT-v1` message naming this Service's own `serviceDid`, a known purpose and an
+unexpired time — never anything else — and logs whom you accepted. Needs a `serviceKey` (a daemon-held key cannot sign it
+yet). Before this, any owner could register any DID on its text, which let an attacker register a victim's gateway as
+their own counterparty (XT-1).
 
 ### Report what you did (`reportOutcome`) — since 0.21.0
 

@@ -50,7 +50,7 @@ function withMockClaim(responder) {
 }
 // A compliant issuer echoes the digest the claim stated (null when it stated none): the hold is bound to exactly that.
 const okClaim = (extra = {}) => ({ headers }) => ({ status: 200, body: { success: true, data: { ok: true, effectState: 'dispatching', agentDid, action: ACTION, amount: 250, currency: 'USD', payloadDigest: headers[PAYLOAD_DIGEST_HEADER] ?? null, ...extra } } });
-const mk = (opts = {}) => createA2aGuard({ issuerApi: ISSUER, fetchBundle: async () => bundle, requireAuthorization: true, ...opts });
+const mk = (opts = {}) => createA2aGuard({ allowedAgents: 'any', issuerApi: ISSUER, fetchBundle: async () => bundle, requireAuthorization: true, ...opts });
 
 const t = [];
 const test = (name, fn) => t.push([name, fn]);

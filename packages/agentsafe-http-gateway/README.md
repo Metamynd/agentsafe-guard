@@ -35,22 +35,25 @@ guard already verifies); the gateway forwards only on `allow`/`observe`.
 ]
 ```
 
-## Serve only the agents you act for (`allowedAgents`, `AGENTSAFE_ALLOWED_AGENTS`) — since 0.19.0
+## Whom this gateway acts for (`AGENTSAFE_ALLOWED_AGENTS`, `AGENTSAFE_GATEWAY_OWNER`, per-route `allowedAgents`) — required since 0.21.0
 
 The guard re-checks every request against the **calling** agent's own policy, which its own owner writes. A gateway that
-holds one owner's upstream credential and is left unpinned forwards for **any** agent on the platform whose owner granted
-it a matching action, and the claim does not stop it (the caller's owner chooses who may claim its holds). Pin it:
-`createMcpGuard({ …, allowedAgents: ['did:…'] })` (agentsafe-mcp-guard ≥ 0.20.0), or for `server.mjs`
-`AGENTSAFE_ALLOWED_AGENTS=did:…,did:…`. Any other agent gets `403 AGENT_NOT_SERVED` and is never forwarded (MAGP §16.3).
-`any` serves every governed agent on purpose — right only with the Credential Vault (each call's credential resolved per
-tenant) or a public upstream. Unset serves every agent as before, with a startup warning; set but empty is a startup
-error (an unfilled deployment variable must not read as "serve everyone"), and so is a pin on an mcp-guard below 0.20.0,
-which would ignore it — `guard.allowedAgents` reports the pin a guard enforces.
+holds one owner's upstream credential must therefore say whom it acts for (MAGP §16.3):
+
+- `createMcpGuard({ …, allowedAgents: ['did:…'], gatewayOwnerPrincipal: 'did:…' })` (agentsafe-mcp-guard ≥ 0.22.0), or for
+  `server.mjs` `AGENTSAFE_ALLOWED_AGENTS=did:…,did:…` and `AGENTSAFE_GATEWAY_OWNER=did:…`. Both are **required**: unset or
+  blank is a startup error. Any other agent gets `403 AGENT_NOT_ADMITTED`; a listed agent another principal owns,
+  `403 GATEWAY_OWNER_MISMATCH`; neither is ever forwarded.
+- A route may admit fewer agents than the gateway — a credential profile: `{ path: '/payroll', action: 'payroll-run',
+  allowedAgents: ['did:…'] }` → `403 CREDENTIAL_PROFILE_NOT_PERMITTED` for the others. A malformed list, or one the installed
+  guard cannot enforce, fails startup.
+- `any` serves every governed agent on purpose — right only with the Credential Vault (each call's credential resolved per
+  tenant) or a public upstream — and needs no owner.
 
 ## Reporting outcomes (`reportOutcomes`, `AGENTSAFE_REPORT_OUTCOMES`) — since 0.20.0
 
 The issuer sees an execution only when the gateway **claims** an authorization. A bundle-only route (no claim, every
-non-financial agent's) runs requests nobody else ever sees, and a refusal the gateway decides itself (`AGENT_NOT_SERVED`,
+non-financial agent's) runs requests nobody else ever sees, and a refusal the gateway decides itself (`AGENT_NOT_ADMITTED`,
 a rule, a binding failure) is just as invisible — which is how another tenant's agent used an agent's gateway with nothing
 in its owner's Activity Log (XT-1). With `reportOutcomes: true` (or `AGENTSAFE_REPORT_OUTCOMES=true` for `server.mjs`) the
 gateway reports each governed request it answers through `guard.reportOutcome()` (agentsafe-mcp-guard ≥ 0.21.0), signed as

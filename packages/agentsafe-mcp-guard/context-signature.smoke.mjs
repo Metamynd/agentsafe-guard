@@ -37,8 +37,8 @@ const bundle = {
 };
 let evaluations = 0;
 const fetchBundle = async () => { evaluations++; return bundle; };
-const svc = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle });
-const strict = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle, requireContextSignature: true });
+const svc = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle });
+const strict = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle, requireContextSignature: true });
 
 let failed = 0;
 const check = (ok, label, got) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${ok ? '' : `  (got ${JSON.stringify(got)})`}`); if (!ok) failed++; };
