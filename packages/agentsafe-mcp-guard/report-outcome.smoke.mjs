@@ -46,7 +46,7 @@ const escape = (v) => String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 /** Recompute what the issuer verifies (counterparty-auth.ts buildCounterpartyMessage) and check the signature. */
 function verifiesAsIssuer(call) {
   const h = call.headers; const b = call.body;
-  const fields = [b.servedAgentDid, b.request.agentDid, b.request.action, b.outcome, b.reasonCode, b.httpStatus == null ? '' : String(b.httpStatus)];
+  const fields = [b.servedAgentDid, b.request.agentDid, b.request.action, b.outcome, b.reasonCode, b.httpStatus == null ? '' : String(b.httpStatus), b.reportId ?? '', String(b.occurrences ?? 1)];
   const msg = ['MAGP-SERVICE-v1', 'report', b.request.nonce, ...fields, h['x-magp-service-nonce'], h['x-magp-service-issued-at']].map(escape).join('|');
   return verifyDidSignature(h['x-magp-service-did'], msg, h['x-magp-service-signature']);
 }
@@ -104,6 +104,18 @@ test('a lost answer is retried once with the SAME signed headers (the issuer ans
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1].headers, calls[0].headers);
   assert.deepEqual([value.ok, value.reasonCode], [true, 'ALREADY_RECORDED']);
+});
+
+test('a report carries a reportId and its count; a retry with the same reportId signs the same id (idempotent at the issuer)', async () => {
+  const signed = mine.sign('records-update');
+  const { value, calls } = await capturing(() => pinned().reportOutcome({ signed, outcome: 'refused', reasonCode: 'AGENT_NOT_ADMITTED', httpStatus: 403, occurrences: 7, reportId: 'rpt_fixed_id_0001' }));
+  assert.equal(calls[0].body.reportId, 'rpt_fixed_id_0001');
+  assert.equal(calls[0].body.occurrences, 7);
+  assert.equal(value.reportId, 'rpt_fixed_id_0001');
+  assert.ok(verifiesAsIssuer(calls[0]), 'the count and id are inside the signature');
+  const { calls: fresh } = await capturing(() => pinned().reportOutcome({ signed, outcome: 'executed', reasonCode: 'EXECUTED', httpStatus: 200 }));
+  assert.match(fresh[0].body.reportId, /^[A-Za-z0-9_-]{8,64}$/, 'a fresh id is minted when none is given');
+  assert.equal(fresh[0].body.occurrences, 1);
 });
 
 test('a refusal from the issuer is reported back, never thrown', async () => {

@@ -55,16 +55,58 @@ await check('a binding refusal before the guard runs is reported too (it named a
   assert.deepEqual([reports[0].outcome, reports[0].reasonCode], ['refused', 'PAYLOAD_UNBINDABLE']);
 });
 
-await check('repeated refusals of one caller for one reason are coalesced (a flood must not bury the owner\'s log)', async () => {
+await check('repeated refusals of one caller for one reason are aggregated: the first at once, the rest as ONE report with their count', async () => {
   const gw = gatewayWith({ reportOutcomes: true });
   for (let i = 0; i < 5; i++) await call(gw, signedBy('did:key:zTheirs'));
   await call(gw, signedBy('did:key:zOther'));
   await call(gw, signedBy('did:key:zMine'));
   await call(gw, signedBy('did:key:zMine'));
-  await settled(gw);
+  await settled(gw); // closes the open windows
   const refused = reports.filter((r) => r.outcome === 'refused');
-  assert.deepEqual(refused.map((r) => r.signed.agentDid), ['did:key:zTheirs', 'did:key:zOther'], 'one per (caller, reason) per minute');
-  assert.equal(reports.filter((r) => r.outcome === 'executed').length, 2, 'executions are never coalesced');
+  assert.deepEqual(refused.map((r) => [r.signed.agentDid, r.occurrences ?? 1]), [['did:key:zTheirs', 1], ['did:key:zOther', 1], ['did:key:zTheirs', 4]], 'nothing dropped: 1 + 4 = 5');
+  assert.equal(reports.filter((r) => r.outcome === 'executed').length, 2, 'executions are never aggregated');
+  // The aggregate is carried by the latest repeat, not a copy of the first refusal (already reported on its own).
+  const theirs = refused.filter((r) => r.signed.agentDid === 'did:key:zTheirs');
+  assert.notEqual(theirs[1].signed.nonce, theirs[0].signed.nonce, 'the aggregate is a different signed request');
+});
+
+await check('a refusal window closes on its own timer, and the next refusal opens a fresh one', async () => {
+  const gw = gatewayWith({ reportOutcomes: true, refusalWindowMs: 40 });
+  await call(gw, signedBy('did:key:zTheirs'));
+  await call(gw, signedBy('did:key:zTheirs'));
+  await call(gw, signedBy('did:key:zTheirs'));
+  await new Promise((r) => setTimeout(r, 120));
+  await call(gw, signedBy('did:key:zTheirs'));
+  await settled(gw);
+  assert.deepEqual(reports.map((r) => r.occurrences ?? 1), [1, 2, 1]);
+});
+
+await check('a report the issuer could not take is spooled and re-sent with the SAME reportId; a refused one is not', async () => {
+  const fsp = await import('node:fs/promises'); const os = await import('node:os'); const path = await import('node:path');
+  const spool = path.join(await fsp.mkdtemp(path.join(os.tmpdir(), 'gw-spool-')), 'reports.jsonl');
+  let down = true; const seen = [];
+  const flaky = { ...guard, async reportOutcome(r) {
+    const reportId = r.reportId ?? `rpt_${seen.length}_abcdefgh`; seen.push({ ...r, reportId });
+    if (r.signed.agentDid === 'did:key:zRefusedByIssuer') return { ok: false, status: 403, reasonCode: 'COUNTERPARTY_NOT_REGISTERED', reportId };
+    return down ? { ok: false, reasonCode: 'REPORT_UNREACHABLE', reportId } : { ok: true, reasonCode: 'RECORDED', reportId };
+  } };
+  verdicts.set('did:key:zRefusedByIssuer', { decision: 'allow', reasonCode: 'AUTHORIZED' });
+  const quiet = console.warn; console.warn = () => {};
+  try {
+    const gw = createHttpGateway({ guard: flaky, routes: [route], denyByDefault: true, settle: false, reportOutcomes: true, reportSpool: spool, forward: async () => ({ status: 200, body: { done: true } }) });
+    await call(gw, signedBy('did:key:zMine'));
+    await call(gw, signedBy('did:key:zRefusedByIssuer'));
+    await gw.drainSettlements(2000);
+    const spooled = (await fsp.readFile(spool, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.deepEqual(spooled.map((p) => p.signed.agentDid), ['did:key:zMine'], 'only the transient failure is kept');
+    const firstId = spooled[0].reportId;
+    assert.equal(await gw.flushReports(), 0, 'still down: nothing recorded, kept for later');
+    assert.equal((await fsp.readFile(spool, 'utf8')).split('\n').filter(Boolean).length, 1);
+    down = false;
+    assert.equal(await gw.flushReports(), 1);
+    assert.equal(seen.at(-1).reportId, firstId, 'the issuer sees the same reportId, so a report that did land is recorded once');
+    await assert.rejects(() => fsp.readFile(spool, 'utf8'), 'the spool is empty once everything landed');
+  } finally { console.warn = quiet; verdicts.delete('did:key:zRefusedByIssuer'); }
 });
 
 await check('a claimed execution is not reported (the claim already put it on the effect chain)', async () => {
