@@ -63,7 +63,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // the action resumes", and below this the escalation never reached the owner's queue (decided in-process, no escalationId).
 // 0.19.0: a handshake signs only a plain-token nonce (a malicious Service could otherwise obtain this agent's signature on an
 // authorize request of its choosing, MAGP §8.2). Required for every scaffolded agent.
-const GUARD_VERSION = '^0.19.0';
+// 0.20.0: guard.capture() signs as the agent (MAGP-SETTLE-v1) — a hold nobody claimed is settled only by its agent, a
+// counterparty the owner registered, or (an open testnet owner) anyone (MAGP §8.7.4).
+const GUARD_VERSION = '^0.20.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {

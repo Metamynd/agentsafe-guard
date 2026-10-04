@@ -113,3 +113,25 @@ export function buildLocalDecisionMessage(f: LocalDecisionMessageFields): string
     .map((v) => escapeField(String(v)))
     .join('|');
 }
+
+export const AGENT_SETTLE_PREFIX = 'MAGP-SETTLE-v1';
+
+/** The fields an agent signs to settle its OWN hold that nobody has claimed (MAGP §8.7.4). */
+export interface AgentSettleMessageFields {
+  verb: 'capture' | 'void';
+  agentDid: string;
+  authorizationId: string;
+  nonce: string;
+  issuedAt: string;
+  /** The call's own fields — capture: amountCharged, bookingRef, settlementTxHash; void: reason ('' when absent). */
+  fields: readonly string[];
+}
+
+/**
+ * The message an agent signs to capture or void its own unclaimed hold: domain-separated from every other MAGP signature,
+ * naming the verb, the agent, the authorization and the call's fields (the same ones a counterparty signs under
+ * MAGP-SERVICE-v1), so a signature for one call cannot be replayed as another. Escaped as the authorize message (§8.3.1).
+ */
+export function buildAgentSettleMessage(f: AgentSettleMessageFields): string {
+  return [AGENT_SETTLE_PREFIX, f.verb, f.agentDid, f.authorizationId, f.nonce, f.issuedAt, ...f.fields].map((v) => escapeField(String(v))).join('|');
+}

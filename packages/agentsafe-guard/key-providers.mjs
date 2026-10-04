@@ -10,7 +10,7 @@
 import crypto from 'node:crypto';
 import net from 'node:net';
 import path from 'node:path';
-import { buildAuthMessage, buildLocalDecisionMessage } from './policy-core.mjs';
+import { buildAgentSettleMessage, buildAuthMessage, buildLocalDecisionMessage } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { buildPayloadBindingMessage, buildPayloadRebindMessage } from './payload-binding.mjs';
@@ -54,6 +54,12 @@ export function createStaticKeyProvider(agentKeyHex) {
     // provider cannot produce one. With an `authorizationId` it signs the LATE binding of a hold that already exists (8.3.11).
     async signPayloadBinding(fields) {
       return rawSign(fields.authorizationId === undefined ? buildPayloadBindingMessage(fields) : buildPayloadRebindMessage(fields));
+    },
+    // Settling this agent's OWN unclaimed hold (MAGP §8.7.4): { verb: 'capture'|'void', agentDid, authorizationId, nonce,
+    // issuedAt, fields }. OPTIONAL like signLocalDecision: without it the guard settles unsigned, which the issuer accepts
+    // only for an open testnet owner.
+    async signSettle(fields) {
+      return rawSign(buildAgentSettleMessage(fields));
     },
   };
 }
@@ -182,6 +188,19 @@ export function createDaemonKeyProvider({ socketPath }) {
       } catch (err) {
         if (err?.code === 'DAEMON_UNKNOWN_OPERATION') {
           throw Object.assign(new Error('the agentsafe-signer daemon predates payload binding (sign-payload, signer 0.15.0); upgrade it, or omit `payload`'), { code: 'PAYLOAD_BINDING_UNSUPPORTED' });
+        }
+        throw err;
+      }
+    },
+    // `sign-settle` (signer 0.20.0). A daemon that predates it answers DAEMON_UNKNOWN_OPERATION, reported as
+    // SETTLE_SIGNING_UNSUPPORTED: the guard then settles unsigned, which only an open testnet owner accepts.
+    async signSettle(fields) {
+      try {
+        const { signature } = await daemonRequest(socketPath, 'sign-settle', fields);
+        return signature;
+      } catch (err) {
+        if (err?.code === 'DAEMON_UNKNOWN_OPERATION') {
+          throw Object.assign(new Error('the agentsafe-signer daemon predates sign-settle (signer 0.20.0); upgrade it to settle an unclaimed hold as the agent'), { code: 'SETTLE_SIGNING_UNSUPPORTED' });
         }
         throw err;
       }

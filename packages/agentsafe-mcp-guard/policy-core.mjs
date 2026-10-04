@@ -732,6 +732,10 @@ function buildLegacyAuthMessageV1(f) {
 function buildLocalDecisionMessage(f) {
   return [f.agentDid, f.action, f.decision, f.reasonCode, f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
 }
+var AGENT_SETTLE_PREFIX = "MAGP-SETTLE-v1";
+function buildAgentSettleMessage(f) {
+  return [AGENT_SETTLE_PREFIX, f.verb, f.agentDid, f.authorizationId, f.nonce, f.issuedAt, ...f.fields].map((v) => escapeField(String(v))).join("|");
+}
 
 // src/policy-core/checkpoint-anchor.ts
 function buildCheckpointAnchorMessage(f) {
@@ -782,6 +786,7 @@ function operatingModeGate(mode, ctx) {
   }
 }
 export {
+  AGENT_SETTLE_PREFIX,
   ATOM_DEFAULT_REQUIRED_CONTEXT,
   ATOM_REGISTRY,
   ATOM_SPECS,
@@ -801,6 +806,7 @@ export {
   applySignedLast,
   asOperatingMode,
   authorityFailure,
+  buildAgentSettleMessage,
   buildAuthMessage,
   buildCheckpointAnchorMessage,
   buildLegacyAuthMessageV1,
