@@ -422,6 +422,52 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   }
 
   /**
+   * Report what this Service did with a governed request, into the audit trail of the owner of the agent it acts for
+   * (MAGP §16.4). The issuer only sees an execution when a hold is CLAIMED; a Service that runs a request without one (a
+   * bundle-only, non-financial gateway), or refuses one itself (AGENT_NOT_SERVED, a local rule block), is otherwise
+   * invisible to the owner — which is how another tenant's agent ran an agent's tool with nothing in the victim's log (XT-1,
+   * A-1). Signed as this Service (MAGP-SERVICE-v1, action `report`), so it needs a self-certifying `serviceDid` and its key;
+   * the issuer records it only if the served agent's owner registered that DID as an active counterparty.
+   *
+   * `servedAgentDid` defaults to the caller when this Service serves it, else to the one agent `allowedAgents` pins — so a
+   * refused foreign agent is filed under the agent the Service works for, never under the caller's owner. Visibility only:
+   * never throws, never changes a decision. Resolves `{ ok, reasonCode, status? }`.
+   */
+  async function reportOutcome({ signed, outcome, reasonCode, httpStatus, servedAgentDid } = {}) {
+    if (!base) return { ok: false, reasonCode: 'NO_ISSUER' };
+    if (outcome !== 'executed' && outcome !== 'refused') return { ok: false, reasonCode: 'REPORT_OUTCOME_INVALID' };
+    const s = signed ?? {};
+    if (!s.agentDid || !s.action || !s.nonce || !s.issuedAt || !s.signature) return { ok: false, reasonCode: 'NOTHING_TO_REPORT' };
+    const served = servedAgentDid ?? (servesAgent(s.agentDid) ? s.agentDid : (Array.isArray(allowedAgentsPinned) && allowedAgentsPinned.length === 1 ? allowedAgentsPinned[0] : null));
+    if (!served) return { ok: false, reasonCode: 'NO_SERVED_AGENT' };
+    const code = String(reasonCode ?? (outcome === 'executed' ? 'EXECUTED' : 'BLOCKED')).slice(0, 64);
+    const status = Number.isInteger(httpStatus) ? httpStatus : null;
+    let auth;
+    try {
+      auth = await serviceAuthHeaders('report', s.nonce, [served, s.agentDid, s.action, outcome, code, status == null ? '' : String(status)]);
+    } catch (err) {
+      return signingFailed(err);
+    }
+    if (!auth['x-magp-service-did']) return { ok: false, reasonCode: 'SERVICE_IDENTITY_REQUIRED' };
+    const request = { agentDid: s.agentDid, action: s.action, amount: Number(s.amount ?? 0), currency: s.currency ?? 'USD', merchant: s.merchant ?? '', resource: s.resource ?? null, nonce: s.nonce, issuedAt: s.issuedAt, signature: s.signature, ...(s.jurisdiction ? { jurisdiction: s.jurisdiction } : {}) };
+    const body = JSON.stringify({ servedAgentDid: served, outcome, reasonCode: code, httpStatus: status, request });
+    // One retry, with the SAME signed headers, on a lost answer: a report that did land is answered ALREADY_RECORDED.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        // Bounded: a hung issuer must not let reports pile up behind every request (the gateway drains them on shutdown).
+        const res = await fetch(`${base}/policy/gateway-reports`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(5000) });
+        if (res.status >= 500 && attempt < 2) { await sleep(150); continue; }
+        const json = await res.json().catch(() => null);
+        return { ok: res.ok, status: res.status, reasonCode: json?.data?.reasonCode ?? refusalCode(json, `REPORT_HTTP_${res.status}`) };
+      } catch (err) {
+        if (attempt < 2) { await sleep(150); continue; }
+        return { ok: false, reasonCode: 'REPORT_UNREACHABLE', error: String(err?.message ?? err) };
+      }
+    }
+    return { ok: false, reasonCode: 'REPORT_UNREACHABLE' };
+  }
+
+  /**
    * What became of an authorization? Public, keyed by the authorization id (no signature needed). Use it when a
    * claim was refused with AUTHORIZATION_ALREADY_CLAIMED, or before deciding whether to retry anything:
    *
@@ -1064,7 +1110,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
 
   // `allowedAgents`: the pin this guard enforces (the DIDs, 'any', or null when unset) — a gateway asserts it at startup,
   // so a stale guard that predates the option (and would ignore it) cannot run unnoticed.
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, invalidateBundle, close, serviceDid, allowedAgents: allowedAgentsPinned };
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, reportOutcome, invalidateBundle, close, serviceDid, allowedAgents: allowedAgentsPinned };
 }
 
 /**

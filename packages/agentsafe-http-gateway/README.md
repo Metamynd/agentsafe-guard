@@ -47,6 +47,22 @@ tenant) or a public upstream. Unset serves every agent as before, with a startup
 error (an unfilled deployment variable must not read as "serve everyone"), and so is a pin on an mcp-guard below 0.20.0,
 which would ignore it — `guard.allowedAgents` reports the pin a guard enforces.
 
+## Reporting outcomes (`reportOutcomes`, `AGENTSAFE_REPORT_OUTCOMES`) — since 0.20.0
+
+The issuer sees an execution only when the gateway **claims** an authorization. A bundle-only route (no claim, every
+non-financial agent's) runs requests nobody else ever sees, and a refusal the gateway decides itself (`AGENT_NOT_SERVED`,
+a rule, a binding failure) is just as invisible — which is how another tenant's agent used an agent's gateway with nothing
+in its owner's Activity Log (XT-1). With `reportOutcomes: true` (or `AGENTSAFE_REPORT_OUTCOMES=true` for `server.mjs`) the
+gateway reports each governed request it answers through `guard.reportOutcome()` (agentsafe-mcp-guard ≥ 0.21.0), signed as
+its own service identity, into the audit trail of the owner of the agent it acts for (MAGP §16.4):
+
+- what it **executed** without a claim, and what it **refused** itself;
+- not an execution under a claimed authorization (the claim already records it), and not a request that named no agent.
+
+It needs a self-certifying `serviceDid` with its key (`SERVICE_DID` / `SERVICE_KEY`), registered by the agent's owner as a
+counterparty — `create-metamynd-agent` does both. Reports run in the background (`drainSettlements` waits for them) and
+never change a response; a failure is logged once per reason.
+
 ## Query strings are refused on governed routes — since 0.17.1
 
 **0.17.1 — a governed route refuses a URL query string the signature does not cover (`403 QUERY_NOT_BOUND`).** The

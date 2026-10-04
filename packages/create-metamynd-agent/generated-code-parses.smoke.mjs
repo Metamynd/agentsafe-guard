@@ -135,6 +135,11 @@ for (const [label, extra] of [
       const server = readFileSync(join(out, 'gateway', 'server.mjs'), 'utf8');
       assert.ok(server.includes(`allowedAgents: ['${config.agentDid}']`), 'the gateway serves exactly the agent it was scaffolded for');
       assert.ok(server.includes('if (!Array.isArray(guard.allowedAgents)) throw'), 'and refuses to start on a guard that would ignore the pin');
+      // A-1: what it runs or refuses reaches the owner's Activity Log, signed with its own registered identity (MAGP §16.4).
+      assert.ok(server.includes('reportOutcomes: true'), 'the gateway reports its outcomes');
+      assert.ok(server.includes('serviceKey: identity.serviceKey'), 'signed with its own key');
+      const svc = JSON.parse(readFileSync(join(out, 'gateway', 'service.metamynd.json'), 'utf8'));
+      assert.ok('serviceDid' in svc && 'serviceKey' in svc, 'its identity file is written on every hosted shape');
       const deps = JSON.parse(readFileSync(join(out, 'gateway', 'package.json'), 'utf8')).dependencies;
       // An mcp-guard below 0.20.0 ignores the option and serves every agent: the floor is part of the fix.
       assert.match(deps['@metamynd/agentsafe-mcp-guard'], /^\^0\.(2\d|[3-9]\d)\./, `mcp-guard floor ${deps['@metamynd/agentsafe-mcp-guard']} enforces allowedAgents`);
