@@ -136,6 +136,48 @@ test('without requireAuthorization (trustless mode) nothing is claimed — an es
   } finally { io.restore(); }
 });
 
+// honourApprovals (0.25.0): a value-less tool's gateway runs WITHOUT requireAuthorization (its allowed calls carry no
+// authorization to claim), so it could never run an approved escalation. With the option it claims exactly that — an
+// escalated request presenting an authorization — and nothing else.
+const valueless = (extra = {}) => ({ status: 200, body: { success: true, data: { ok: true, effectState: 'dispatching', agentDid: agent.did, action: 'flight-purchase', amount: 0, currency: 'USD', merchant: 'skyward-air', payloadDigest: null, claimToken: 'tok-v', ...extra } } });
+
+test('honourApprovals without requireAuthorization: an approved escalation is claimed as an approval and executes', async () => {
+  const io = issuer(() => valueless({ approvedByHuman: true }));
+  try {
+    const r = await mk({ requireAuthorization: false, honourApprovals: true }).verifyRequest(signed({ amount: 0, authorizationId: 'auth-approved-0' }));
+    assert.equal(r.decision, 'allow');
+    assert.equal(r.reasonCode, 'ESCALATION_APPROVED');
+    assert.equal(io.calls.length, 1);
+    assert.equal(io.calls[0].body.requireHumanApproval, true);
+  } finally { io.restore(); }
+});
+
+test('honourApprovals: an ordinary ALLOWED call is still not claimed (nothing changes for allow/observe)', async () => {
+  const io = issuer(() => { throw new Error('must not claim an ordinary permit'); });
+  try {
+    const r = await mk({ requireAuthorization: false, honourApprovals: true }).verifyRequest(signed({ amount: 0, riskLevel: 'low', authorizationId: 'auth-any' }));
+    assert.equal(r.decision, 'allow');
+    assert.equal(io.calls.length, 0);
+  } finally { io.restore(); }
+});
+
+test('honourApprovals: a hold no person approved keeps the escalate; an escalate with no authorization never calls out', async () => {
+  const io = issuer(() => ({ status: 409, body: { success: false, message: 'ESCALATION_NOT_APPROVED' } }));
+  try {
+    const g = mk({ requireAuthorization: false, honourApprovals: true });
+    assert.equal((await g.verifyRequest(signed({ amount: 0, authorizationId: 'auth-ordinary' }))).decision, 'escalate');
+    const before = io.calls.length;
+    assert.equal((await g.verifyRequest(signed({ amount: 0 }))).decision, 'escalate');
+    assert.equal(io.calls.length, before);
+  } finally { io.restore(); }
+});
+
+test('guard.honoursApprovals says whether approvals can lift an escalate here', async () => {
+  assert.equal(mk({ requireAuthorization: false }).honoursApprovals, false);
+  assert.equal(mk({ requireAuthorization: false, honourApprovals: true }).honoursApprovals, true);
+  assert.equal(mk().honoursApprovals, true);
+});
+
 test('over a plain-http issuer link (not loopback) an escalate is never lifted — approvedByHuman could be forged in transit', async () => {
   const io = issuer(() => grant({ approvedByHuman: true }));
   try {

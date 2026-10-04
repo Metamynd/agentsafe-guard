@@ -546,6 +546,26 @@ node mcp-guard.smoke.mjs             # PASS when every case matches
 node claim-authorization.smoke.mjs   # requireAuthorization: replay, mismatch, fail-closed
 ```
 
+### Approved escalations on a value-less tool (`honourApprovals`) — since 0.25.0
+
+An escalated request is lifted only by a **claim** that the issuer grants for a hold a person approved (MAGP §8.7.18).
+A Service with `requireAuthorization` claims, so it honours approvals. A **value-less** tool usually runs without
+`requireAuthorization`, because its allowed calls carry no single-use authorization to claim. Before 0.25.0 such a
+Service could never run an approved escalation: its own policy escalated the call again.
+
+`honourApprovals: true` lets it claim exactly that case and nothing else. An escalated request that presents an
+`authorizationId` is claimed as an approval claim, which the issuer grants once, only for a hold a person approved, and
+only for this agent and these values. The call then runs, and the hold is settled like any claimed one. Ordinary
+allowed calls are still not claimed. A value-less agent's gateway registered as a `report` counterparty may make this
+claim, for a zero-value approved hold only (an issuer from before this release refuses it `COUNTERPARTY_NOT_REGISTERED`
+when the owner also has claim counterparties, and the call stays escalated). `guard.honoursApprovals` reports whether approvals can lift
+an escalate on this Service.
+
+```js
+const guard = createMcpGuard({ serviceDid, serviceKey, issuerApi, policyPublicKey, allowedAgents: [agentDid],
+  gatewayOwnerPrincipal, requireAuthorization: false, honourApprovals: true });
+```
+
 ### Jurisdiction (signed, since 0.16.0)
 
 A request may carry a top-level `jurisdiction` (ISO 3166-1 alpha-2) that the agent **signed** — the v2 message
