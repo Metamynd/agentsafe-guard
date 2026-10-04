@@ -46,8 +46,13 @@ instead of allowing it: an agent that omits its risk is indistinguishable from o
 not an assessment**. A real integration states an honest one — or, better, doesn't depend on
 the agent: the mandate's owner can set a `riskTier` no claim can lower (MAGP §6.3).
 Whatever you send is the agent's **own claim**: signing the context proves who said it, not that it is
-true, and nothing checks the value unless the owner configures provenance for it. In a `map_args`, pass
-the tool's own value through — never `or "low"` — so a call that does not say is sent for review.
+true, so it can only RAISE the risk. The gate derives a floor the agent cannot lower (MAGP §6.4.3): a
+payment at or above **70% of the per-transaction cap** is high, as is the **first payment to a merchant** that
+is not on the mandate's list, not a registered payee and never paid before, and anything at or above the
+owner's `riskTier`. A call that says `low` can still be held for review; `verdict.risk_signals` (and the
+`riskSignals` of a returned `GovernanceRefusal`) names the cause. The owner tunes it when provisioning
+(`--amount-review`, `--risk-tier`). In a `map_args`, pass the tool's own value through — never `or "low"` —
+so a call that does not say is sent for review.
 
 ### Jurisdiction (0.6.0, MAGP §8.3.12)
 

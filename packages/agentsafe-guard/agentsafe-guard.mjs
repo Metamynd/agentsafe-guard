@@ -60,6 +60,17 @@ export const CONTEXT_SIGNING_REASON_CODES = Object.freeze(['CONTEXT_SIGNING_UNSU
 
 /** The keys an unsigned context could name a jurisdiction under — the gate never reads them, so neither does local eval. */
 const UNSIGNED_JURISDICTION_KEYS = ['jurisdiction', 'mm:jurisdiction'];
+/**
+ * The risk the issuer derived for a verdict (MAGP §6.4.3, gate v1.82+: `riskSignals` — owner tier, a payment at or above the
+ * owner's share of the per-transaction cap, a first payment to a new merchant), as a note for the refusal message: an agent
+ * that said "low" can tell why it is held. Empty when none applied (then the agent's own riskLevel decided it).
+ */
+export function derivedRiskNote(decision) {
+  const signals = Array.isArray(decision?.riskSignals) ? decision.riskSignals : [];
+  if (signals.length === 0) return '';
+  return ` (risk derived by the issuer: ${signals.map((s) => `${s.signal}: ${s.detail ?? s.level}`).join('; ')})`;
+}
+
 function withoutUnsignedJurisdiction(context) {
   if (!context || !UNSIGNED_JURISDICTION_KEYS.some((k) => Object.prototype.hasOwnProperty.call(context, k))) return context;
   const out = { ...context };
@@ -964,7 +975,7 @@ export function createGuard(opts = {}) {
       // allow/observe both PERMIT execution; observe is permit-but-flag (SAFR §11) — the
       // handler receives the `decision` so a caller can surface/log the observation.
       if (decision.decision !== 'allow' && decision.decision !== 'observe') {
-        const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
+        const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}${derivedRiskNote(decision)}`);
         err.name = 'GovernanceBlocked';
         err.governance = decision;
         throw err;
@@ -1005,7 +1016,7 @@ export function createGuard(opts = {}) {
     const settle = toolOpts.settle ?? 'capture';
     const releaseOnError = toolOpts.releaseOnError ?? false;
     const refusal = (decision) => {
-      const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
+      const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}${derivedRiskNote(decision)}`);
       err.name = 'GovernanceBlocked';
       err.governance = decision;
       err.raisedByGuard = true; // this wrapper's own refusal — never evidence that an enclosing tool did nothing

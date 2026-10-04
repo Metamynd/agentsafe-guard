@@ -438,7 +438,10 @@ through **unchanged** — there is no default, so a call that does not say is se
 `'low'` (the demo steps each state their risk explicitly). The neutral template passes your own `args` as the
 context, so include it there. Either way `riskLevel` is **the agent's own claim**: it travels in the request
 context, and even when the agent's key signs that context, the signature proves who said it, not that it is true —
-nothing checks the value unless your owner configures provenance for it. A real integration should send an honest one — or, better, not depend on the agent at all: a mandate
+so it can only raise the risk: the gate derives a floor the agent cannot lower — a payment at or above 70% of the
+per-transaction cap, the first payment to a merchant that is not on the list (nor a registered payee, nor paid before), and
+the owner's `riskTier` — and names it in `err.governance.riskSignals` and on the dashboard escalation. Tune it with
+`--amount-review <share|off>` and `--risk-tier <level>`. A real integration should send an honest one — or, better, not depend on the agent at all: a mandate
 permission can carry an owner-set `riskTier` that no claim can lower, and a gateway route can derive the risk
 itself with `route.trustedContext` (`@metamynd/agentsafe-http-gateway` 0.10.0). See MAGP §6.3.
 
