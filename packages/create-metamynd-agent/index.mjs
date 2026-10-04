@@ -2388,17 +2388,33 @@ on purpose: an agent must never be able to release or lower-settle a hold it aut
 provisioning, \`npx create-metamynd-agent\` registered that DID as a trusted counterparty for you
 (\`POST /policy/counterparties\`). A **MAINNET** hold is *always* registered-only, regardless of your
 registry (MAGP §8.7.10) — a testnet hold stays open unless you have registered anything at all.
-Manage the registry at \`/dashboard/counterparties\`, or:
+Manage the registry at \`/dashboard/counterparties\` (it walks you through the proof below), or
+re-register this gateway yourself — after removing it from the registry, say.
+
+Registration needs **proof of control** (MAGP §8.7.6): you ask for a challenge naming you, this
+gateway signs it with its own key from \`service.metamynd.json\`, and you register with that
+signature. A DID is never registered on its text alone, so nobody can register a gateway they do
+not hold the key for. Run this from this directory (bash; \`TOKEN\` is your owner access token):
 
 \`\`\`bash
-curl -X POST $MAGP_API/policy/counterparties \\
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
-  -d '{ "did": "'"$(node -e "console.log(JSON.parse(require('fs').readFileSync('./service.metamynd.json')).serviceDid)")"'", "confirmEnforcementChange": true }'
+MAGP_API=https://metamynd.ai/api/v1 TOKEN=<owner access token> node --input-type=module -e "
+import { readFileSync } from 'node:fs'; import crypto from 'node:crypto';
+const { serviceDid, serviceKey } = JSON.parse(readFileSync('./service.metamynd.json', 'utf8'));
+const api = process.env.MAGP_API, headers = { 'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.TOKEN };
+const post = (path, body) => fetch(api + path, { method: 'POST', headers, body: JSON.stringify(body) });
+const ch = (await (await post('/policy/counterparties/challenge', { did: serviceDid, purpose: 'claim' })).json()).data;
+const key = crypto.createPrivateKey({ key: Buffer.from(serviceKey, 'hex'), format: 'der', type: 'pkcs8' });
+const signature = crypto.sign(null, Buffer.from(ch.message, 'utf8'), key).toString('hex');
+const r = await post('/policy/counterparties', { did: serviceDid, purpose: 'claim', proof: { challengeToken: ch.challengeToken, signature }, confirmEnforcementChange: true });
+console.log(r.status, await r.text());
+"
 \`\`\`
 
-\`confirmEnforcementChange: true\` is required only for your account's FIRST-EVER registration —
-it switches EVERY one of your holds (not just this agent's) from open to registered-only, so the
-API refuses a first registration without it.
+The gateway's own \`guard.acceptCounterpartyChallenge(message)\` (\`@metamynd/agentsafe-mcp-guard\`
+≥ 0.23.0) signs the same thing, if you would rather expose it from \`server.mjs\`.
+\`confirmEnforcementChange: true\` matters only for your account's FIRST-EVER registration — it
+switches EVERY one of your holds (not just this agent's) from open to registered-only, so the API
+refuses a first registration without it.
 - **Amount unknown.** \`amount-unknown\` (\`@metamynd/agentsafe-mcp-guard\` ≥ 0.3.0) blocks a
   platform tool by default when its raw bytes or a nested payload hide the amount from a naive
   spend cap — AND this agent's OWN starter SOP (see \`agent.metamynd.json\` /
@@ -4281,8 +4297,13 @@ async function main() {
       console.log(`  ${c.green('✓')} gateway DID ${c.b(gatewayDid)} — ${reg.message}`);
     } else {
       console.log(`  ${c.yellow('!')} could not register the gateway as a trusted counterparty: ${reg.message}`);
-      console.log(c.dim(`     it still works on testnet (open by default with no registry entries); a MAINNET hold cannot be`));
-      console.log(c.dim(`     claimed until it is registered — POST ${base}/policy/counterparties { "did": "${gatewayDid}", "confirmEnforcementChange": true }`));
+      console.log(c.dim(financial
+        ? `     it still works on testnet (open by default with no registry entries); a MAINNET hold cannot be`
+        : `     it still enforces; only its refusal reports cannot reach your Activity Log until it is`));
+      console.log(c.dim(financial
+        ? `     claimed until it is registered — gateway/README.md ("Who may claim this agent's holds") shows how, with the`
+        : `     registered — at /dashboard/counterparties, with the`));
+      console.log(c.dim(`     proof-of-control step registration requires, for ${gatewayDid}`));
     }
   }
 
