@@ -33,7 +33,7 @@ EXPECTED = {
     "langchain_agent.py": ["booked QK7T2M", "block/SOP_SPEND_CAP", "block/MERCHANT_NOT_ALLOWED", "block/NO_PERMISSION_FOR_ACTION"],
     "openai_agents_agent.py": ["booked QK7T2M", "block/SOP_SPEND_CAP", "block/MERCHANT_NOT_ALLOWED", "block/NO_PERMISSION_FOR_ACTION"],
     "pydantic_ai_agent.py": ["booked QK7T2M", "block/SOP_SPEND_CAP", "block/MERCHANT_NOT_ALLOWED", "block/NO_PERMISSION_FOR_ACTION"],
-    "langgraph_agent.py": ["raised PO-10231", "block/SOP_SPEND_CAP", "block/NO_PERMISSION_FOR_ACTION"],
+    "langgraph_agent.py": ["booked QK7T2M", "block/SOP_SPEND_CAP", "block/MERCHANT_NOT_ALLOWED", "block/NO_PERMISSION_FOR_ACTION"],
     "plain_python_agent.py": [
         "allow/AUTHORIZED", "capture ok=True", "settled (retry_safe=False)", "not_started: nothing_executed=True, retry_safe=False",
         "not_executed: retry_safe=True", "block/SOP_SPEND_CAP", "escalate/RISK_REVIEW", "pending (may_proceed=False)", "block/NO_PERMISSION_FOR_ACTION",
