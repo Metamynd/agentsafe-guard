@@ -1230,7 +1230,9 @@ console.log('');
 console.log(dim('   1. this project holds an agent identity (a DID) and its signing key'));
 console.log(dim('   2. that agent has a mandate - a scope it may act in, and a spend cap'));
 console.log(dim('   3. guardTool() wraps your tool, so nothing calls the raw handler'));
-console.log(dim('   4. each attempt is signed here, then decided by MetaMynd remotely'));
+console.log(dim('   4. each attempt is signed here and checked against your signed rules: what'));
+console.log(dim('      they refuse stops HERE, with no network call; what could run is decided'));
+console.log(dim('      by the MetaMynd gate, which records it'));
 console.log(dim('   5. your tool runs ONLY if that decision is ALLOW'));
 console.log('');
 console.log(dim('  scope  ${scope}'));
@@ -1240,7 +1242,7 @@ console.log(dim('  cap    ${currency} ${perTxnMax} per transaction, set by your 
 async function attempt(n, intent, args, tool = gatedBookFlight) {
   console.log('');
   console.log(bold('  Step ' + n + ' of 4') + ' - ' + intent);
-  console.log(dim('     signing the request locally, then asking the gate to decide...'));
+  console.log(dim('     signing the request here, checking it against your signed rules...'));
   try {
     const r = await tool(args);
     console.log('\\x1b[32m     ALLOWED\\x1b[0m  your tool ran and returned ' + (r.pnr ?? 'ok'));
@@ -1255,7 +1257,7 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? 'refused'));
       console.log(dim('     ' + why));
-      console.log(dim('     your tool never ran - the gate refused before execution.'));
+      console.log(dim(g.eventId ? '     decided by the MetaMynd gate - your tool never ran.' : '     decided right here from your signed rules (no network call), and reported for audit - your tool never ran.'));
     }
   }
 }
@@ -1447,11 +1449,12 @@ console.log(dim('  gateway  ' + GATEWAY + '  (run it in a separate terminal - se
 async function attempt(n, intent, args, tool = gatedBookFlight) {
   console.log('');
   console.log(bold('  Step ' + n + ' of 4') + ' - ' + intent);
-  console.log(dim('     signing the request locally, then asking the gate to decide...'));
+  console.log(dim('     signing the request here, checking it against your signed rules...'));
   try {
     const r = await tool(args);
     console.log('\\x1b[32m     ALLOWED\\x1b[0m  your tool ran (in ./gateway) and returned ' + (r.pnr ?? 'ok'));
     console.log(dim('     ' + WHY.AUTHORIZED));
+    return true;
   } catch (e) {
     const g = e.governance ?? {};
     const why = WHY[g.reasonCode] ?? e.message;
@@ -1462,14 +1465,14 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? 'refused'));
       console.log(dim('     ' + why));
-      console.log(dim('     your tool never ran - refused before execution.'));
+      console.log(dim(g.eventId ? '     decided by the MetaMynd gate - your tool never ran.' : '     decided right here from your signed rules (no network call), and reported for audit - your tool never ran.'));
     }
   }
 }
 
 console.log('');
 console.log(rule(66));
-await attempt(1, 'a ${currency} ${under} booking, low risk. Expected to pass.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
+const step1Ran = await attempt(1, 'a ${currency} ${under} booking, low risk. Expected to pass.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
 await attempt(2, 'a ${currency} ${over} booking, deliberately over the cap.', { amount: ${over}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
 await attempt(3, 'a ${currency} ${under} booking, but flagged high risk.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'high' });
 await attempt(
@@ -1487,7 +1490,13 @@ console.log(bold('  What this proved'));
 console.log('');
 console.log(dim('   - one code path, three outcomes. The rules decided, not this file'));
 console.log(dim('     and not the model driving it.'));
-console.log(dim('   - step 1 ran in ./gateway, a process this file cannot reach into. There'));
+// Only claim what happened (pre-beta rerun 2026-10-03, L-h: this said "step 1 ran in ./gateway" when step 1 was refused).
+if (step1Ran) {
+  console.log(dim('   - step 1 ran in ./gateway, a process this file cannot reach into. There'));
+} else {
+  console.log(dim('   - step 1 did not run this time (see above). When it does, it runs in'));
+  console.log(dim('     ./gateway, a process this file cannot reach into. There'));
+}
 console.log(dim('     is no rawBookFlight() here to call instead - that is what actually'));
 console.log(dim('     stops a bypass, not the guardTool() call above it.'));
 console.log(dim('   - step 4 needed no rule to stop it. The agent could not widen its own'));
@@ -1496,7 +1505,7 @@ console.log(dim('   - every blocked/escalated call never reached a real tool at 
 console.log(dim('   - if the gate were unreachable the guard fails CLOSED: it blocks.'));
 console.log('');
 console.log(bold('  With MetaMynd, you can\\'t be bypassed.') + ' ./gateway is why - it independently');
-console.log(dim('  re-verified step 1 before running it, and holds the tool this file never can.'));
+console.log(dim(step1Ran ? '  re-verified step 1 before running it, and holds the tool this file never can.' : '  re-verifies every call before running it, and holds the tool this file never can.'));
 console.log('');
 console.log('  Change the cap in the dashboard (${SOPS_PATH_ASCII}) and run again.');
 console.log(dim('  The outcome changes. This file does not. That is the point.'));
@@ -1615,7 +1624,7 @@ async function attempt(n, total, step) {
   const tool = step.action === 'permissions.update' ? gatedChangeOwnPermissions : gatedAction;
   console.log('');
   console.log(bold('  Step ' + n + ' of ' + total) + ' - ' + step.intent);
-  console.log(dim('     signing the request locally, then asking the gate to decide...'));
+  console.log(dim('     signing the request here, checking it against your signed rules...'));
   let got;
   let g = {};
   try {
@@ -1630,7 +1639,7 @@ async function attempt(n, total, step) {
       ${escalateNote(sandbox)}
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? e.message));
-      console.log(dim('     your tool never ran - refused before execution.'));
+      console.log(dim(g.eventId ? '     decided by the MetaMynd gate - your tool never ran.' : '     decided right here from your signed rules (no network call), and reported for audit - your tool never ran.'));
     }
   }
   const asExpected = got === step.expect && (!step.reasonCode || g.reasonCode === step.reasonCode);
@@ -3379,7 +3388,7 @@ async function attempt(n, intent, action, args, tool = gatedBookFlight) {
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? 'refused'));
       console.log(dim('     ' + why));
-      console.log(dim('     your tool never ran - the gate refused before execution.'));
+      console.log(dim(g.eventId ? '     decided by the MetaMynd gate - your tool never ran.' : '     decided right here from your signed rules (no network call), and reported for audit - your tool never ran.'));
     }
     dashboard.logDecision(action, args, g);
   }
@@ -3576,7 +3585,7 @@ async function attempt(n, total, step) {
       }
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? e.message));
-      console.log(dim('     your tool never ran - the gate refused before execution.'));
+      console.log(dim(g.eventId ? '     decided by the MetaMynd gate - your tool never ran.' : '     decided right here from your signed rules (no network call), and reported for audit - your tool never ran.'));
     }
     dashboard.logDecision(action, step.context, g);
   }
