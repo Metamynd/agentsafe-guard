@@ -376,6 +376,20 @@ one that resolves each call's credential per tenant. Left unset, the guard serve
 startup. A malformed value (an empty list, an empty string) throws at construction. `create-metamynd-agent` ≥ 0.14.11
 pins every gateway it scaffolds to the agent it provisioned; **a gateway scaffolded earlier is unpinned — add the line.**
 
+### Report what you did (`reportOutcome`) — since 0.21.0
+
+```js
+await guard.reportOutcome({ signed, outcome: 'executed', reasonCode: 'EXECUTED', httpStatus: 200 });
+await guard.reportOutcome({ signed, outcome: 'refused', reasonCode: verdict.reasonCode, httpStatus: 403 });
+```
+
+Files what this Service did with a governed request in the audit trail of the owner of the agent it acts for (MAGP §16.4)
+— the executions the issuer never sees because nothing was claimed, and the refusals this Service decided itself. Signed
+as this Service (MAGP-SERVICE-v1, action `report`), so it needs a self-certifying `serviceDid` with its `serviceKey`,
+registered by that owner as a counterparty; otherwise nothing is sent (`SERVICE_IDENTITY_REQUIRED`). The served agent is the
+caller when this Service serves it, else the one agent `allowedAgents` pins (pass `servedAgentDid` to choose). Never throws;
+resolves `{ ok, reasonCode, status? }`. `agentsafe-http-gateway`'s `reportOutcomes` calls it for every governed request.
+
 ### Pin the policy key (`policyPublicKey`)
 
 The bundle is what `verifyRequest` enforces, so whoever can change it in flight can change the rules. Pin MetaMynd's

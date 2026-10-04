@@ -497,11 +497,22 @@ function withHeader(headers, name, value) {
  * UNBOUND (logged at startup); a signed value field (amount/currency/merchant, or one in `valueFields`) cannot be listed.
  * Unmatched routes are untouched.
  *
+ * reportOutcomes — OPTIONAL (default false, since 0.20.0; needs agentsafe-mcp-guard >= 0.21.0 with a self-certifying
+ * serviceDid and its key): report every governed request this gateway answers to the issuer, signed as this gateway, into the
+ * audit trail of the owner of the agent it acts for (MAGP §16.4) — what it EXECUTED without claiming an authorization (a
+ * bundle-only route: the issuer never sees those otherwise) and what it REFUSED itself (AGENT_NOT_SERVED, a rule, a binding
+ * failure). An execution under a claimed authorization is not reported: the claim already put it on the effect chain. A
+ * request refused before it named an agent (no signed request, a query string) has nobody to attribute it to and is not
+ * reported. Reports run in the background like settlements (drainSettlements waits for both) and never change a response.
+ *
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
  */
-export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false, requireContextSignature, settleInBackground = true, settleRetryDelaysMs = [500, 2000] } = {}) {
+export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false, requireContextSignature, settleInBackground = true, settleRetryDelaysMs = [500, 2000], reportOutcomes = false } = {}) {
   if (typeof forward !== 'function') throw new Error('createHttpGateway requires a forward(req) function');
+  if (reportOutcomes && typeof guard?.reportOutcome !== 'function') {
+    console.warn('[gateway] reportOutcomes is set, but this guard cannot report (needs @metamynd/agentsafe-mcp-guard >= 0.21.0) — nothing will be reported');
+  }
 
   /** Hold close-outs running after their response was returned (settleInBackground). */
   const pendingSettlements = new Set();
@@ -645,8 +656,59 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     }
   }
 
+  /**
+   * Report one governed request in the background (reportOutcomes, MAGP §16.4). Never throws, never awaited by the caller.
+   */
+  const reportWarned = new Set();
+  // Refusals are coalesced: one report per (caller, reason) per minute. A refusal's caller is whoever sent the request, so a
+  // flood of junk to a governed route would otherwise become a flood of reports burying the owner's log (A-1 review, M2).
+  const REFUSAL_COALESCE_MS = 60_000;
+  const recentRefusals = new Map(); // `${callerDid}|${reasonCode}` -> until (ms)
+  function queueReport(trace, result, thrown) {
+    if (!reportOutcomes || typeof guard?.reportOutcome !== 'function' || !trace.route || !trace.request) return;
+    const executed = trace.forwarded === true;
+    // A claimed authorization is on the effect chain already (claim → capture); reporting it again would only duplicate.
+    if (executed && trace.decision?.authorizationId && (trace.decision.claimToken || trace.decision.counterpartyAuthenticated)) return;
+    const status = Number(result?.status);
+    const httpStatus = Number.isInteger(status) ? status : null;
+    const reasonCode = executed ? (thrown ? 'UPSTREAM_ERROR' : 'EXECUTED') : (result?.body?.reasonCode ?? trace.decision?.reasonCode ?? 'BLOCKED');
+    if (!executed) {
+      const now = Date.now();
+      const key = `${trace.request.agentDid}|${reasonCode}`;
+      if ((recentRefusals.get(key) ?? 0) > now) return;
+      if (recentRefusals.size > 5000) for (const [k, until] of recentRefusals) if (until <= now) recentRefusals.delete(k);
+      recentRefusals.set(key, now + REFUSAL_COALESCE_MS);
+    }
+    const p = Promise.resolve()
+      .then(() => guard.reportOutcome({ signed: trace.request, outcome: executed ? 'executed' : 'refused', reasonCode, httpStatus }))
+      .then((r) => {
+        // Once per reason: a gateway with no signing identity, or one its owner never registered, would otherwise say so on every request.
+        if (r && r.ok === false && r.reasonCode !== 'NOTHING_TO_REPORT' && !reportWarned.has(r.reasonCode)) {
+          reportWarned.add(r.reasonCode);
+          console.warn(`[gateway] outcome reports are not being recorded (${r.reasonCode}${r.status ? `, HTTP ${r.status}` : ''}) — see README "Reporting outcomes"`);
+        }
+      })
+      .catch(() => {});
+    pendingSettlements.add(p);
+    p.finally(() => pendingSettlements.delete(p));
+  }
+
   async function handle(req) {
+    const trace = {};
+    let result;
+    try {
+      result = await decide(req, trace);
+    } catch (err) {
+      queueReport(trace, undefined, true);
+      throw err;
+    }
+    queueReport(trace, result, false);
+    return result;
+  }
+
+  async function decide(req, trace) {
     const route = matchRoute(routes, req.method, req.path);
+    trace.route = route;
 
     // Unprotected route → pass through (or fail closed under an allow-list posture).
     if (!route) {
@@ -670,6 +732,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     }
     // The route pins the action — a client cannot relabel a governed call as something cheaper.
     const request = { ...signed, action: route.action ?? signed.action };
+    trace.request = request;
 
     // Bind the payload to the signature BEFORE asking the issuer anything: a request whose body
     // contradicts what was signed is refused here, so it costs no round trip and consumes no
@@ -748,6 +811,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
         ...(route.x402 === true ? { x402: true } : {}),
       };
       decision = Object.keys(verifyOptions).length ? await guard.verifyRequest(request, verifyOptions) : await guard.verifyRequest(request);
+      trace.decision = decision;
     } catch (err) {
       // Fail CLOSED: a governance error blocks the upstream call.
       return { status: 502, body: { decision: 'block', reasonCode: 'GOVERNANCE_ERROR', error: String(err?.message ?? err) } };
@@ -791,6 +855,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     }
 
     let upstream;
+    trace.forwarded = true;
     try {
       upstream = await forward(forwardReq);
     } catch (err) {
@@ -806,7 +871,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     return { ...upstream, governance: decision };
   }
 
-  /** How many hold close-outs are still running after their response went back. */
+  /** How many hold close-outs (and outcome reports) are still running after their response went back. */
   handle.pendingSettlements = () => pendingSettlements.size;
   /**
    * Wait for background hold close-outs to finish, for at most `timeoutMs`; resolves with how many were still running

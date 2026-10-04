@@ -67,6 +67,10 @@ const ALLOWED_AGENTS = (() => {
   if (raw === 'any') return 'any';
   return raw.split(',').map((d) => d.trim()).filter(Boolean);
 })();
+// Report every governed request this gateway answers (what it executed with no claim, what it refused itself) into the
+// audit trail of the owner of the agent it acts for, signed as SERVICE_DID (MAGP §16.4). Needs SERVICE_DID + SERVICE_KEY
+// and that DID registered as a counterparty by the owner. Off unless set.
+const REPORT_OUTCOMES = process.env.AGENTSAFE_REPORT_OUTCOMES === 'true';
 // Credential Vault (Module G) — OPTIONAL. Unset CREDENTIAL_VAULT_URL → no resolveCredential
 // hook is built at all, identical to every version of this file before this feature existed.
 //
@@ -204,7 +208,7 @@ async function main() {
   if (resolveCredential) {
     console.log(`[gateway] Credential Vault hook ENABLED → ${CREDENTIAL_VAULT_URL} (connector "${CREDENTIAL_VAULT_CONNECTOR_ID}", header "${CREDENTIAL_VAULT_HEADER_NAME}")`);
   }
-  const gateway = createHttpGateway({ guard, routes, forward: forwardToUpstream, denyByDefault: DENY_BY_DEFAULT, resolveCredential });
+  const gateway = createHttpGateway({ guard, routes, forward: forwardToUpstream, denyByDefault: DENY_BY_DEFAULT, resolveCredential, reportOutcomes: REPORT_OUTCOMES });
 
   const server = http.createServer(async (req, res) => {
     try {
