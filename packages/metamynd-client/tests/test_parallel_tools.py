@@ -153,12 +153,14 @@ class OnRefusalReturn(_Base):
         with self.assertRaises(ValueError):
             guard_tool(self.client, "flight-purchase", self.tool, CTX, on_refusal="retrun")
 
-    def test_an_unreachable_gate_still_raises_and_never_runs_the_tool(self) -> None:
+    def test_an_unreachable_gate_is_a_GATE_UNREACHABLE_refusal_and_never_runs_the_tool(self) -> None:
+        # 0.11.0 (L-g): an unreachable gate is a block with its own code, returned like any other refusal under
+        # on_refusal="return" — it used to escape as a bare RuntimeError with no code, crashing the framework's turn.
         guarded = guard_tool(self.client, "flight-purchase", self.tool, CTX, on_refusal="return")
         self.gate.stop()
-        with self.assertRaises(RuntimeError) as caught:
-            guarded("skyward-air", 100)
-        self.assertNotIsInstance(caught.exception, GovernanceBlocked)
+        refused = guarded("skyward-air", 100)
+        self.assertIsInstance(refused, GovernanceRefusal)
+        self.assertEqual((refused["decision"], refused["reasonCode"]), ("block", "GATE_UNREACHABLE"))
         self.assertEqual(self.ran, [])
 
 

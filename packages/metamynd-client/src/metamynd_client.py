@@ -160,6 +160,8 @@ __all__ = [
     "BindResult",
     "PayloadNotCanonicalizable",
     "DaemonError",
+    "GateUnreachable",
+    "agent_settle_message",
     "guard_tool",
     "guard_agent_tool",
     "current_governance",
@@ -168,7 +170,7 @@ __all__ = [
     "GovernanceRefusal",
 ]
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1381,7 +1383,7 @@ class MetaMyndClient:
             except json.JSONDecodeError:
                 raise RuntimeError(f"gate returned HTTP {exc.code}: {payload[:200]!r}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise RuntimeError(f"gate unreachable ({getattr(exc, 'reason', exc)}) — nothing is known about the outcome") from exc
+            raise GateUnreachable(f"gate unreachable ({getattr(exc, 'reason', exc)}) — nothing is known about the outcome") from exc
 
     def escalation_status(self, escalation_id: str) -> EscalationStatus:
         """Follow up a held action (MAGP §10).
@@ -1418,7 +1420,7 @@ class MetaMyndClient:
                 raise RuntimeError(f"gate returned HTTP {exc.code}: {payload[:200]!r}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             # Same rule as authorize: an unreachable gate is a hold, never a release.
-            raise RuntimeError(f"gate unreachable ({getattr(exc, 'reason', exc)}) — the hold stands") from exc
+            raise GateUnreachable(f"gate unreachable ({getattr(exc, 'reason', exc)}) — the hold stands") from exc
 
         return EscalationStatus(
             status=str(data.get("status", "unknown")),
@@ -1453,7 +1455,7 @@ class MetaMyndClient:
             # Rule 5 of the runtime contract: unreachable gate means BLOCK. Raising is how
             # a caller that follows the contract fails closed. (A read timeout is not a URLError.)
             reason = getattr(exc, "reason", exc)
-            raise RuntimeError(f"gate unreachable ({reason}) — {unreachable}") from exc
+            raise GateUnreachable(f"gate unreachable ({reason}) — {unreachable}") from exc
 
 
 def _loads(raw: bytes, what: str) -> Any:
@@ -1463,6 +1465,14 @@ def _loads(raw: bytes, what: str) -> Any:
         return json.loads(raw)
     except ValueError as exc:
         raise RuntimeError(f"{what}: {raw[:200]!r}") from exc
+
+
+class GateUnreachable(RuntimeError):
+    """The gate could not be reached (0.11.0). Still a RuntimeError, so `except RuntimeError` keeps working; it adds the
+    machine-readable code every other refusal has (L-g, 2026-10-03 pre-beta rerun), the one the Node guard reports.
+    Fail closed: nothing was decided, so nothing may run."""
+
+    reason_code = "GATE_UNREACHABLE"
 
 
 class GovernanceBlocked(RuntimeError):
@@ -1476,7 +1486,7 @@ class GovernanceBlocked(RuntimeError):
 
 # Reason codes that mean "the gate gave no decision" (a rate-limit or server error with a JSON body is read as a block
 # with one of these), not "the gate refused this request". Telling the model never to retry those would be wrong.
-_NO_DECISION_REASONS = frozenset({"", "UNKNOWN", "REFUSED"})
+_NO_DECISION_REASONS = frozenset({"", "UNKNOWN", "REFUSED", "GATE_UNREACHABLE"})
 
 # Refusals by a limit that frees itself over time: the same request can pass later, though no change of arguments makes
 # it pass now. "Do not retry" was wrong for these (pre-beta evaluation 2026-10-03, L-a: the shared sandbox's per-caller
@@ -1566,9 +1576,9 @@ def guard_tool(
     held action has not happened yet, and returning normally would tell the caller it had.
     (`refused.verdict.escalation_id` is the handle for `client.wait_for_escalation`.)
 
-    `on_refusal` (0.8.0, keyword-only) chooses what a refusal does — only a governance refusal;
-    an unreachable gate and a payload that cannot be bound still raise, and the tool still never
-    runs in any case:
+    `on_refusal` (0.8.0, keyword-only) chooses what a refusal does. An unreachable gate is a refusal
+    like any other since 0.11.0 — a block with reason code `GATE_UNREACHABLE` (it used to be a bare
+    RuntimeError); a payload that cannot be bound still raises, and the tool never runs in any case:
       - `"raise"` (default): raise `GovernanceBlocked`, as above.
       - `"return"`: return a `GovernanceRefusal` (a JSON-ready dict) instead — what
         `guard_agent_tool` does, and what a tool handed to an agent framework should do. When a
@@ -1628,16 +1638,22 @@ def guard_tool(
 
     def _gate(*args: "Any", **kwargs: "Any") -> "Verdict":
         payload = map_args(*args, **kwargs) if map_args else {}
-        verdict = client.authorize(
-            action,
-            payload.get("amount", 0),
-            currency=payload.get("currency", "USD"),
-            merchant=payload.get("merchant", ""),
-            context=payload.get("context", {}),
-            resource=payload.get("resource"),
-            payload=payload.get("payload", NO_PAYLOAD),
-            jurisdiction=payload.get("jurisdiction"),
-        )
+        try:
+            verdict = client.authorize(
+                action,
+                payload.get("amount", 0),
+                currency=payload.get("currency", "USD"),
+                merchant=payload.get("merchant", ""),
+                context=payload.get("context", {}),
+                resource=payload.get("resource"),
+                payload=payload.get("payload", NO_PAYLOAD),
+                jurisdiction=payload.get("jurisdiction"),
+            )
+        except GateUnreachable as exc:
+            # No decision is a block (rule 5), and a block with its code like any other (L-g): raised as GovernanceBlocked
+            # (still a RuntimeError), or under on_refusal="return" handed to the model as a GovernanceRefusal that says
+            # the gate gave no decision and the call may be retried later — not a bare framework error.
+            raise GovernanceBlocked(Verdict(decision="block", reason_code=GateUnreachable.reason_code, hint=str(exc)), action) from exc
         if not verdict.permitted:
             # Fail closed, loudly, and before the tool is touched.
             raise GovernanceBlocked(verdict, action)
@@ -1738,7 +1754,7 @@ def guard_agent_tool(client: "MetaMyndClient", action: str, fn: "Any", map_args:
     Exactly `guard_tool(client, action, fn, map_args, on_refusal="return")`: a refusal comes back as a
     `GovernanceRefusal` — a JSON-ready dict the framework gives the model as that call's result (`refused`,
     `decision`, `reasonCode`, `escalationId`, `message`) — instead of an exception. The tool still never runs on
-    a refusal, and an unreachable gate still raises.
+    a refusal, and an unreachable gate comes back the same way, with reason code `GATE_UNREACHABLE` (0.11.0).
 
     Why a separate name rather than a different default: code that calls a guarded tool ITSELF should get an
     exception for a refusal, because a returned value can be mistaken for the tool's result — so `guard_tool`
