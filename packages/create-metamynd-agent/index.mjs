@@ -61,7 +61,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.18.0 exports keepAliveFetch. No template change.
 // 0.18.1 parks a local-first ESCALATE at the gate. Required: every scaffold's demo says "approve it in the dashboard and
 // the action resumes", and below this the escalation never reached the owner's queue (decided in-process, no escalationId).
-const GUARD_VERSION = '^0.18.1';
+// 0.19.0: a handshake signs only a plain-token nonce (a malicious Service could otherwise obtain this agent's signature on an
+// authorize request of its choosing, MAGP §8.2). Required for every scaffolded agent.
+const GUARD_VERSION = '^0.19.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -128,12 +130,17 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.19.0: a request the gateway's own policy escalates, carrying an authorization a PERSON approved, is executed (once,
 // with every claim binding) instead of refused RISK_REVIEW (MAGP §8.7.18). Required: the scaffold tells the developer
 // "approve it in the dashboard and the action resumes" — below this the gateway refused exactly that.
-// 0.20.0: `allowedAgents` pins a Service to the agents it acts for (MAGP §16.3) — refused AGENT_NOT_SERVED otherwise.
+// 0.20.0: `allowedAgents` pins a Service to the agents it acts for (MAGP §16.3) — refused AGENT_NOT_ADMITTED otherwise.
 // Required: every scaffolded gateway now sets it, and an older guard would ignore the option and serve ANY agent whose
 // own owner granted it the same action, with this owner's credentials (XT-1, pre-beta evaluation 2026-10-03).
 // 0.21.0: guard.reportOutcome(). Required: the scaffolded gateways report what they ran or refused (MAGP §16.4), and
 // agentsafe-http-gateway's reportOutcomes needs it.
-const MCP_GUARD_VERSION = '^0.21.0';
+// 0.22.0: allowedAgents is required, gatewayOwnerPrincipal binds the gateway to the owner of its credentials (an admitted
+// agent of any other owner: GATEWAY_OWNER_MISMATCH), per-route admission (CREDENTIAL_PROFILE_NOT_PERMITTED), the refusal is
+// AGENT_NOT_ADMITTED, and a handshake signs only a plain-token nonce. Required: every scaffolded gateway sets the owner.
+// 0.23.0: acceptCounterpartyChallenge() — a Service signs its acceptance of an owner's registration (MAGP §8.7.6). No
+// template change; required with GATEWAY_VERSION below so the gateway never resolves a second guard of its own.
+const MCP_GUARD_VERSION = '^0.23.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -161,7 +168,9 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.19.0: depends on agentsafe-mcp-guard ^0.20.0 (allowedAgents) and reads AGENTSAFE_ALLOWED_AGENTS. Required with
 // MCP_GUARD_VERSION above, so the gateway never resolves a second, older guard of its own.
 // 0.20.0: `reportOutcomes`, which both hosted gateway templates set; depends on agentsafe-mcp-guard ^0.21.0.
-const GATEWAY_VERSION = '^0.20.0';
+// 0.21.0: per-route allowedAgents; depends on agentsafe-mcp-guard ^0.22.0.
+// 0.22.0: depends on agentsafe-mcp-guard ^0.23.0.
+const GATEWAY_VERSION = '^0.22.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `
@@ -1005,12 +1014,27 @@ async function resolveHostedRulePack(base, key, { financial, perTxnMax, maxAmoun
  * dashboard registration shows its own dialog before setting the flag); see the printed message
  * either way.
  */
-async function registerGatewayCounterparty(base, token, did, label) {
+async function registerGatewayCounterparty(base, token, did, label, purpose = 'claim', privateKeyHex = null) {
   try {
+    // The gateway accepts its own registration (MAGP §8.7.6): ask for a challenge naming this owner, sign it with the gateway's
+    // key (generated here, so this process holds it), and register with that proof. A DID is never registered on its text.
+    let proof;
+    if (privateKeyHex) {
+      const ch = await fetch(`${base}/policy/counterparties/challenge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ did, purpose }),
+      });
+      const chJson = await ch.json().catch(() => null);
+      if (!ch.ok || !chJson?.data?.message) return { ok: false, message: chJson?.message ?? `challenge HTTP ${ch.status}` };
+      proof = { challengeToken: chJson.data.challengeToken, signature: signChallengeHex(privateKeyHex, chJson.data.message) };
+    }
     const res = await fetch(`${base}/policy/counterparties`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ did, label, confirmEnforcementChange: true }),
+      // `report` (a non-financial gateway, which never claims): it may only report to this owner, and it changes nothing about
+      // who may claim their holds, so it needs no enforcement confirmation (MAGP §8.7.6, §16.4).
+      body: JSON.stringify({ did, label, purpose, ...(proof ? { proof } : {}), ...(purpose === 'claim' ? { confirmEnforcementChange: true } : {}) }),
     });
     const json = await res.json().catch(() => null);
     if (!res.ok || json?.success === false) return { ok: false, message: json?.message ?? `HTTP ${res.status}` };
@@ -1042,6 +1066,30 @@ async function ensurePolicyKey(config, base) {
   config.issuer = { ...(config.issuer ?? {}), policyKey: key.toLowerCase() };
   return config.issuer.policyKey;
 }
+
+/**
+ * The principal DID that owns this agent (and so its gateway's credentials), read from the agent's own policy bundle
+ * (`ownerPrincipal`, MAGP §16.3) on the API it was just provisioned through, and saved into the config. A gateway is bound
+ * to it: an admitted agent of any other owner is refused. Returns it, or null when the bundle names none.
+ */
+async function ensureOwnerPrincipal(config, base) {
+  if (typeof config.ownerPrincipal === 'string' && SAFE_DID.test(config.ownerPrincipal)) return config.ownerPrincipal;
+  let owner = null;
+  try {
+    const res = await fetch(`${String(base).replace(/\/+$/, '')}/policy/bundle/${encodeURIComponent(config.agentDid)}`);
+    owner = (await res.json().catch(() => null))?.data?.ownerPrincipal ?? null;
+  } catch {
+    owner = null;
+  }
+  if (typeof owner !== 'string' || !SAFE_DID.test(owner)) return null;
+  config.ownerPrincipal = owner;
+  return owner;
+}
+
+const NO_OWNER_PRINCIPAL = (base) =>
+  `Could not read the principal that owns this agent from its policy bundle (GET ${base}/policy/bundle/<agent DID>, ownerPrincipal). ` +
+  'A gateway is bound to the owner of its credentials, so none was scaffolded. Retry when the API is reachable (it needs a ' +
+  'backend that names the owner), or pass --no-gateway for the single-process example (not an enforcement boundary).';
 
 const NO_POLICY_KEY = (base) =>
   `Could not get MetaMynd's policy-signing key: the provisioning response carried none, and GET ${base}/magp/policy/pubkey ` +
@@ -1643,7 +1691,7 @@ console.log('');
  * allowed value-less request would be refused AUTHORIZATION_REQUIRED. The README states what that
  * leaves open (replay) rather than implying the financial scaffold's guarantees.
  */
-function gatewayServerFileNeutral(scope, port, apiBase, policyKey, agentDid) {
+function gatewayServerFileNeutral(scope, port, apiBase, policyKey, agentDid, ownerPrincipal) {
   return `#!/usr/bin/env node
 // gateway/server.mjs — the enforcement boundary for this agent's tool(s).
 //
@@ -1695,11 +1743,12 @@ const identity = JSON.parse(readFileSync(new URL('./service.metamynd.json', impo
 // a bundle with a higher cap or no rules, and it would be trusted the same as the real one.
 // allowedAgents pins this gateway to the ONE agent it was scaffolded for (MAGP §16.3). Every other check here judges the
 // caller by the caller's OWN mandate and SOP — written by the caller's owner. Without the pin, any agent on the platform
-// whose owner granted it this same action would run your tool with your credentials (refused AGENT_NOT_SERVED instead).
-// Add a DID here only for another agent you mean this gateway to act for.
-const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: false, policyPublicKey: '${policyKey}', allowedAgents: ['${agentDid}'] });
+// whose owner granted it this same action would run your tool with your credentials (refused AGENT_NOT_ADMITTED instead).
+// Add a DID here only for another agent you mean this gateway to act for. gatewayOwnerPrincipal binds it to YOU, the owner of
+// its credentials: an agent listed here that another principal owns is refused anyway (GATEWAY_OWNER_MISMATCH).
+const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: false, policyPublicKey: '${policyKey}', allowedAgents: ['${agentDid}'], gatewayOwnerPrincipal: '${ownerPrincipal}' });
 // A guard below 0.20.0 ignores allowedAgents and serves every agent: refuse to start on one (a stale lockfile, say).
-if (!Array.isArray(guard.allowedAgents)) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.20.0 to enforce allowedAgents - run npm install');
+if (!Array.isArray(guard.allowedAgents) || !guard.gatewayOwnerPrincipal) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.22.0 to enforce allowedAgents and gatewayOwnerPrincipal - run npm install');
 
 const gateway = createHttpGateway({
   guard,
@@ -1787,8 +1836,9 @@ the agent gets nothing, and there is no local function to call directly. The pol
 pinned to MetaMynd's own signing key (\`policyPublicKey\`, baked in from your provisioning response) —
 a party that can intercept the bundle fetch (a MITM, a compromised DNS/proxy) cannot hand this gateway
 a forged bundle with a higher cap or no rules; \`server.mjs\` refuses an unsigned or tampered one outright.
-It is also pinned to THIS agent (\`allowedAgents\` in \`server.mjs\`, MAGP 16.3): any other agent - even one whose own
-owner granted it this same action - is refused \`AGENT_NOT_SERVED\` before its rules are read. Every request it runs or
+It is also pinned to THIS agent, and bound to you as the owner of its credentials (\`allowedAgents\` and
+\`gatewayOwnerPrincipal\` in \`server.mjs\`, MAGP 16.3): any other agent - even one whose own
+owner granted it this same action - is refused \`AGENT_NOT_ADMITTED\` before its rules are read. Every request it runs or
 refuses is reported, signed with its own registered identity (\`service.metamynd.json\`), to your Activity Log (MAGP 16.4) -
 it claims nothing, so this is the only way what it ran reaches you.
 
@@ -2066,7 +2116,7 @@ function gitignore() {
 // in the AgentSafe repo for the full pattern (mutual handshake, x402 payment, capability
 // binding) this is a minimal slice of.
 
-function gatewayServerFile(scope, port, apiBase, policyKey, agentDid) {
+function gatewayServerFile(scope, port, apiBase, policyKey, agentDid, ownerPrincipal) {
   return `#!/usr/bin/env node
 // gateway/server.mjs — the REAL enforcement boundary for this agent's tool(s).
 //
@@ -2123,13 +2173,14 @@ const identity = JSON.parse(readFileSync(new URL('./service.metamynd.json', impo
 // a bundle with a higher cap or no rules, and it would be trusted the same as the real one.
 // allowedAgents pins this gateway to the ONE agent it was scaffolded for (MAGP §16.3). Every other check here judges the
 // caller by the caller's OWN mandate and SOP — written by the caller's owner. Without the pin, any agent on the platform
-// whose owner granted it this same action would run your tool with your credentials (refused AGENT_NOT_SERVED instead).
-// Add a DID here only for another agent you mean this gateway to act for.
+// whose owner granted it this same action would run your tool with your credentials (refused AGENT_NOT_ADMITTED instead).
+// Add a DID here only for another agent you mean this gateway to act for. gatewayOwnerPrincipal binds it to YOU, the owner of
+// its credentials: an agent listed here that another principal owns is refused anyway (GATEWAY_OWNER_MISMATCH).
 // The claim below does not stop that on its own: the hold belongs to the CALLER, and the caller's owner decides which
 // services may claim it — including registering this gateway's DID as one of theirs.
-const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: true, policyPublicKey: '${policyKey}', allowedAgents: ['${agentDid}'] });
+const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: true, policyPublicKey: '${policyKey}', allowedAgents: ['${agentDid}'], gatewayOwnerPrincipal: '${ownerPrincipal}' });
 // A guard below 0.20.0 ignores allowedAgents and serves every agent: refuse to start on one (a stale lockfile, say).
-if (!Array.isArray(guard.allowedAgents)) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.20.0 to enforce allowedAgents - run npm install');
+if (!Array.isArray(guard.allowedAgents) || !guard.gatewayOwnerPrincipal) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.22.0 to enforce allowedAgents and gatewayOwnerPrincipal - run npm install');
 
 const gateway = createHttpGateway({
   guard,
@@ -2276,9 +2327,9 @@ own code, or a network attacker) might attempt - and a record of what it turned 
   fetch (a MITM, a compromised DNS/proxy) cannot hand this gateway a bundle with a higher cap or
   no rules and have it trusted the same as the real one.
 - **Another agent.** Every other check judges the caller by the caller's OWN mandate, which its own owner
-  writes. \`server.mjs\` pins \`allowedAgents\` to this agent (MAGP 16.3), so another agent - even one whose
+  writes. \`server.mjs\` pins \`allowedAgents\` to this agent and \`gatewayOwnerPrincipal\` to you (MAGP 16.3), so another agent - even one whose
   owner granted it this action and registered this gateway as its counterparty - is refused
-  \`AGENT_NOT_SERVED\` before anything is claimed.
+  \`AGENT_NOT_ADMITTED\` before anything is claimed.
 - **Visibility.** What it refuses itself (another agent, a rule, a binding failure) is reported, signed with its own
   registered identity, to your Activity Log (MAGP 16.4); what it executes is already there, through the claim.
 - **Confused deputy (payload).** The gateway re-verifies the signed request against this agent's
@@ -2448,6 +2499,10 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
     }
     // It is written into generated JavaScript as a string literal: anything but a plain DID is refused, never quoted around.
     if (!SAFE_DID.test(config.agentDid)) throw new Error(`scaffoldProject: config.agentDid is not a DID: ${JSON.stringify(config.agentDid)}`);
+    // ...and to the owner of its credentials (gatewayOwnerPrincipal, MAGP §16.3), read from the agent's bundle (ensureOwnerPrincipal).
+    if (typeof config.ownerPrincipal !== 'string' || !SAFE_DID.test(config.ownerPrincipal)) {
+      throw new Error('scaffoldProject: a gateway is bound to the principal that owns its credentials (config.ownerPrincipal) — call ensureOwnerPrincipal() first, or pass withGateway: false');
+    }
     const gwDir = join(outDir, 'gateway');
     if (!existsSync(gwDir)) mkdirSync(gwDir, { recursive: true });
     {
@@ -2461,7 +2516,7 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
       const identity = gatewayIdentity ?? { did: `did:local:${scope}-gateway`, keyHex: null };
       writeFileSafe(gwDir, 'service.metamynd.json', JSON.stringify({ serviceDid: identity.did, serviceKey: identity.keyHex }, null, 2) + '\n', force, 0o600);
     }
-    writeFileSafe(gwDir, 'server.mjs', neutral ? gatewayServerFileNeutral(scope, gatewayPort, apiBase, policyKey, config.agentDid) : gatewayServerFile(scope, gatewayPort, apiBase, policyKey, config.agentDid), force);
+    writeFileSafe(gwDir, 'server.mjs', neutral ? gatewayServerFileNeutral(scope, gatewayPort, apiBase, policyKey, config.agentDid, config.ownerPrincipal) : gatewayServerFile(scope, gatewayPort, apiBase, policyKey, config.agentDid, config.ownerPrincipal), force);
     writeFileSafe(gwDir, 'package.json', gatewayPackageJson(slug), force);
     writeFileSafe(gwDir, '.env.example', neutral ? gatewayEnvExampleNeutral() : gatewayEnvExample(), force);
     writeFileSafe(gwDir, '.gitignore', gatewayGitignore(), force);
@@ -2690,6 +2745,8 @@ const PORT = Number(process.env.PORT || ${gatewayPort});
 // fails BUNDLE_SUBJECT_MISMATCH, not just an unmatched-signature error, because the bundle
 // this gateway serves is only ever this one agent's.
 const AGENT_DID = '${agentDid}';
+// No principal exists offline: the harness bundle and this gateway name the same local owner (MAGP §16.3).
+const HARNESS_OWNER = 'did:local:harness-owner';
 
 // Reshapes the harness's own rules-file shape ({mandate, sops:[{standardKey,document}],
 // standards:[{standardKey,document}]}) into what agentsafe-mcp-guard's verifyRequest expects
@@ -2710,15 +2767,16 @@ function bundleFromRules(rules) {
 // and your agent process both read, so editing it takes effect on the next request everywhere.
 const guard = createMcpGuard({
   serviceDid: 'did:local:${scope}-gateway',
-  allowedAgents: [AGENT_DID], // MAGP §16.3: any other agent is refused AGENT_NOT_SERVED before its rules are read
+  allowedAgents: [AGENT_DID], // MAGP §16.3: any other agent is refused AGENT_NOT_ADMITTED before its rules are read
+  gatewayOwnerPrincipal: HARNESS_OWNER, // the local stand-in for the principal that owns this gateway's credentials
   fetchBundle: async (agentDid) => {
     if (agentDid !== AGENT_DID) return { subject: AGENT_DID, mandates: [], sops: [], standards: [] };
     const rules = JSON.parse(readFileSync('../metamynd-rules.json', 'utf8'));
-    return { subject: AGENT_DID, ...bundleFromRules(rules) };
+    return { subject: AGENT_DID, ownerPrincipal: HARNESS_OWNER, ...bundleFromRules(rules) };
   },
 });
 // A guard below 0.20.0 ignores allowedAgents and serves every agent: refuse to start on one (a stale lockfile, say).
-if (!Array.isArray(guard.allowedAgents)) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.20.0 to enforce allowedAgents - run npm install');
+if (!Array.isArray(guard.allowedAgents) || !guard.gatewayOwnerPrincipal) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.22.0 to enforce allowedAgents and gatewayOwnerPrincipal - run npm install');
 
 // One protected route per gated action in index.mjs. This gateway IS the tool, not a proxy in
 // front of one, so a path with no route below is refused (denyByDefault) — nothing to fall through TO.
@@ -3983,6 +4041,7 @@ async function runClaim(args) {
     keepConfigAndStop('--financial was passed, but the approved agent has NO spending authority (the request was non-financial).');
   }
   if (!args['no-gateway'] && !(await ensurePolicyKey(config, config.apiBase ?? base))) keepConfigAndStop(NO_POLICY_KEY(base));
+  if (!args['no-gateway'] && !(await ensureOwnerPrincipal(config, config.apiBase || base))) keepConfigAndStop(NO_OWNER_PRINCIPAL(base));
   const slug = slugify(state.name || 'metamynd-agent');
   const outDir = resolve(String(args.out || `./${slug}`));
   if (issuedNonFinancial) {
@@ -4200,7 +4259,7 @@ async function main() {
     const gatewayDid = buildDidKey(rawPublicKeyFromSpkiHex(gwKeypair.publicKeyHex));
     gatewayIdentity = { did: gatewayDid, keyHex: gwKeypair.privateKeyHex };
     console.log(c.dim(`\n  → registering the gateway's identity as a trusted counterparty (${financial ? "so it can claim this agent's holds and report to you" : 'so its reports reach your Activity Log'}) …`));
-    const reg = await registerGatewayCounterparty(base, token, gatewayDid, `${scope}-gateway`);
+    const reg = await registerGatewayCounterparty(base, token, gatewayDid, `${scope}-gateway`, financial ? 'claim' : 'report', gwKeypair.privateKeyHex);
     if (reg.ok) {
       console.log(`  ${c.green('✓')} gateway DID ${c.b(gatewayDid)} — ${reg.message}`);
     } else {
@@ -4219,6 +4278,7 @@ async function main() {
     for (const n of demo.notDemonstrated) console.log(`  ${c.yellow('!')} not staged in the demo: ${n.rule} ${c.dim('— ' + n.why + '; still enforced')}`);
   }
   if (!args['no-gateway'] && !(await ensurePolicyKey(config, config.apiBase ?? base))) keepConfigAndFail(outDir, config, NO_POLICY_KEY(base));
+  if (!args['no-gateway'] && !(await ensureOwnerPrincipal(config, config.apiBase || base))) keepConfigAndFail(outDir, config, NO_OWNER_PRINCIPAL(base));
   scaffoldProject({ demo, outDir, config, slug, scope, perTxnMax, currency, merchant: financial ? merchants[0] || 'demo-merchant' : merchants[0], sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force, gatewayIdentity });
 }
 

@@ -23,13 +23,13 @@ function signed(action) {
   const base = { agentDid, action, amount: 0, currency: 'USD', merchant: '', nonce: crypto.randomUUID(), issuedAt: new Date().toISOString() };
   return { ...base, signature: crypto.sign(null, Buffer.from(buildAuthMessage(base), 'utf8'), privateKey).toString('hex') };
 }
-const withBundle = (b) => createA2aGuard({ serviceDid, issuerApi: ISSUER, fetchBundle: async () => ({ subject: agentDid, standards: [], sops: [], ...b }) });
+const withBundle = (b) => createA2aGuard({ allowedAgents: 'any', serviceDid, issuerApi: ISSUER, fetchBundle: async () => ({ subject: agentDid, standards: [], sops: [], ...b }) });
 
 /** The issuer's bundle endpoint, answering as `answer` does (a throw is a network failure). */
 async function withIssuer(answer, fn) {
   const real = globalThis.fetch;
   globalThis.fetch = async () => answer();
-  try { return await fn(createA2aGuard({ serviceDid, issuerApi: ISSUER })); } finally { globalThis.fetch = real; }
+  try { return await fn(createA2aGuard({ allowedAgents: 'any', serviceDid, issuerApi: ISSUER })); } finally { globalThis.fetch = real; }
 }
 
 const t = [];

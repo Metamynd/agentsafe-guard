@@ -56,7 +56,7 @@ function withMockClaim(responder) {
 // A compliant issuer echoes the digest the claim stated (null when it stated none): the hold is bound to exactly that.
 const okClaim = (extra = {}) => ({ headers }) => ({ status: 200, body: { success: true, data: { ok: true, effectState: 'dispatching', agentDid: agent.did, action: 'flight-purchase', amount: 250, currency: 'USD', merchant: 'skyward-air', payloadDigest: headers[PAYLOAD_DIGEST_HEADER] ?? null, ...extra } } });
 
-const mk = (opts = {}) => createMcpGuard({ serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
+const mk = (opts = {}) => createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
 
 const t = [];
 const test = (name, fn) => t.push([name, fn]);
@@ -179,7 +179,7 @@ test('the digest is covered by the counterparty signature on the claim: it verif
   const { seen, restore } = withMockClaim(okClaim());
   try {
     const d = payloadDigestOf(PAYLOAD);
-    const guard = createMcpGuard({ serviceDid: svcDid, serviceKey, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true });
+    const guard = createMcpGuard({ allowedAgents: 'any', serviceDid: svcDid, serviceKey, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true });
     assert.equal((await guard.verifyRequest(signedRequest({ payload: PAYLOAD }), { payloadDigest: d })).decision, 'allow');
     const h = seen[0].headers;
     const esc = (v) => String(v).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');

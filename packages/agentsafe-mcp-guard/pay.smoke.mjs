@@ -18,7 +18,7 @@ function mint(t) {
 const agentId = mint('0.0.100');
 const service = mint('0.0.200');
 const agent = createGuard({ api: 'http://x/api/v1', agentDid: agentId.did, agentKey: agentId.key });
-const mcp = createMcpGuard({ serviceDid: service.did });
+const mcp = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did });
 
 let failed = 0;
 const ok = (cond, name, extra = '') => { if (!cond) failed++; console.log(`${cond ? 'ok  ' : 'FAIL'}  ${name}${extra ? '  →  ' + extra : ''}`); };

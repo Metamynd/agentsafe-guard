@@ -15,6 +15,10 @@ compliance team edits in the dashboard, changeable live with no redeploy.
   `policy-core` the gate runs (MAGP §9.2 cooperative mode) — identical inputs give the identical
   verdict, with no network round-trip. See §4.
 
+
+> **0.19.0 — the handshake signs only a plain-token nonce.** `guard.handshake().prove()` used to sign whatever nonce the
+> Service sent; a malicious Service could send a canonical authorize message as its "nonce" and obtain this agent's valid
+> signature on a purchase. It now refuses anything but 16–128 of `A-Z a-z 0-9 _ -` (`HANDSHAKE_NONCE`, MAGP §16.2).
 ## The protocol
 
 This guard is one implementation of an open specification. You do not have to use it — the

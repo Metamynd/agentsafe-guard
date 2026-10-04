@@ -292,7 +292,7 @@ export function buildTaskStatus({ decision, reasonCode, escalationId, contextId,
  *   sit between the caller and this agent — without it, a relay can strip the signature and rewrite the context.
  *   Overridable per skill (guardA2ATask option) and per call (verifyRequest option).
  * @param {string[]|'any'} [cfg.allowedAgents] the agent DIDs this agent accepts tasks from (MAGP §16.3). A task signed by
- *   any other agent is refused `AGENT_NOT_SERVED` before its policy is fetched or any authorization is claimed. Every check
+ *   any other agent is refused `AGENT_NOT_ADMITTED` before its policy is fetched or any authorization is claimed. Every check
  *   judges the CALLER against the CALLER's own policy, so without this an agent that acts with its owner's credentials
  *   does so for any agent on the platform whose own owner granted it a matching action (XT-1, ported from
  *   agentsafe-mcp-guard). `'any'` accepts every governed agent on purpose. Left unset, it accepts every agent, as before
@@ -305,16 +305,41 @@ export function buildTaskStatus({ decision, reasonCode, escalationId, contextId,
  * before, and warns once. (Same as agentsafe-mcp-guard's.)
  */
 export function agentAllowList(allowedAgents, label) {
-  if (allowedAgents === 'any') return { serves: () => true, pinned: 'any' };
+  if (allowedAgents === 'any') {
+    console.warn(`[${label}] allowedAgents: 'any' — this Service acts for EVERY governed agent, each judged only by its own owner's rules. Right only for a public tool, or one that resolves each caller's own credential (the Credential Vault); never for a Service that holds one owner's credentials (MAGP §16.3).`);
+    return { serves: () => true, pinned: 'any' };
+  }
+  // Unset is a startup error (pre-beta refinement plan, 2026-10-04): a Service that holds credentials must name whom it
+  // acts for, and serving everyone has to be said out loud ('any') — it is never what an omission means.
   if (allowedAgents === undefined || allowedAgents === null) {
-    console.warn(`[${label}] no allowedAgents: this agent accepts tasks from ANY agent whose own owner granted it the action, judged by that owner's rules. If it acts with one owner's credentials, pin allowedAgents: ['<agent DID>'] (MAGP §16.3); pass allowedAgents: 'any' to serve every governed agent on purpose.`);
-    return { serves: () => true, pinned: null };
+    throw new Error(`${label}: allowedAgents is required — the agent DIDs this Service acts for (MAGP §16.3), or 'any' for a Service that holds no one owner's credentials`);
   }
   if (!Array.isArray(allowedAgents) || allowedAgents.length === 0 || allowedAgents.some((d) => typeof d !== 'string' || d.trim() === '')) {
     throw new Error(`${label}: allowedAgents must be 'any' or a non-empty array of agent DIDs`);
   }
   const allowed = new Set(allowedAgents.map((d) => d.trim()));
   return { serves: (agentDid) => allowed.has(agentDid), pinned: Object.freeze([...allowed]) };
+}
+
+/** The principal whose credentials this agent acts with (§16.3); required with an allowedAgents list. Same as agentsafe-mcp-guard's. */
+export function gatewayOwnerFor(pinned, gatewayOwnerPrincipal, label) {
+  if (pinned === 'any') return null;
+  if (typeof gatewayOwnerPrincipal !== 'string' || !/^did:[a-z0-9]+:\S+$/.test(gatewayOwnerPrincipal.trim())) {
+    throw Object.assign(new Error(`${label}: gatewayOwnerPrincipal is required with allowedAgents — the principal DID that owns the credentials this agent acts with (GATEWAY_OWNER_UNBOUND, MAGP §16.3)`), { code: 'GATEWAY_OWNER_UNBOUND' });
+  }
+  return gatewayOwnerPrincipal.trim();
+}
+
+/** A skill's own admitted agents: a non-empty list of DIDs; a malformed one fails startup. */
+export function assertProfileAgents(list, where) {
+  if (!Array.isArray(list) || list.length === 0 || list.some((d) => typeof d !== 'string' || d.trim() === '')) {
+    throw new Error(`allowedAgents for ${where} must be a non-empty array of agent DIDs`);
+  }
+}
+
+/** Does a skill's profile admit this (verified) agent? A malformed profile admits nobody. */
+export function profileAdmits(list, agentDid) {
+  return Array.isArray(list) && list.some((d) => typeof d === 'string' && d.trim() === agentDid);
 }
 
 /**
@@ -330,8 +355,9 @@ function assertTrustedContext(tc, where) {
   }
 }
 
-export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, requireAuthorization = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents } = {}) {
+export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, requireAuthorization = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents, gatewayOwnerPrincipal } = {}) {
   const { serves: servesAgent, pinned: allowedAgentsPinned } = agentAllowList(allowedAgents, 'a2a-guard');
+  const owner = gatewayOwnerFor(allowedAgentsPinned, gatewayOwnerPrincipal, 'a2a-guard');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   // TLS or loopback: only then may a grant's `approvedByHuman` lift an escalate (§8.7.18) — see agentsafe-mcp-guard.
   const issuerChannelAuthenticated = !!base && (/^https:\/\//i.test(base) || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(base));
@@ -605,7 +631,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
    *   of the guard's `requireContextSignature` (refuse an envelope with no `envelopeSignature`); a present one is always verified.
    * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
-  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, requireContextSignature, x402 = false } = {}) {
+  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, requireContextSignature, x402 = false, allowedAgents: profileAgents } = {}) {
     try {
       assertTrustedContext(trustedContext); // a broken deriver is a refused task (GUARD_ERROR), never a quiet downgrade
       const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature, jurisdiction } = signed;
@@ -628,7 +654,9 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       }
       // Is this an agent this one accepts tasks from at all (§16.3)? Asked of the identity the signature just proved, before
       // anything else: everything below judges the caller by the caller's own policy, which another owner writes.
-      if (!servesAgent(agentDid)) return { decision: 'block', reasonCode: 'AGENT_NOT_SERVED' };
+      if (!servesAgent(agentDid)) return { decision: 'block', reasonCode: 'AGENT_NOT_ADMITTED' };
+      // A skill (credential profile) may admit fewer agents than this agent does (§16.3).
+      if (profileAgents !== undefined && !profileAdmits(profileAgents, agentDid)) return { decision: 'block', reasonCode: 'CREDENTIAL_PROFILE_NOT_PERMITTED' };
       // The agent's context signature (context-claim binding), in the gate's order: after the request signature, before
       // payload binding and before any rule. The itinerary is otherwise unsigned, so without this a relay between the agent
       // and this receiver could rewrite what the rules below judge. The object hashed is the one evaluated below.
@@ -685,6 +713,8 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         // rewritten bundle could grant an action as easily as lift a cap.
         return { decision: 'block', reasonCode: 'POLICY_BUNDLE_UNVERIFIED' };
       }
+      // The owner (§16.3), from the SIGNED bundle: an admitted agent of any other owner is refused (see agentsafe-mcp-guard).
+      if (owner && bundle?.ownerPrincipal !== owner) return { decision: 'block', reasonCode: 'GATEWAY_OWNER_MISMATCH' };
       const verdict = verdictFromBundle(bundle, { ...signed, itinerary }, trustedContext);
       const final =
         (verdict.decision === 'allow' || verdict.decision === 'observe') && modeGate.decision === 'escalate'
@@ -754,7 +784,8 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
    *   A2A server code decides how to fold that into its response, since this package does not
    *   assume any particular A2A server SDK.
    */
-  function guardA2ATask(skillId, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, bindScope, requirePayloadBinding = false, requireContextSignature, x402 = false } = {}) {
+  function guardA2ATask(skillId, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, bindScope, requirePayloadBinding = false, requireContextSignature, x402 = false, allowedAgents: skillAgents } = {}) {
+    if (skillAgents !== undefined) assertProfileAgents(skillAgents, `skill "${skillId}"`);
     // `requirePayloadBinding` only checks that the AGENT bound something; the comparison with what this skill executes needs a
     // digest of it. Without `bindPayload` there is nothing to compare, so the option would give assurance it does not provide.
     if (requirePayloadBinding && !bindPayload) {
@@ -812,7 +843,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
           if (!decision) {
             const derived = typeof trustedContext === 'function' ? await trustedContext(envelope, message, task) : trustedContext;
             if (trustedContext !== undefined) assertTrustedContext(derived === undefined ? null : derived, `skill "${skillId}"`);
-            decision = await verifyRequest({ ...envelope, action: skillId }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, requireContextSignature, x402 });
+            decision = await verifyRequest({ ...envelope, action: skillId }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, requireContextSignature, x402, ...(skillAgents !== undefined ? { allowedAgents: skillAgents } : {}) });
           }
         } catch (err) {
           decision = { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
@@ -852,5 +883,5 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
     };
   }
 
-  return { verifyRequest, guardA2ATask, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, serviceDid: serviceDid ?? null, allowedAgents: allowedAgentsPinned };
+  return { verifyRequest, guardA2ATask, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, serviceDid: serviceDid ?? null, allowedAgents: allowedAgentsPinned, gatewayOwnerPrincipal: owner };
 }

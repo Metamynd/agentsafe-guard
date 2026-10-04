@@ -53,7 +53,7 @@ function verifiesAsIssuer(call) {
 
 const t = [];
 const test = (name, fn) => t.push([name, fn]);
-const pinned = () => createMcpGuard({ serviceDid: svc.did, serviceKey: svc.key, issuerApi: ISSUER, fetchBundle, policyPublicKey: undefined, allowedAgents: [mine.did] });
+const pinned = () => createMcpGuard({ serviceDid: svc.did, serviceKey: svc.key, issuerApi: ISSUER, fetchBundle, policyPublicKey: undefined, allowedAgents: [mine.did], gatewayOwnerPrincipal: 'did:hedera:testnet:zOwnerA_0.0.900' });
 
 test('an execution for the agent it serves is reported, signed over exactly what the issuer verifies', async () => {
   const signed = mine.sign('records-update');
@@ -67,15 +67,22 @@ test('an execution for the agent it serves is reported, signed over exactly what
   assert.ok(verifiesAsIssuer(calls[0]), 'signature verifies over the issuer\'s message');
 });
 
-test('a foreign agent refused AGENT_NOT_SERVED is filed for the agent the gateway serves, not the caller', async () => {
-  const { calls } = await capturing(() => pinned().reportOutcome({ signed: theirs.sign('records-update'), outcome: 'refused', reasonCode: 'AGENT_NOT_SERVED', httpStatus: 403 }));
+test('a foreign agent refused AGENT_NOT_ADMITTED is filed for the agent the gateway serves, not the caller', async () => {
+  const { calls } = await capturing(() => pinned().reportOutcome({ signed: theirs.sign('records-update'), outcome: 'refused', reasonCode: 'AGENT_NOT_ADMITTED', httpStatus: 403 }));
   assert.equal(calls[0].body.servedAgentDid, mine.did);
   assert.equal(calls[0].body.request.agentDid, theirs.did);
   assert.ok(verifiesAsIssuer(calls[0]));
 });
 
+test('a LISTED agent of another owner (GATEWAY_OWNER_MISMATCH) is reported to the gateway owner, via an agent it really serves', async () => {
+  const guard = createMcpGuard({ serviceDid: svc.did, serviceKey: svc.key, issuerApi: ISSUER, fetchBundle, allowedAgents: [mine.did, theirs.did], gatewayOwnerPrincipal: 'did:hedera:testnet:zOwnerA_0.0.900' });
+  const { calls } = await capturing(() => guard.reportOutcome({ signed: theirs.sign('records-update'), outcome: 'refused', reasonCode: 'GATEWAY_OWNER_MISMATCH', httpStatus: 403 }));
+  assert.equal(calls[0].body.servedAgentDid, mine.did, 'never filed under the caller (whose owner never registered this gateway)');
+  assert.ok(verifiesAsIssuer(calls[0]));
+});
+
 test('no signing identity: nothing is sent (an unsigned report would be refused anyway)', async () => {
-  const guard = createMcpGuard({ serviceDid: 'did:local:records-gateway', issuerApi: ISSUER, fetchBundle, allowedAgents: [mine.did] });
+  const guard = createMcpGuard({ serviceDid: 'did:local:records-gateway', issuerApi: ISSUER, fetchBundle, allowedAgents: [mine.did], gatewayOwnerPrincipal: 'did:hedera:testnet:zOwnerA_0.0.900' });
   const { value, calls } = await capturing(() => guard.reportOutcome({ signed: mine.sign('records-update'), outcome: 'executed', reasonCode: 'EXECUTED', httpStatus: 200 }));
   assert.equal(value.reasonCode, 'SERVICE_IDENTITY_REQUIRED');
   assert.equal(calls.length, 0);

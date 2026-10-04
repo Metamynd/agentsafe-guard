@@ -196,6 +196,14 @@ export async function createGuardFromConfig(source, overrides = {}) {
   return createGuard({ config: cfg, ...rest });
 }
 
+/**
+ * What a handshake will sign as a counterparty's nonce (§8.2): a plain random token, nothing else. Both sides sign the
+ * OTHER side's nonce with their own key, so a nonce that is free text makes the signer an oracle — a malicious peer sends a
+ * canonical authorize message (or a MAGP-SERVICE-v1 claim) as its "nonce" and walks away with a valid signature on it.
+ * Every MAGP message that can authorize anything contains "|"; a token of these characters can never be one.
+ */
+export const HANDSHAKE_NONCE = /^[A-Za-z0-9_-]{16,128}$/;
+
 export function createGuard(opts = {}) {
   // Accept a portable agent config (from /onboarding/agent) via `config` or `configPath`, in
   // addition to explicit { api, agentDid, agentKey }. Explicit fields win over the config.
@@ -909,6 +917,13 @@ export function createGuard(opts = {}) {
       async prove({ nonceA, challenge } = {}) {
         const { toDid, nonceB, sigB, handshakeId } = challenge ?? {};
         if (!toDid || !nonceB || !sigB) throw new Error('malformed CHALLENGE');
+        // Signed with THIS agent's key below: anything but a plain token would let the Service obtain this agent's signature
+        // on a message of its choosing — an authorize request, for one (see HANDSHAKE_NONCE).
+        if (typeof nonceB !== 'string' || !HANDSHAKE_NONCE.test(nonceB)) {
+          const e = new Error('CHALLENGE nonce is not a plain token — refusing to sign it');
+          e.name = 'HandshakeFailed';
+          throw e;
+        }
         if (!verifyDidSignature(toDid, nonceA, sigB)) {
           const e = new Error('Service failed to prove control of its DID');
           e.name = 'HandshakeFailed';

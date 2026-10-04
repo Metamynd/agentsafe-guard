@@ -47,6 +47,8 @@ const server = http.createServer((req, res) => {
     let body = {};
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* not JSON */ }
     if (req.method === 'POST' && req.url === '/api/v1/auth/login') return res.end(JSON.stringify({ success: true, data: { accessToken: 'tok' } }));
+  // The agent's bundle names its owner (MAGP §16.3); every scaffolded gateway is bound to it.
+  if (req.method === 'GET' && req.url.startsWith('/api/v1/policy/bundle/')) return res.end(JSON.stringify({ success: true, data: { subject: DID, ownerPrincipal: 'did:hedera:testnet:zStandInOwner_0.0.900' } }));
     if (req.method === 'POST' && req.url === '/api/v1/onboarding/sandbox') {
       seen.sandbox.push(body);
       if (modern && body.financial === false) {

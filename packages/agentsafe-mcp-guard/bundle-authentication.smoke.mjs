@@ -55,7 +55,7 @@ const check = (name, ok, detail) => {
 };
 
 try {
-  const unpinned = createMcpGuard({ serviceDid: service.did, issuerApi });
+  const unpinned = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, issuerApi });
   check('an unpinned guard over plain http warns at construction', warnings.some((w) => w.includes('POLICY_BUNDLE_UNVERIFIED')));
 
   let v = await unpinned.verifyRequest(signed(5000));
@@ -65,7 +65,7 @@ try {
   check('0.18.3: an amount-0 action on the same unauthenticated bundle is refused too (an amount-0 action is not a read)', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
 
   warnings.length = 0;
-  const optedOut = createMcpGuard({ serviceDid: service.did, issuerApi, allowUnverifiedBundle: true });
+  const optedOut = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, issuerApi, allowUnverifiedBundle: true });
   v = await optedOut.verifyRequest(signed(5000));
   check('allowUnverifiedBundle: true restores the old behaviour (explicit, local dev only)', v.reasonCode !== 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
   v = await optedOut.verifyRequest(signed(0));
@@ -73,13 +73,13 @@ try {
   check('...and still says so at construction', warnings.some((w) => w.includes('allowUnverifiedBundle is set')));
 
   warnings.length = 0;
-  const custom = createMcpGuard({ serviceDid: service.did, fetchBundle: async () => forgedBundle });
+  const custom = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, fetchBundle: async () => forgedBundle });
   v = await custom.verifyRequest(signed(5000));
   check('a custom fetchBundle is the integrator\'s own source: not refused by this rule', v.reasonCode !== 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
   check('...but still warned that nothing pins the bundle', warnings.some((w) => w.includes('no policyPublicKey')));
 
   warnings.length = 0;
-  createMcpGuard({ serviceDid: service.did, issuerApi: 'https://metamynd.ai/api/v1' });
+  createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, issuerApi: 'https://metamynd.ai/api/v1' });
   check('an https issuer with no key is warned about, not refused (TLS authenticates the issuer)', warnings.some((w) => w.includes('TLS alone')) && !warnings.some((w) => w.includes('POLICY_BUNDLE_UNVERIFIED')));
 } finally {
   console.warn = realWarn;

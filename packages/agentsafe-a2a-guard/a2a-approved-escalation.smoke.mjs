@@ -41,7 +41,7 @@ function mockIssuer(claim) {
   return { calls, restore: () => { globalThis.fetch = real; } };
 }
 const grant = (extra = {}) => ({ status: 200, body: { success: true, data: { ok: true, agentDid, action: 'book-hotel', amount: 250, currency: 'USD', claimToken: 'tok', ...extra } } });
-const mk = () => createA2aGuard({ issuerApi: ISSUER, fetchBundle: async () => bundle, requireAuthorization: true });
+const mk = () => createA2aGuard({ allowedAgents: 'any', issuerApi: ISSUER, fetchBundle: async () => bundle, requireAuthorization: true });
 
 const t = [];
 const test = (name, fn) => t.push([name, fn]);

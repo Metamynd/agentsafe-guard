@@ -49,7 +49,7 @@ const bundle = {
   ],
 };
 
-const guard = createA2aGuard({ fetchBundle: async () => bundle });
+const guard = createA2aGuard({ allowedAgents: 'any', fetchBundle: async () => bundle });
 
 // An honest client states its risk: the bundle's SOP has a risk rule, and an envelope that leaves `riskLevel` out is
 // escalated, not waved through (see the D-03 section below).
@@ -78,7 +78,7 @@ console.log('— D-03: the agent cannot skip a risk rule by hiding, garbling or 
 
   // the owner's tier rides in the signed mandate, so this guard applies the same floor as the issuer's gate
   const tiered = { ...bundle, mandates: [{ action: 'summarize-report', document: { permission: [{ target: 'summarize-report', riskTier: 'high', constraint: [] }] } }] };
-  const tierGuard = createA2aGuard({ fetchBundle: async () => tiered });
+  const tierGuard = createA2aGuard({ allowedAgents: 'any', fetchBundle: async () => tiered });
   ok((await verdict(signedEnvelope('summarize-report', 0, { riskLevel: 'low' }), undefined, tierGuard)) === 'escalate/RISK_REVIEW', 'owner tier=high: an agent claiming "low" is still judged high');
   ok((await verdict(signedEnvelope('summarize-report', 0, {}), undefined, tierGuard)) === 'escalate/RISK_REVIEW', 'owner tier=high: an agent that says nothing is judged high too');
 

@@ -29,7 +29,7 @@ const sopBundle = {
   mandates: [{ action: 'flight-purchase', document: { permission: [{ target: 'flight-purchase', constraint: [] }] } }],
 };
 let bundle = mandateBundle;
-const svc = createA2aGuard({ fetchBundle: async () => bundle });
+const svc = createA2aGuard({ allowedAgents: 'any', fetchBundle: async () => bundle });
 
 let failed = 0;
 const check = (ok, label) => {

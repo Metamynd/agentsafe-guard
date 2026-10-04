@@ -38,7 +38,7 @@ const ok = (cond, name, extra = '') => { if (!cond) failed++; console.log(`${con
   };
   const reserveCalls = [];
   const wrapped = { ...store, reserve: async (id) => { reserveCalls.push(id); return store.reserve(id); } };
-  const mcp = createMcpGuard({ serviceDid: service.did, settlementStore: wrapped });
+  const mcp = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, settlementStore: wrapped });
 
   const authId = crypto.randomUUID();
   const requirements = mcp.requirePayment({ authorizationId: authId, agentDid: agent.did, amount: 150, payTo: '0.0.5005', asset: 'USDC', resource: '/x' });
@@ -75,7 +75,7 @@ const ok = (cond, name, extra = '') => { if (!cond) failed++; console.log(`${con
   // Fake verifier standing in for checkCapabilityBinding (tested for real in magp-bind.test.mjs):
   // it accepts only the capability token 'CAP-OK', rejecting anything else as COMMITMENT_MISMATCH.
   const verifyCapability = async (signed) => (signed.capability === 'CAP-OK' ? { ok: true, reasonCode: 'CAPABILITY_BOUND' } : { ok: false, reasonCode: 'COMMITMENT_MISMATCH' });
-  const guard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle, verifyCapability });
+  const guard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle, verifyCapability });
 
   function signed({ capability } = {}) {
     const action = 'flight-purchase', currency = 'USD', merchant = 'amadeus', amount = 100, nonce = crypto.randomUUID(), issuedAt = new Date().toISOString();
@@ -106,7 +106,7 @@ const ok = (cond, name, extra = '') => { if (!cond) failed++; console.log(`${con
   // requireCapability: true flips the omission from opt-in-pass to a hard block — this is the
   // gap a security review found: without this flag, a caller can just drop `capability` and
   // skip the whole check above, verifier configured or not.
-  const strictGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle, verifyCapability, requireCapability: true });
+  const strictGuard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle, verifyCapability, requireCapability: true });
   const strictTool = strictGuard.guardIncomingTool('flight-purchase', async () => { ran = true; return { booked: 'PNR' }; });
 
   ran = false;
@@ -128,7 +128,7 @@ const ok = (cond, name, extra = '') => { if (!cond) failed++; console.log(`${con
     subject: agent.did,
     mandates: [{ action: 'flight-purchase', document: { permission: [{ target: 'flight-purchase', constraint: [{ leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 1000 }] }] } }],
   };
-  const guard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
+  const guard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
   const tool = guard.guardIncomingTool('flight-purchase', async () => ({ booked: 'PNR' }));
 
   function signed(amount) {

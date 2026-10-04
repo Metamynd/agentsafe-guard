@@ -10,7 +10,7 @@ import { createHttpGateway } from './gateway.mjs';
 const reports = [];
 const verdicts = new Map(); // agentDid -> verdict
 const guard = {
-  async verifyRequest(signed) { return verdicts.get(signed.agentDid) ?? { decision: 'block', reasonCode: 'AGENT_NOT_SERVED' }; },
+  async verifyRequest(signed) { return verdicts.get(signed.agentDid) ?? { decision: 'block', reasonCode: 'AGENT_NOT_ADMITTED' }; },
   async reportOutcome(r) { reports.push(r); return { ok: true, reasonCode: 'RECORDED' }; },
 };
 const route = { method: 'POST', path: '/perform', action: 'records-update', valueFields: [], allowedFields: [] };
@@ -38,13 +38,13 @@ await check('an unclaimed execution is reported as executed, with the agent\'s s
   assert.deepEqual([reports[0].outcome, reports[0].reasonCode, reports[0].httpStatus, reports[0].signed.agentDid], ['executed', 'EXECUTED', 200, 'did:key:zMine']);
 });
 
-await check('a refusal the gateway decided (another agent: AGENT_NOT_SERVED) is reported as refused', async () => {
+await check('a refusal the gateway decided (another agent: AGENT_NOT_ADMITTED) is reported as refused', async () => {
   const gw = gatewayWith({ reportOutcomes: true });
   const res = await call(gw, signedBy('did:key:zTheirs'));
   await settled(gw);
   assert.equal(res.status, 403);
   assert.equal(forwarded, 0);
-  assert.deepEqual([reports[0].outcome, reports[0].reasonCode, reports[0].httpStatus], ['refused', 'AGENT_NOT_SERVED', 403]);
+  assert.deepEqual([reports[0].outcome, reports[0].reasonCode, reports[0].httpStatus], ['refused', 'AGENT_NOT_ADMITTED', 403]);
 });
 
 await check('a binding refusal before the guard runs is reported too (it named an agent)', async () => {

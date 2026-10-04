@@ -55,7 +55,7 @@ const route = (over = {}) => (path) => {
   if (path.endsWith('/effect/unknown')) return ok200({});
   throw new Error('unexpected ' + path);
 };
-const mk = () => createA2aGuard({ issuerApi: ISSUER, fetchBundle: async () => bundle, requireAuthorization: true });
+const mk = () => createA2aGuard({ allowedAgents: 'any', issuerApi: ISSUER, fetchBundle: async () => bundle, requireAuthorization: true });
 
 const t = [];
 const test = (name, fn) => t.push([name, fn]);
@@ -250,7 +250,7 @@ test('refundAuthorization posts amount/reason to /refund, validates locally, and
 test('a keyed receiver signs its refund under the dedicated "refund" action over [amount, reason], never as a void', async () => {
   const svc = crypto.generateKeyPairSync('ed25519');
   const svcDid = buildHederaDid('testnet', svc.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32), '0.0.911');
-  const g = createA2aGuard({ issuerApi: ISSUER, fetchBundle: async () => bundle, serviceDid: svcDid, serviceKey: svc.privateKey.export({ type: 'pkcs8', format: 'der' }).toString('hex') });
+  const g = createA2aGuard({ allowedAgents: 'any', issuerApi: ISSUER, fetchBundle: async () => bundle, serviceDid: svcDid, serviceKey: svc.privateKey.export({ type: 'pkcs8', format: 'der' }).toString('hex') });
   const m = mockIssuer(() => ok200({ refunded: true }));
   try {
     await g.refundAuthorization({ authorizationId: 'a1', amount: 10, reason: 'partial' });

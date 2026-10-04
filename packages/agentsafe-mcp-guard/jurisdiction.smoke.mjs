@@ -30,7 +30,7 @@ const sopBundle = {
   mandates: [{ action: 'flight-purchase', document: { permission: [{ target: 'flight-purchase', constraint: [] }] } }],
 };
 let bundle = mandateBundle;
-const svc = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
+const svc = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
 
 let failed = 0;
 const check = (ok, label) => {

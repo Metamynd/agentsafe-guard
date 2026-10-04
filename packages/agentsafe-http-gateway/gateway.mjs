@@ -500,7 +500,7 @@ function withHeader(headers, name, value) {
  * reportOutcomes — OPTIONAL (default false, since 0.20.0; needs agentsafe-mcp-guard >= 0.21.0 with a self-certifying
  * serviceDid and its key): report every governed request this gateway answers to the issuer, signed as this gateway, into the
  * audit trail of the owner of the agent it acts for (MAGP §16.4) — what it EXECUTED without claiming an authorization (a
- * bundle-only route: the issuer never sees those otherwise) and what it REFUSED itself (AGENT_NOT_SERVED, a rule, a binding
+ * bundle-only route: the issuer never sees those otherwise) and what it REFUSED itself (AGENT_NOT_ADMITTED, a rule, a binding
  * failure). An execution under a claimed authorization is not reported: the claim already put it on the effect chain. A
  * request refused before it named an agent (no signed request, a query string) has nobody to attribute it to and is not
  * reported. Reports run in the background like settlements (drainSettlements waits for both) and never change a response.
@@ -644,6 +644,18 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
 
   // Since 0.17.1 a governed route refuses a query string (QUERY_NOT_BOUND) unless it lists `allowedQuery`. A listed
   // key is forwarded but NOT covered by the agent's signature — say so at startup, once per route.
+  // A route's own admitted agents (a credential profile, §16.3): narrower than the gateway's, checked by the guard after the
+  // signature and before anything is fetched or claimed. A malformed list fails startup; so does one the guard cannot enforce.
+  for (const route of routes) {
+    if (route?.allowedAgents === undefined) continue;
+    if (!Array.isArray(route.allowedAgents) || route.allowedAgents.length === 0 || route.allowedAgents.some((d) => typeof d !== 'string' || d.trim() === '')) {
+      throw new Error(`route "${route.method ?? '*'} ${route.path}": allowedAgents must be a non-empty array of agent DIDs`);
+    }
+    if (guard?.gatewayOwnerPrincipal === undefined) {
+      throw new Error(`route "${route.method ?? '*'} ${route.path}" sets allowedAgents, but this guard cannot enforce it (needs @metamynd/agentsafe-mcp-guard >= 0.22.0)`);
+    }
+  }
+
   for (const route of routes) {
     assertAllowedQuery(route);
     if (Array.isArray(route?.allowedQuery) && route.allowedQuery.length > 0) {
@@ -809,6 +821,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
         // A route whose upstream is paid by x402 marks its claims x402-bound (agentsafe-mcp-guard >= 0.14.0): the issuer then
         // has an independent observer confirm any settlement below the authorization, or a release after the claim.
         ...(route.x402 === true ? { x402: true } : {}),
+        ...(route.allowedAgents !== undefined ? { allowedAgents: route.allowedAgents } : {}),
       };
       decision = Object.keys(verifyOptions).length ? await guard.verifyRequest(request, verifyOptions) : await guard.verifyRequest(request);
       trace.decision = decision;

@@ -61,7 +61,7 @@ function withMockClaim(responder) {
   return () => { globalThis.fetch = realFetch; };
 }
 
-const mk = (opts = {}) => createMcpGuard({ serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
+const mk = (opts = {}) => createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
 
 const t = [];
 const test = (name, fn) => t.push([name, fn]);
@@ -77,7 +77,7 @@ test('a genuine, matching claim (including merchant) permits the request', async
 test('requireAuthorization is OFF by default — no authorizationId needed, no network call', async () => {
   const restore = withMockClaim(() => { throw new Error('must not be called'); });
   try {
-    const guard = createMcpGuard({ serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1' });
+    const guard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1' });
     const r = await guard.verifyRequest(signedRequest({ amount: 250 }));
     assert.equal(r.decision, 'allow');
   } finally { restore(); }

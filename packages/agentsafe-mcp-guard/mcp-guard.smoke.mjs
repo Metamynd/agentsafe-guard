@@ -64,7 +64,7 @@ const bundle = {
   ],
 };
 
-const guard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
+const guard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => bundle });
 
 /** Build a signed authorize request the way the agent guard would. */
 // An honest client states its risk: the bundle's Standard has a risk rule, and a request that leaves `riskLevel`
@@ -107,7 +107,7 @@ console.log('\n— D-03: the agent cannot skip a risk rule by hiding, garbling o
 
   // The owner classed the action high: it travels in the signed mandate, so the guard applies the same floor.
   const tiered = { ...bundle, mandates: [{ action: 'flight-purchase', document: { permission: [{ ...bundle.mandates[0].document.permission[0], riskTier: 'high' }] } }] };
-  const tierGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => tiered });
+  const tierGuard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => tiered });
   const checkTier = async (name, req, expect) => {
     const v = await tierGuard.verifyRequest(req);
     const ok = v.decision === expect[0] && v.reasonCode === expect[1];
@@ -132,7 +132,7 @@ console.log('\n— D-03: the agent cannot skip a risk rule by hiding, garbling o
   // A rule can DEMAND a trusted source: the agent's own honest "low" is then not enough.
   const strict = JSON.parse(JSON.stringify(bundle));
   strict.standards[0].document.molecules[0].requireProvenance = { riskLevel: 'gateway_derived' };
-  const strictGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => strict });
+  const strictGuard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => strict });
   const strictCheck = async (name, req, opts, expect) => {
     const v = await strictGuard.verifyRequest(req, opts);
     const ok = v.decision === expect[0] && v.reasonCode === expect[1];
@@ -190,7 +190,7 @@ console.log('\n— unit-bearing mandate constraint (currency) —');
       },
     ],
   };
-  const unitGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => unitBundle });
+  const unitGuard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => unitBundle });
   const checkUnit = async (name, req, expect) => {
     const v = await unitGuard.verifyRequest(req);
     const ok = v.decision === expect[0] && v.reasonCode === expect[1];
@@ -221,7 +221,7 @@ console.log('\n— SOP-side currency-scoped amount-over atom (verdictFromBundle 
       },
     ],
   };
-  const gbpGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => gbpSopBundle });
+  const gbpGuard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => gbpSopBundle });
   const checkGbp = async (name, req, expect) => {
     const v = await gbpGuard.verifyRequest(req);
     const ok = v.decision === expect[0] && v.reasonCode === expect[1];
@@ -246,7 +246,7 @@ console.log('\n— resource included in the signed message (canonical §7.3, 8 f
       },
     ],
   };
-  const resourceGuard = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => resourceBundle });
+  const resourceGuard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => resourceBundle });
   function signedResourceRequest({ resource, tamperResource }) {
     const action = 'vehicle-inspection';
     const nonce = crypto.randomUUID();
@@ -271,6 +271,7 @@ console.log('\n— operating-mode autonomy ladder at the edge (Phase 2.5b) —')
   // The mode rides as a NON-ENUMERABLE sibling (invisible to canonicalization, like
   // __contained), so a mode-carrying guard fetches the same bundle + the flag.
   const withMode = (mode) => createMcpGuard({
+    allowedAgents: 'any',
     serviceDid: service.did, serviceKey: service.keyHex,
     fetchBundle: async () => { const b = JSON.parse(JSON.stringify(bundle)); Object.defineProperty(b, '__operatingMode', { value: { mode }, enumerable: false }); return b; },
   });
@@ -290,6 +291,7 @@ console.log('\n— operating-mode autonomy ladder at the edge (Phase 2.5b) —')
   // SUPERVISED escalates a HIGH-risk action even for a small spend — and the risk it judges is the effective one,
   // so an agent cannot skip that by claiming "low" about an action its owner classed high.
   const tieredMode = (mode) => createMcpGuard({
+    allowedAgents: 'any',
     serviceDid: service.did, serviceKey: service.keyHex,
     fetchBundle: async () => {
       const b = JSON.parse(JSON.stringify(bundle));
@@ -333,7 +335,7 @@ console.log('\n— signed policy bundle: staleness + risk-tiered fail-closed (Ph
   const { signBundle, rawPublicKeyHex } = await import('./magp-policy.mjs');
   const issuer = crypto.generateKeyPairSync('ed25519');
   const policyPublicKey = rawPublicKeyHex(issuer.publicKey);
-  const withBundle = (b) => createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => b, policyPublicKey });
+  const withBundle = (b) => createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => b, policyPublicKey });
 
   const fresh = signBundle({ ...bundle, issuedAt: new Date().toISOString(), maxStaleness: 'PT10M' }, issuer.privateKey);
   const stale = signBundle({ ...bundle, issuedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(), maxStaleness: 'PT10M' }, issuer.privateKey);
@@ -369,7 +371,7 @@ console.log('\n— signed policy bundle: staleness + risk-tiered fail-closed (Ph
   }
   // Without a pin the guard is trusting its transport (it warns at startup), and the risk tier still applies:
   // only a value-bearing action fails closed on a stale bundle.
-  const unpinned = createMcpGuard({ serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => stale });
+  const unpinned = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, serviceKey: service.keyHex, fetchBundle: async () => stale });
   const readOk = await unpinned.verifyRequest(zero);
   const okRead = readOk.reasonCode !== 'POLICY_BUNDLE_STALE';
   if (!okRead) failed++;

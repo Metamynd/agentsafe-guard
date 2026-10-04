@@ -105,6 +105,14 @@ function assertTrustedContext(tc, where) {
 }
 
 /**
+ * What a handshake will sign as a counterparty's nonce (§8.2): a plain random token, nothing else. Both sides sign the
+ * OTHER side's nonce with their own key, so a nonce that is free text makes the signer an oracle — a malicious peer sends a
+ * canonical authorize message (or a MAGP-SERVICE-v1 claim) as its "nonce" and walks away with a valid signature on it.
+ * Every MAGP message that can authorize anything contains "|"; a token of these characters can never be one.
+ */
+export const HANDSHAKE_NONCE = /^[A-Za-z0-9_-]{16,128}$/;
+
+/**
  * The `allowedAgents` option (MAGP §16.3): `serves(agentDid)` over a verified agent DID, and `pinned` — what the guard
  * reports as `guard.allowedAgents` (the DIDs, `'any'`, or `null` when unset), so a gateway can refuse to start on a guard
  * that does not enforce the pin it asked for. A list must name at least one DID, each a non-empty string: a typo here is
@@ -112,16 +120,45 @@ function assertTrustedContext(tc, where) {
  * agent, as before, and warns once.
  */
 export function agentAllowList(allowedAgents, label) {
-  if (allowedAgents === 'any') return { serves: () => true, pinned: 'any' };
+  if (allowedAgents === 'any') {
+    console.warn(`[${label}] allowedAgents: 'any' — this Service acts for EVERY governed agent, each judged only by its own owner's rules. Right only for a public tool, or one that resolves each caller's own credential (the Credential Vault); never for a Service that holds one owner's credentials (MAGP §16.3).`);
+    return { serves: () => true, pinned: 'any' };
+  }
+  // Unset is a startup error (pre-beta refinement plan, 2026-10-04): a Service that holds credentials must name whom it
+  // acts for, and serving everyone has to be said out loud ('any') — it is never what an omission means.
   if (allowedAgents === undefined || allowedAgents === null) {
-    console.warn(`[${label}] no allowedAgents: this Service acts for ANY agent whose own owner granted it the action, judged by that owner's rules. If it holds one owner's credentials, pin allowedAgents: ['<agent DID>'] (MAGP §16.3); pass allowedAgents: 'any' to serve every governed agent on purpose.`);
-    return { serves: () => true, pinned: null };
+    throw new Error(`${label}: allowedAgents is required — the agent DIDs this Service acts for (MAGP §16.3), or 'any' for a Service that holds no one owner's credentials`);
   }
   if (!Array.isArray(allowedAgents) || allowedAgents.length === 0 || allowedAgents.some((d) => typeof d !== 'string' || d.trim() === '')) {
     throw new Error(`${label}: allowedAgents must be 'any' or a non-empty array of agent DIDs`);
   }
   const allowed = new Set(allowedAgents.map((d) => d.trim()));
   return { serves: (agentDid) => allowed.has(agentDid), pinned: Object.freeze([...allowed]) };
+}
+
+/**
+ * The principal whose credentials this Service holds (§16.3) — required whenever it admits a list of agents, so every one of
+ * them can be checked to belong to that owner. A Service in 'any' mode holds no one owner's credentials and takes none.
+ * Missing is a startup error (GATEWAY_OWNER_UNBOUND), never a quiet skip.
+ */
+export function gatewayOwnerFor(pinned, gatewayOwnerPrincipal, label) {
+  if (pinned === 'any') return null;
+  if (typeof gatewayOwnerPrincipal !== 'string' || !/^did:[a-z0-9]+:\S+$/.test(gatewayOwnerPrincipal.trim())) {
+    throw Object.assign(new Error(`${label}: gatewayOwnerPrincipal is required with allowedAgents — the principal DID that owns this Service's credentials (GATEWAY_OWNER_UNBOUND, MAGP §16.3)`), { code: 'GATEWAY_OWNER_UNBOUND' });
+  }
+  return gatewayOwnerPrincipal.trim();
+}
+
+/** A route's or tool's own admitted agents (a credential profile): a non-empty list of DIDs. A malformed one fails startup. */
+export function assertProfileAgents(list, where) {
+  if (!Array.isArray(list) || list.length === 0 || list.some((d) => typeof d !== 'string' || d.trim() === '')) {
+    throw new Error(`allowedAgents for ${where} must be a non-empty array of agent DIDs`);
+  }
+}
+
+/** Does a credential profile admit this (verified) agent? A malformed profile admits nobody. */
+export function profileAdmits(list, agentDid) {
+  return Array.isArray(list) && list.some((d) => typeof d === 'string' && d.trim() === agentDid);
 }
 
 /**
@@ -197,16 +234,17 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   agent's context drives a decision and anything can sit between the agent and this Service — without it, a relay can
  *   strip the signature and rewrite the context. Overridable per call (verifyRequest / guardIncomingTool option).
  * @param {string[]|'any'} [cfg.allowedAgents] the agent DIDs this Service acts for (MAGP §16.3). A request signed by any
- *   other agent is refused `AGENT_NOT_SERVED` before its policy is fetched or any authorization is claimed. Every check
+ *   other agent is refused `AGENT_NOT_ADMITTED` before its policy is fetched or any authorization is claimed. Every check
  *   below judges the CALLER against the CALLER's own policy — so without this, a Service that holds one owner's
  *   credentials runs them for any agent on the platform whose own owner granted it an action of the same name (found
  *   by an independent tester, XT-1: another tenant's agent executed through an agent's own gateway). Set it whenever
  *   this Service works for one owner. `'any'` serves every governed agent on purpose — a public tool server. Left unset,
  *   it serves every agent, as before 0.20.0, and says so once at startup.
  */
-export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents, gatewayOwnerPrincipal } = {}) {
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const { serves: servesAgent, pinned: allowedAgentsPinned } = agentAllowList(allowedAgents, 'mcp-guard');
+  const owner = gatewayOwnerFor(allowedAgentsPinned, gatewayOwnerPrincipal, 'mcp-guard');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
   // Whether a claim RESPONSE from the issuer is integrity-protected in transit: TLS, or loopback (a local development
   // issuer). Only then may a grant's `approvedByHuman` lift an escalate (§8.7.18) — that one field turns a policy
@@ -238,6 +276,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   /** Step 1 (B): on HELLO, sign nonceA to prove control of serviceDid, issue nonceB. */
   async function handshakeChallenge({ fromDid, nonceA, protoVersion } = {}) {
     if (!fromDid || !nonceA) throw new Error('HELLO requires { fromDid, nonceA }');
+    // Signed with THIS Service's key below: free text here would make the Service a signing oracle for its own claims,
+    // captures and reports (MAGP-SERVICE-v1) — see HANDSHAKE_NONCE.
+    if (typeof nonceA !== 'string' || !HANDSHAKE_NONCE.test(nonceA)) throw Object.assign(new Error('HELLO nonce must be a plain token (16-128 of A-Z a-z 0-9 _ -)'), { name: 'HandshakeFailed' });
     if (!keyProvider) throw new Error('serviceKey (or keyProvider) is required to sign handshake messages');
     const handshakeId = crypto.randomUUID();
     const nonceB = crypto.randomUUID();
@@ -258,9 +299,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     }
     // A channel is not opened to an agent this Service does not act for (§16.3) — proven identity, but not one it serves.
     if (!servesAgent(st.fromDid)) {
-      const e = new Error('AGENT_NOT_SERVED: this Service does not act for ' + st.fromDid);
+      const e = new Error('AGENT_NOT_ADMITTED: this Service does not act for ' + st.fromDid);
       e.name = 'HandshakeFailed';
-      e.code = 'AGENT_NOT_SERVED';
+      e.code = 'AGENT_NOT_ADMITTED';
       throw e;
     }
     return { channelId: crypto.randomUUID(), remoteDid: st.fromDid };
@@ -422,9 +463,30 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
   }
 
   /**
+   * Accept being registered as an owner's counterparty (MAGP §8.7.6): sign the acceptance message that owner obtained from
+   * POST /policy/counterparties/challenge, so the issuer knows THIS Service agreed to act for them. Signs only a
+   * `MAGP-COUNTERPARTY-ACCEPT-v1` message that names this Service's own DID, a known purpose and an unexpired time — never
+   * arbitrary text, so it cannot be turned into a signature on anything else. Returns the signature (hex) to hand back to the
+   * owner. Needs a `serviceKey` (a daemon-held key is not supported here yet).
+   */
+  async function acceptCounterpartyChallenge(message) {
+    if (typeof message !== 'string') throw new TypeError('acceptCounterpartyChallenge(message): message must be a string');
+    const parts = message.split(/(?<!\\)\|/).map((p) => p.replace(/\\\|/g, '|').replace(/\\\\/g, '\\'));
+    if (parts.length !== 6 || parts[0] !== 'MAGP-COUNTERPARTY-ACCEPT-v1') throw new Error('not a MAGP-COUNTERPARTY-ACCEPT-v1 challenge — refusing to sign it');
+    const [, registrant, did, purpose, , expiresAt] = parts;
+    if (did !== serviceDid) throw new Error(`the challenge names ${did}, not this Service (${serviceDid}) — refusing to sign it`);
+    if (purpose !== 'claim' && purpose !== 'report') throw new Error(`unknown purpose "${purpose}" — refusing to sign it`);
+    const exp = Date.parse(expiresAt);
+    if (!Number.isFinite(exp) || exp < Date.now()) throw new Error('the challenge has expired — ask the owner for a fresh one');
+    if (typeof keyProvider?.signServiceMessage !== 'function') throw new Error('acceptCounterpartyChallenge needs a serviceKey (a daemon-held key cannot sign it yet)');
+    console.warn(`[mcp-guard] accepting registration as a ${purpose} counterparty of ${registrant}`);
+    return keyProvider.signServiceMessage(message);
+  }
+
+  /**
    * Report what this Service did with a governed request, into the audit trail of the owner of the agent it acts for
    * (MAGP §16.4). The issuer only sees an execution when a hold is CLAIMED; a Service that runs a request without one (a
-   * bundle-only, non-financial gateway), or refuses one itself (AGENT_NOT_SERVED, a local rule block), is otherwise
+   * bundle-only, non-financial gateway), or refuses one itself (AGENT_NOT_ADMITTED, a local rule block), is otherwise
    * invisible to the owner — which is how another tenant's agent ran an agent's tool with nothing in the victim's log (XT-1,
    * A-1). Signed as this Service (MAGP-SERVICE-v1, action `report`), so it needs a self-certifying `serviceDid` and its key;
    * the issuer records it only if the served agent's owner registered that DID as an active counterparty.
@@ -438,9 +500,14 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     if (outcome !== 'executed' && outcome !== 'refused') return { ok: false, reasonCode: 'REPORT_OUTCOME_INVALID' };
     const s = signed ?? {};
     if (!s.agentDid || !s.action || !s.nonce || !s.issuedAt || !s.signature) return { ok: false, reasonCode: 'NOTHING_TO_REPORT' };
-    const served = servedAgentDid ?? (servesAgent(s.agentDid) ? s.agentDid : (Array.isArray(allowedAgentsPinned) && allowedAgentsPinned.length === 1 ? allowedAgentsPinned[0] : null));
-    if (!served) return { ok: false, reasonCode: 'NO_SERVED_AGENT' };
     const code = String(reasonCode ?? (outcome === 'executed' ? 'EXECUTED' : 'BLOCKED')).slice(0, 64);
+    // Filed for an agent this Service really acts for: the caller when it is admitted AND its owner is this Service's owner;
+    // otherwise another admitted agent (under the owner binding, all of them are that owner's) — so a refusal for another
+    // owner's agent, even a listed one (GATEWAY_OWNER_MISMATCH), reaches the gateway owner, never the caller's owner.
+    const callerServed = servesAgent(s.agentDid) && code !== 'GATEWAY_OWNER_MISMATCH';
+    const otherAdmitted = Array.isArray(allowedAgentsPinned) ? allowedAgentsPinned.find((d) => d !== s.agentDid) ?? null : null;
+    const served = servedAgentDid ?? (callerServed ? s.agentDid : otherAdmitted);
+    if (!served) return { ok: false, reasonCode: 'NO_SERVED_AGENT' };
     const status = Number.isInteger(httpStatus) ? httpStatus : null;
     let auth;
     try {
@@ -745,7 +812,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    *   `envelopeSignature`). A present `envelopeSignature` is verified regardless.
    * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
-  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, requireContextSignature, x402 = false } = {}) {
+  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, requireContextSignature, x402 = false, allowedAgents: profileAgents } = {}) {
     try {
       assertTrustedContext(trustedContext); // a broken deriver is a refused request (GUARD_ERROR), never a quiet downgrade
       const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature, jurisdiction } = signed;
@@ -766,7 +833,10 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       }
       // 1-. Is this an agent this Service acts for at all (§16.3)? Asked of the identity the signature just proved, and
       // before anything else: everything below judges the caller by the caller's own policy, which another owner writes.
-      if (!servesAgent(agentDid)) return { decision: 'block', reasonCode: 'AGENT_NOT_SERVED' };
+      if (!servesAgent(agentDid)) return { decision: 'block', reasonCode: 'AGENT_NOT_ADMITTED' };
+      // A credential profile (a route, a tool) may admit fewer agents than the Service does: admission to the gateway is not
+      // access to every credential it holds (§16.3). Checked here too, before any policy is fetched or anything claimed.
+      if (profileAgents !== undefined && !profileAdmits(profileAgents, agentDid)) return { decision: 'block', reasonCode: 'CREDENTIAL_PROFILE_NOT_PERMITTED' };
       // 1a. The agent's context signature (context-claim binding), in the gate's order: after the request signature, before
       // payload binding and before any rule. The itinerary is otherwise unsigned, so without this a relay between the agent
       // and this Service could rewrite what the rules below judge. The object hashed is the one evaluated below.
@@ -838,6 +908,10 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         // an amount-0 action is refused too — a rewritten bundle could grant `permissions.update` as easily as raise a cap.
         return { decision: 'block', reasonCode: 'POLICY_BUNDLE_UNVERIFIED' };
       }
+      // 3b'. The owner (§16.3): every admitted agent must be owned by the principal whose credentials this Service holds, as
+      // its SIGNED bundle states (so after the signature check above). A listed agent of any other owner is refused — a
+      // cross-tenant agent can be admitted only by a bilateral delegation, which this Service does not take on its own word.
+      if (owner && bundle?.ownerPrincipal !== owner) return { decision: 'block', reasonCode: 'GATEWAY_OWNER_MISMATCH' };
       const verdict = verdictFromBundle(bundle, { ...signed, itinerary: signed.itinerary ?? {} }, trustedContext);
       // Mode ESCALATE floor lifts an otherwise-PERMIT (allow or observe) to human review
       // (escalate outranks observe, so a flag never masks it) — mirrors the backend gate.
@@ -927,7 +1001,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * agent's signed request must be passed as the first argument. Throws
    * GovernanceBlocked on any non-allow decision.
    */
-  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, requirePayloadBinding = false, requireContextSignature, x402 = false } = {}) {
+  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, requirePayloadBinding = false, requireContextSignature, x402 = false, allowedAgents: toolAgents } = {}) {
+    if (toolAgents !== undefined) assertProfileAgents(toolAgents, `tool "${action}"`);
     // `requirePayloadBinding` only checks that the AGENT bound something; the comparison with what this tool executes needs a
     // digest of it. Without `bindPayload` there is nothing to compare, so the option would give assurance it does not provide.
     if (requirePayloadBinding && !bindPayload) {
@@ -976,7 +1051,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // Configured but yielding nothing usable (a function that returned undefined) is a broken deriver, not "no
       // trusted context": refuse rather than fall back to the agent's word. `undefined` option = not configured.
       if (trustedContext !== undefined) assertTrustedContext(derived === undefined ? null : derived, `"${action}"`);
-      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, requireContextSignature, x402 });
+      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, requireContextSignature, x402, ...(toolAgents !== undefined ? { allowedAgents: toolAgents } : {}) });
       // allow/observe both PERMIT the tool call; observe is permit-but-flag (SAFR §11).
       if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`MCP guard ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
@@ -1110,7 +1185,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
 
   // `allowedAgents`: the pin this guard enforces (the DIDs, 'any', or null when unset) — a gateway asserts it at startup,
   // so a stale guard that predates the option (and would ignore it) cannot run unnoticed.
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, reportOutcome, invalidateBundle, close, serviceDid, allowedAgents: allowedAgentsPinned };
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, reportOutcome, acceptCounterpartyChallenge, invalidateBundle, close, serviceDid, allowedAgents: allowedAgentsPinned, gatewayOwnerPrincipal: owner };
 }
 
 /**
@@ -1134,6 +1209,11 @@ export function createHandshakeInitiator({ fromDid, sign } = {}) {
     async prove({ nonceA, challenge } = {}) {
       const { toDid, nonceB, sigB, handshakeId } = challenge ?? {};
       if (!toDid || !nonceB || !sigB) throw new Error('malformed CHALLENGE');
+      if (typeof nonceB !== 'string' || !HANDSHAKE_NONCE.test(nonceB)) {
+        const e = new Error('CHALLENGE nonce is not a plain token — refusing to sign it');
+        e.name = 'HandshakeFailed';
+        throw e;
+      }
       if (!verifyDidSignature(toDid, nonceA, sigB)) {
         const e = new Error('responder failed to prove control of its DID');
         e.name = 'HandshakeFailed';

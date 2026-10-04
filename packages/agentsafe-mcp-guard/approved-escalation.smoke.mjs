@@ -54,7 +54,7 @@ function issuer(claim) {
   return { calls, restore: () => { globalThis.fetch = realFetch; } };
 }
 const grant = (extra = {}) => ({ status: 200, body: { success: true, data: { ok: true, effectState: 'dispatching', agentDid: agent.did, action: 'flight-purchase', amount: 300, currency: 'USD', merchant: 'skyward-air', payloadDigest: null, claimToken: 'tok-1', ...extra } } });
-const mk = (opts = {}) => createMcpGuard({ serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
+const mk = (opts = {}) => createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, fetchBundle: async () => bundle, issuerApi: 'https://issuer.example/api/v1', requireAuthorization: true, ...opts });
 
 const t = [];
 const test = (name, fn) => t.push([name, fn]);

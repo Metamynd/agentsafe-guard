@@ -36,8 +36,8 @@ const bundle = {
 };
 let evaluations = 0;
 const fetchBundle = async () => { evaluations++; return bundle; };
-const receiver = createA2aGuard({ fetchBundle });
-const strict = createA2aGuard({ fetchBundle, requireContextSignature: true });
+const receiver = createA2aGuard({ allowedAgents: 'any', fetchBundle });
+const strict = createA2aGuard({ allowedAgents: 'any', fetchBundle, requireContextSignature: true });
 
 let failed = 0;
 const check = (ok, label, got) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${ok ? '' : `  (got ${JSON.stringify(got)})`}`); if (!ok) failed++; };
