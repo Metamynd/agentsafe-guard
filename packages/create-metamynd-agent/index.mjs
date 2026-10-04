@@ -65,7 +65,10 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // authorize request of its choosing, MAGP §8.2). Required for every scaffolded agent.
 // 0.20.0: guard.capture() signs as the agent (MAGP-SETTLE-v1) — a hold nobody claimed is settled only by its agent, a
 // counterparty the owner registered, or (an open testnet owner) anyone (MAGP §8.7.4).
-const GUARD_VERSION = '^0.20.0';
+// 0.21.0: guardTool() settles the hold an allowed call was granted (captured when the tool runs, released when it cannot
+// have), guard.void() releases one signed, and a gated tool's .resume(escalationId, args) runs an approved escalation once.
+// Required: the scaffold's npm run resume uses .resume().
+const GUARD_VERSION = '^0.21.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -1134,12 +1137,66 @@ function keepConfigAndFail(outDir, config, why) {
  * guard.escalationStatus(id) for the authorization and presents it to run the action (MAGP §8.7.18). Generated code: it
  * reads `g`, the refusal's governance verdict, and `dim`, both in scope at every call site.
  */
-function escalateNote(sandbox) {
-  return sandbox
-    ? `console.log(dim('     nobody can approve it here: the shared sandbox has no owner you can sign in as.'));
-      console.log(dim('     Provision your own agent to approve one in your dashboard.'));`
-    : `console.log(dim('     not a failure: it waits in your dashboard, under Escalations' + (g.escalationId ? ' (' + g.escalationId + ')' : '') + '.'));
+function escalateNote(sandbox, argsExpr = null) {
+  if (sandbox) {
+    return `console.log(dim('     nobody can approve it here: the shared sandbox has no owner you can sign in as.'));
+      console.log(dim('     Provision your own agent to approve one in your dashboard.'));`;
+  }
+  if (!argsExpr) {
+    return `console.log(dim('     not a failure: it waits in your dashboard, under Escalations' + (g.escalationId ? ' (' + g.escalationId + ')' : '') + '.'));
       console.log(dim('     Once you approve it, guard.escalationStatus(id) gives the agent the authorization to run it.'));`;
+  }
+  // Resumable (0.14.21; pre-beta rerun 3, E-1): the call is saved so `npm run resume -- <id>` can run it, once approved.
+  return `console.log(dim('     not a failure: it waits in your dashboard, under Escalations' + (g.escalationId ? ' (' + g.escalationId + ')' : '') + '.'));
+      if (g.escalationId) {
+        saveEscalation(g.escalationId, ${argsExpr});
+        console.log(dim('     Approve it there, then run it - exactly once - with:  npm run resume -- ' + g.escalationId));
+      }`;
+}
+
+/**
+ * The resume path a resumable scaffold carries (0.14.21; pre-beta rerun 3, E-1 — resuming used to mean writing ~15 lines
+ * by hand). `npm start` saves an escalated call's arguments to ./escalations/<id>.json; `npm run resume -- <id>` hands them
+ * to the gated tool's `.resume()` (agentsafe-guard >= 0.21.0), which waits for the owner's decision and then runs the tool
+ * exactly once under the authorization the approval minted. Generated code; `tool` is the gated tool's variable name.
+ */
+function resumeBlock(tool) {
+  return `// --- Escalations: \`npm run resume -- <escalationId>\` runs a call your owner APPROVED, exactly once. ---
+// npm start saves an escalated call's arguments to ./escalations/<id>.json. Approve it in the dashboard (AgentSafe ->
+// Escalations), then resume it: ${tool}.resume() waits for the decision and runs the tool once, under the authorization
+// the approval minted. Your own agent does the same with the escalationId from the refusal (e.governance.escalationId).
+import { mkdirSync as __mkdir, writeFileSync as __write, readFileSync as __read, rmSync as __rm } from 'node:fs';
+const ESCALATIONS = new URL('./escalations/', import.meta.url);
+const escalationFile = (id) => {
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(String(id ?? ''))) throw new Error('not an escalation id: ' + id);
+  return new URL(id + '.json', ESCALATIONS);
+};
+function saveEscalation(id, args) {
+  __mkdir(ESCALATIONS, { recursive: true });
+  __write(escalationFile(id), JSON.stringify(args, null, 2));
+}
+if (process.argv[2] === '--resume') {
+  const id = process.argv[3];
+  let saved;
+  try { saved = JSON.parse(__read(escalationFile(id), 'utf8')); } catch {
+    console.error('  No saved escalation "' + (id ?? '') + '". Run npm start first, then: npm run resume -- <escalationId>');
+    process.exit(1);
+  }
+  console.log('  waiting for your decision on ' + id + ' (approve it in the dashboard: AgentSafe -> Escalations) ...');
+  try {
+    const result = await ${tool}.resume(id, saved);
+    __rm(escalationFile(id), { force: true }); // used: a second resume has nothing to run
+    console.log('\\x1b[32m  RAN\\x1b[0m  approved, and run exactly once: ' + JSON.stringify(result));
+  } catch (e) {
+    const g = e.governance ?? {};
+    // A final answer (rejected, already used, expired) retires the saved call; still pending or unreachable keeps it.
+    if (g.decision === 'block' && g.reasonCode !== 'GATE_UNREACHABLE') __rm(escalationFile(id), { force: true });
+    console.log('\\x1b[31m  NOT RUN\\x1b[0m  ' + (g.reasonCode ?? e.message) + (g.status ? ' (' + g.status + ')' : ''));
+    process.exitCode = 1;
+  }
+  process.exit();
+}
+`;
 }
 
 function exampleIndexNoGateway(scope, perTxnMax, currency, merchant, sandbox = false) {
@@ -1195,6 +1252,7 @@ const gatedRaiseOwnLimit = guard.guardTool(
   }),
 );
 
+${sandbox ? '' : resumeBlock('gatedBookFlight')}
 const dim = (t) => '\\x1b[2m' + t + '\\x1b[0m';
 const bold = (t) => '\\x1b[1m' + t + '\\x1b[0m';
 const rule = (n) => '  ' + '-'.repeat(n);
@@ -1253,7 +1311,7 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
       console.log(dim('     ' + why));
-      ${escalateNote(sandbox)}
+      ${escalateNote(sandbox, sandbox ? null : 'args')}
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? 'refused'));
       console.log(dim('     ' + why));
@@ -1400,6 +1458,7 @@ const gatedRaiseOwnLimit = guard.guardTool(
   }),
 );
 
+${resumeBlock('gatedBookFlight')}
 const dim = (t) => '\\x1b[2m' + t + '\\x1b[0m';
 const bold = (t) => '\\x1b[1m' + t + '\\x1b[0m';
 const rule = (n) => '  ' + '-'.repeat(n);
@@ -1461,7 +1520,7 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
       console.log(dim('     ' + why));
-      ${escalateNote(false)}
+      ${escalateNote(false, 'args')}
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? 'refused'));
       console.log(dim('     ' + why));
@@ -1615,7 +1674,7 @@ const gatedChangeOwnPermissions = guard.guardTool(
   changeOwnPermissions,
   (a) => ({ context: a }),
 );
-
+${!sandbox && !withGateway ? '\n' + resumeBlock('gatedAction') : ''}
 const STEPS = ${JSON.stringify(steps, null, 2)};
 const INPUTS = ${JSON.stringify(demo.inputs)};
 const NOT_STAGED = ${JSON.stringify(demo.notDemonstrated)};
@@ -1636,7 +1695,7 @@ async function attempt(n, total, step) {
     got = g.decision ?? 'error';
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
-      ${escalateNote(sandbox)}
+      ${escalateNote(sandbox, !sandbox && !withGateway ? 'step.context' : null)}
     } else {
       console.log('\\x1b[31m     BLOCKED\\x1b[0m  ' + (g.reasonCode ?? e.message));
       console.log(dim(g.eventId ? '     decided by the MetaMynd gate - your tool never ran.' : '     decided right here from your signed rules (no network call), and reported for audit - your tool never ran.'));
@@ -1760,7 +1819,7 @@ const identity = JSON.parse(readFileSync(new URL('./service.metamynd.json', impo
 // Add a DID here only for another agent you mean this gateway to act for. gatewayOwnerPrincipal binds it to YOU, the owner of
 // its credentials: an agent listed here that another principal owns is refused anyway (GATEWAY_OWNER_MISMATCH).
 const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: false, policyPublicKey: '${policyKey}', allowedAgents: ['${agentDid}'], gatewayOwnerPrincipal: '${ownerPrincipal}' });
-// A guard below 0.20.0 ignores allowedAgents and serves every agent: refuse to start on one (a stale lockfile, say).
+// A guard below 0.22.0 cannot enforce both pins (below 0.20.0 it ignores allowedAgents and serves every agent; 0.22.0 added gatewayOwnerPrincipal): refuse to start on one (a stale lockfile, say).
 if (!Array.isArray(guard.allowedAgents) || !guard.gatewayOwnerPrincipal) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.22.0 to enforce allowedAgents and gatewayOwnerPrincipal - run npm install');
 
 const gateway = createHttpGateway({
@@ -1895,10 +1954,18 @@ Replace \`performAction()\` in \`server.mjs\` with your implementation and put a
 
 /** The README for a non-financial hosted scaffold. `withGateway` selects the two-process shape. */
 /** The generated README's "Change the rules" body: the dashboard path, or — for the shared sandbox agent — how to get an agent whose rules you can change. */
-function changeRulesSection(sandbox) {
+function changeRulesSection(sandbox, resumable = false) {
   return sandbox
     ? `${SANDBOX_RULES_FIXED} An \`escalate\` verdict is held for an owner to approve; poll \`guard.escalationStatus(id)\`.`
-    : `Edit the agent's SOPs in the dashboard (${SOPS_PATH}). The agent's behaviour changes live —
+    : resumable
+      ? `Edit the agent's SOPs in the dashboard (${SOPS_PATH}). The agent's behaviour changes live —
+no redeploy.
+
+An \`escalate\` verdict is held for an owner to approve. \`npm start\` saves an escalated call and prints its id; approve it
+in the dashboard (AgentSafe → Escalations), then \`npm run resume -- <escalationId>\` runs it exactly once under the
+authorization the approval minted. In your own agent that is one call: \`await gatedTool.resume(escalationId, sameArgs)\`
+(\`@metamynd/agentsafe-guard\` ≥ 0.21.0) — pass the SAME arguments; the approval is bound to that request.`
+      : `Edit the agent's SOPs in the dashboard (${SOPS_PATH}). The agent's behaviour changes live —
 no redeploy. An \`escalate\` verdict is held for an owner to approve; poll \`guard.escalationStatus(id)\`.`;
 }
 
@@ -1981,7 +2048,7 @@ ${clonedFreshSection(daemonKey)}
 
 ## Change the rules
 
-${changeRulesSection(sandbox)}
+${changeRulesSection(sandbox, !sandbox && !withGateway)}
 
 ## What this is not
 
@@ -2000,7 +2067,7 @@ Full integration guide: \`docs/integration/INTEGRATE-WITH-METAMYND.md\`.
 `;
 }
 
-function examplePackageJson(slug, neutral = false) {
+function examplePackageJson(slug, neutral = false, resumable = false) {
   return JSON.stringify(
     {
       name: slug,
@@ -2010,7 +2077,7 @@ function examplePackageJson(slug, neutral = false) {
       // `verify` is scaffolded in because governance that lives only in a dashboard is a
       // thing someone has to remember to look at. As a build step it is a control: a change
       // that widens this agent's authority fails `npm test`.
-      scripts: { start: 'node index.mjs', test: neutral ? 'agentsafe-guard verify --context ./verify-context.json' : 'agentsafe-guard verify' },
+      scripts: { start: 'node index.mjs', ...(resumable ? { resume: 'node index.mjs --resume' } : {}), test: neutral ? 'agentsafe-guard verify --context ./verify-context.json' : 'agentsafe-guard verify' },
       dependencies: { [GUARD_PKG]: GUARD_VERSION },
     },
     null,
@@ -2112,14 +2179,14 @@ ${clonedFreshSection(daemonKey)}
 
 ## Change the rules
 
-${changeRulesSection(sandbox)}
+${changeRulesSection(sandbox, !sandbox)}
 
 Full integration guide: \`docs/integration/INTEGRATE-WITH-METAMYND.md\`.
 `;
 }
 
 function gitignore() {
-  return `node_modules/\nagent.metamynd.json\n.env\n`;
+  return `node_modules/\nagent.metamynd.json\n.env\nescalations/\n`;
 }
 
 // ---------- the default hosted scaffold's second process: a separate tool gateway ----------
@@ -2194,7 +2261,7 @@ const identity = JSON.parse(readFileSync(new URL('./service.metamynd.json', impo
 // The claim below does not stop that on its own: the hold belongs to the CALLER, and the caller's owner decides which
 // services may claim it — including registering this gateway's DID as one of theirs.
 const guard = createMcpGuard({ serviceDid: identity.serviceDid, serviceKey: identity.serviceKey ?? undefined, issuerApi: MAGP_API, requireAuthorization: true, policyPublicKey: '${policyKey}', allowedAgents: ['${agentDid}'], gatewayOwnerPrincipal: '${ownerPrincipal}' });
-// A guard below 0.20.0 ignores allowedAgents and serves every agent: refuse to start on one (a stale lockfile, say).
+// A guard below 0.22.0 cannot enforce both pins (below 0.20.0 it ignores allowedAgents and serves every agent; 0.22.0 added gatewayOwnerPrincipal): refuse to start on one (a stale lockfile, say).
 if (!Array.isArray(guard.allowedAgents) || !guard.gatewayOwnerPrincipal) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.22.0 to enforce allowedAgents and gatewayOwnerPrincipal - run npm install');
 
 const gateway = createHttpGateway({
@@ -2495,7 +2562,9 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
         : exampleIndexNoGateway(scope, perTxnMax, currency, paymentMerchant, !!sandbox),
     force,
   );
-  writeFileSafe(outDir, 'package.json', examplePackageJson(slug, neutral), force);
+  // Resumable = the index carries the resume path (resumeBlock): not the shared sandbox (nobody can approve there), and not a
+  // non-financial agent behind ./gateway (it runs without requireAuthorization, so it cannot honour an approval yet).
+  writeFileSafe(outDir, 'package.json', examplePackageJson(slug, neutral, !sandbox && (!neutral || !withGateway)), force);
   writeFileSafe(outDir, '.gitignore', gitignore(), force);
   writeFileSafe(
     outDir,
@@ -2808,7 +2877,7 @@ const guard = createMcpGuard({
     return { subject: AGENT_DID, ownerPrincipal: HARNESS_OWNER, ...bundleFromRules(rules) };
   },
 });
-// A guard below 0.20.0 ignores allowedAgents and serves every agent: refuse to start on one (a stale lockfile, say).
+// A guard below 0.22.0 cannot enforce both pins (below 0.20.0 it ignores allowedAgents and serves every agent; 0.22.0 added gatewayOwnerPrincipal): refuse to start on one (a stale lockfile, say).
 if (!Array.isArray(guard.allowedAgents) || !guard.gatewayOwnerPrincipal) throw new Error('this gateway needs @metamynd/agentsafe-mcp-guard >= 0.22.0 to enforce allowedAgents and gatewayOwnerPrincipal - run npm install');
 
 // One protected route per gated action in index.mjs. This gateway IS the tool, not a proxy in

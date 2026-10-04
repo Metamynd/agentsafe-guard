@@ -141,7 +141,10 @@ class FakeGate:
             self._server.server_close()
 
     def approve(self, escalation_id: str) -> None:
-        self.escalations[escalation_id]["status"] = "approved"
+        e = self.escalations[escalation_id]
+        e["status"] = "approved"
+        # Approval mints the hold the agent then presents (MAGP 9a.3), as the real gate does.
+        self.holds.setdefault(e["authorizationId"], {"state": "held", "amount": e.get("amount", 0.0), "currency": e.get("currency", "USD"), "payloadDigest": e.get("payloadDigest")})
 
     def modify(self, escalation_id: str) -> None:
         """A reviewer changed the action instead of approving it: terminal, with a follow-up hold."""
@@ -242,9 +245,9 @@ class FakeGate:
             return self._refuse("block", "SOP_SPEND_CAP")
         norm = risk.strip().lower() if isinstance(risk, str) else None
         if norm not in RISK_LEVELS:
-            return self._hold("CONTEXT_UNVERIFIABLE", digest)
+            return self._hold("CONTEXT_UNVERIFIABLE", digest, amount, body["currency"])
         if norm in ("high", "critical"):
-            return self._hold("RISK_REVIEW", digest)
+            return self._hold("RISK_REVIEW", digest, amount, body["currency"])
         auth_id = str(uuid.uuid4())
         self.holds[auth_id] = {"state": "held", "amount": amount, "currency": body["currency"], "payloadDigest": digest}
         # A DIFFERENT id from auth_id — the real gate's anchored evidence event and the mandate hold are
@@ -259,9 +262,9 @@ class FakeGate:
         """The gate ACKNOWLEDGES a binding by echoing the digest it stored (null when unbound)."""
         return {"payloadDigest": digest} if self.echo_payload_digest else {}
 
-    def _hold(self, code: str, digest: Optional[str] = None) -> "tuple[int, Any]":
+    def _hold(self, code: str, digest: Optional[str] = None, amount: float = 0.0, currency: str = "USD") -> "tuple[int, Any]":
         esc_id = str(uuid.uuid4())
-        self.escalations[esc_id] = {"status": "pending", "authorizationId": str(uuid.uuid4())}
+        self.escalations[esc_id] = {"status": "pending", "authorizationId": str(uuid.uuid4()), "amount": amount, "currency": currency, "payloadDigest": digest}
         return 403, {"success": False, "data": {"decision": "escalate", "reasonCode": code, "escalationId": esc_id, **self._ack(digest)}}
 
     @staticmethod

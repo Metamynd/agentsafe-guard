@@ -505,6 +505,53 @@ export function createGuard(opts = {}) {
   }
 
   /**
+   * Release a hold nobody has claimed, returning its amount to the budget (since 0.21.0). Signed as this agent
+   * (MAGP-SETTLE-v1), which the issuer requires for an owner with registered counterparties and for every mainnet hold
+   * (MAGP §8.7.4) — the raw unsigned POST earlier READMEs showed is refused there with COUNTERPARTY_AUTH_REQUIRED.
+   *
+   * Never throws. Resolves to the issuer's answer: `{ voided: true, reasonCode: 'HOLD_VOIDED' }`, or `{ voided: false,
+   * reasonCode }` — `NOT_HELD` (already settled or released: not an error), `COUNTERPARTY_MISMATCH` (a service has claimed it
+   * and may already have acted; only it can release it), `GATE_UNREACHABLE` (the hold stands; its TTL is the backstop).
+   *
+   * @param {string} authorizationId
+   * @param {string} [reason]
+   * @returns {Promise<{ voided: boolean, reasonCode: string, authorizationId?: string, status?: string }>}
+   */
+  async function voidHold(authorizationId, reason) {
+    try {
+      const why = reason ? String(reason) : '';
+      const agentProof = await settleProof('void', authorizationId, [why]).catch(() => undefined);
+      const res = await fetch(`${base}/policy/mandate/authorize/${encodeURIComponent(authorizationId)}/void`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...(why ? { reason: why } : {}), ...(agentProof ? { agentProof } : {}) }),
+      });
+      const body = await res.json().catch(() => null);
+      const data = body?.data && typeof body.data === 'object' ? body.data : {};
+      return { ...data, voided: data.voided === true, reasonCode: data.reasonCode ?? body?.message ?? `GATE_HTTP_${res.status}` };
+    } catch (err) {
+      return { voided: false, reasonCode: 'GATE_UNREACHABLE', error: String(err?.message ?? err) };
+    }
+  }
+
+  /**
+   * Poll a held (escalated) action until its owner decides, or `timeoutMs` passes (since 0.21.0). Resolves to the last
+   * `escalationStatus()` answer — it may STILL be `pending` when the timeout hits. Act only when `status === 'approved'`
+   * and an `authorizationId` came back: a hold nobody has decided is a hold, and an unreachable gate never resolves a wait
+   * in the action's favour.
+   *
+   * @param {string} escalationId
+   * @param {{ timeoutMs?: number, intervalMs?: number }} [opts]  defaults: 10 minutes, every 2 seconds
+   */
+  async function waitForEscalation(escalationId, { timeoutMs = 600_000, intervalMs = 2_000 } = {}) {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      const st = await escalationStatus(escalationId);
+      if (st?.status !== 'pending' || Date.now() >= deadline) return st;
+      await new Promise((r) => setTimeout(r, Math.max(50, Math.min(intervalMs, deadline - Date.now()))));
+    }
+  }
+
+  /**
    * This agent's signature over settling its OWN unclaimed hold (MAGP-SETTLE-v1), or undefined when the key provider cannot
    * sign one (a caller's own provider without signSettle, or a signer daemon older than 0.20.0) — the call then goes unsigned,
    * which the issuer accepts only for an open testnet owner. `fields`: capture → amountCharged, bookingRef, settlementTxHash;
@@ -904,22 +951,93 @@ export function createGuard(opts = {}) {
    */
   function guardTool(action, handler, mapArgs = (a) => a, toolOpts = {}) {
     const adapter = toolOpts.executionAdapter ?? defaultExecutionAdapter;
-    return async (args) => {
-      const decision = await check({ action, ...mapArgs(args) });
-      // allow/observe both PERMIT execution; observe is permit-but-flag (SAFR §11) — the
-      // handler receives the `decision` so a caller can surface/log the observation.
-      if (decision.decision !== 'allow' && decision.decision !== 'observe') {
-        const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
-        err.name = 'GovernanceBlocked';
-        err.governance = decision;
+    // What becomes of the hold an allowed call was granted (since 0.21.0; pre-beta rerun 3, D-2/D-3). Left alone, an unclaimed
+    // hold lapses with its TTL: a tool that RAN gave its budget back after 15 minutes (the cumulative cap could be spent
+    // again), and one that FAILED kept the budget reserved until then.
+    //   - success → captured at the authorized amount (`settle: 'none'` opts out). Where a gateway claimed the hold it has
+    //     already settled it, and the issuer refuses the agent's capture — harmless, and ignored.
+    //   - failure → released only when nothing can have run: the error is a GovernanceBlocked a SERVICE raised (one that
+    //     re-verifies the request refused it), or it says `nothingExecuted: true`, or `releaseOnError` says so (true, or
+    //     (err) => boolean). A refusal raised by a guard wrapper itself (a guarded call nested inside this tool) does not
+    //     count: this tool may have acted before it. Any other failure keeps the hold: a tool that threw may still have
+    //     acted. And a hold a service CLAIMED is never released by the agent — the issuer refuses it, because the service
+    //     may already have acted.
+    const settle = toolOpts.settle ?? 'capture';
+    const releaseOnError = toolOpts.releaseOnError ?? false;
+    const refusal = (decision) => {
+      const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
+      err.name = 'GovernanceBlocked';
+      err.governance = decision;
+      err.raisedByGuard = true; // this wrapper's own refusal — never evidence that an enclosing tool did nothing
+      return err;
+    };
+    const nothingRan = (err) =>
+      (err?.name === 'GovernanceBlocked' && err?.raisedByGuard !== true) || err?.nothingExecuted === true ||
+      releaseOnError === true || (typeof releaseOnError === 'function' && releaseOnError(err) === true);
+    // A capture that cannot reach the gate is retried briefly: one that never lands lets the hold of an action that RAN
+    // lapse with its TTL, and its spend stop counting against the cap. A refusal (already settled by a gateway) is final.
+    async function captureRan(authorizationId, amount) {
+      for (const wait of [0, 250, 1000]) {
+        if (wait) await new Promise((r) => setTimeout(r, wait));
+        try { await capture(authorizationId, amount); return; } catch { /* unreachable — try again */ }
+      }
+    }
+    async function run(args, decision, mapped) {
+      let result;
+      try {
+        // ExecutionAdapter seam (§19): the adapter runs the real handler (proceed) or substitutes it.
+        result = await adapter({ action, args, decision, proceed: () => handler(args, decision) });
+      } catch (err) {
+        if (decision.authorizationId && nothingRan(err)) {
+          const reason = 'tool did not run: ' + (err?.governance?.reasonCode ?? err?.code ?? err?.name ?? 'error');
+          await voidHold(decision.authorizationId, reason.slice(0, 200));
+        }
         throw err;
       }
+      if (decision.authorizationId && settle === 'capture' && typeof mapped?.amount === 'number') {
+        await captureRan(decision.authorizationId, mapped.amount);
+      }
+      return result;
+    }
+    const gated = async (args) => {
+      const mapped = mapArgs(args);
+      const decision = await check({ action, ...mapped });
+      // allow/observe both PERMIT execution; observe is permit-but-flag (SAFR §11) — the
+      // handler receives the `decision` so a caller can surface/log the observation.
+      if (decision.decision !== 'allow' && decision.decision !== 'observe') throw refusal(decision);
       if (decision.decision === 'observe') {
         console.warn(`[agentsafe] OBSERVE "${action}": ${decision.reasonCode} — permitted under monitoring`);
       }
-      // ExecutionAdapter seam (§19): the adapter runs the real handler (proceed) or substitutes it.
-      return adapter({ action, args, decision, proceed: () => handler(args, decision) });
+      return run(args, decision, mapped);
     };
+    /**
+     * Run an ESCALATED call once its owner approves it (since 0.21.0). Pass the escalationId from the refusal
+     * (`err.governance.escalationId`) and the SAME args the original call had: the approval is bound to that request, and
+     * a service that re-verifies it refuses a different one. Waits for the decision (`waitForEscalation`, same options),
+     * then runs the tool with the authorization the approval minted — settled like any allowed call. Throws a
+     * GovernanceBlocked when it was not approved (rejected, modified, expired, still pending at the timeout, or the gate
+     * was unreachable), with the status in `err.governance`.
+     *
+     * Once only: it runs the tool only while the approved authorization is still `not_started` (nothing has used it). A
+     * second resume of the same escalation — after a run that was settled, a gateway's claim, or an expiry — is refused
+     * `AUTHORIZATION_ALREADY_USED` without touching the tool. Two resumes RACING each other in one in-process agent can
+     * both pass that check before either settles; a gateway (the default scaffold) claims the authorization atomically,
+     * which is what makes concurrent resumes exactly-once.
+     */
+    gated.resume = async (escalationId, args, opts = {}) => {
+      const st = await waitForEscalation(escalationId, opts);
+      if (st?.status !== 'approved' || !st.authorizationId) {
+        throw refusal({ decision: st?.status === 'pending' ? 'escalate' : 'block', reasonCode: st?.reasonCode ?? `ESCALATION_${String(st?.status ?? 'unknown').toUpperCase()}`, escalationId, status: st?.status ?? null });
+      }
+      const fx = await effectStatus(st.authorizationId);
+      if (fx?.outcome !== 'not_started') {
+        const unreachable = fx?.effectState === 'unreachable';
+        throw refusal({ decision: 'block', reasonCode: unreachable ? 'GATE_UNREACHABLE' : 'AUTHORIZATION_ALREADY_USED', escalationId, authorizationId: st.authorizationId, status: 'approved', outcome: fx?.outcome ?? null });
+      }
+      const mapped = mapArgs(args);
+      return run(args, { decision: 'allow', reasonCode: st.reasonCode ?? 'ESCALATION_APPROVED', authorizationId: st.authorizationId, escalationId }, mapped);
+    };
+    return gated;
   }
 
   /**
@@ -1165,5 +1283,5 @@ export function createGuard(opts = {}) {
     return keyProvider.signKeyControlChallenge(challenge);
   }
 
-  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, bindPayload, capture, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, proof, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid, executionAdapter: defaultExecutionAdapter };
+  return { authorize, authorizeLocal, check, loadBundle, policyAnchor: _currentAnchor, watchPolicy, mode, verifyOnChain, buildSignedRequest, bindPayload, capture, void: voidHold, waitForEscalation, guardTool, evaluateLocally, guardToolLocal, handshake, preparePayment, escalationStatus, proof, effectDispatching, effectDispatched, effectUnknown, effectStatus, verifyKey, signChallenge, agentDid, executionAdapter: defaultExecutionAdapter };
 }
