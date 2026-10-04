@@ -489,8 +489,11 @@ const gatedBookFlight = guard.guardTool(
 - For **payment** tools (x402, §7a): after `authorize` allows, the Service returns a 402 bound to
   your `authorizationId`. Call `guard.preparePayment(requirements, authorizationId)` — it refuses an
   unbound or mismatched 402 — pay via x402, then reconcile the hold with
-  `await guard.capture(authorizationId, amountCharged, bookingRef, settlementTxHash)`. An
-  uncaptured hold auto-voids at its expiry (`POST /policy/mandate/authorize/:id/void` to release early).
+  `await guard.capture(authorizationId, amountCharged, bookingRef, settlementTxHash)`. To release a hold
+  you will not use, call `await guard.void(authorizationId, reason)` (0.21.0) — it signs as the agent
+  (MAGP-SETTLE-v1). A raw, unsigned `POST /policy/mandate/authorize/:id/void` is refused
+  `COUNTERPARTY_AUTH_REQUIRED` for an owner with registered counterparties (every default scaffold) and
+  for every mainnet hold. `guardTool()` now settles its own holds — see [Holds](#holds-and-escalations-since-0210).
 - **An ambiguous outcome (a timeout, a lost response) is reported by the service, not the agent.**
   `guard.effectUnknown()` is **deprecated since 0.15.4** and rejects immediately (`EffectUnknownNotSupported`,
   `code: 'EFFECT_UNKNOWN_AGENT_UNSUPPORTED'`) without calling the gate. Since 2026-09-24 the gate accepts
@@ -649,6 +652,44 @@ if (d.decision === 'escalate') {
 
 On approval the budget/cap gate re-runs (§9a.3), so an approval still can't overspend; an
 unresolved escalation lapses to denied after its TTL (§9a.4).
+
+### Holds and escalations (since 0.21.0)
+
+**Resume an approved escalation in one call.** A `guardTool()` wrapper has `.resume(escalationId, args)`: it waits for
+the owner's decision (`guard.waitForEscalation`, default 10 minutes), then runs the tool exactly once with the
+authorization the approval minted. Pass the **same** args the original call had — the approval is bound to that request.
+
+```js
+try {
+  await bookFlight({ amount: 900, merchant: 'skyward-air', riskLevel: 'high' });
+} catch (e) {
+  if (e.governance?.decision === 'escalate') {
+    // …the owner approves it in the dashboard (AgentSafe → Escalations)…
+    const booking = await bookFlight.resume(e.governance.escalationId, { amount: 900, merchant: 'skyward-air', riskLevel: 'high' });
+  }
+}
+```
+
+It throws a `GovernanceBlocked` when the escalation was not approved (rejected, modified, expired, still pending at the
+timeout, or the gate was unreachable), with the status in `err.governance`. It runs the tool only while the approved
+authorization is still unused: a second resume of the same escalation is refused `AUTHORIZATION_ALREADY_USED` without
+touching the tool. Two resumes *racing* in one in-process agent can both pass that check before either settles; a
+gateway (the default scaffold) claims the authorization atomically, which is what makes concurrent resumes exactly-once.
+
+**What `guardTool()` does with the hold an allowed call was granted.** Before 0.21.0 it did nothing, and an unclaimed
+hold lapses with its TTL: a tool that ran gave its budget back after 15 minutes, and one that failed kept it reserved
+until then. Now:
+
+| The tool… | The hold | Opt out / in |
+|---|---|---|
+| returns | **captured** at the authorized amount. Where a gateway claimed the hold it has already settled it; the issuer refuses the agent's capture, and that is ignored. | `guardTool(…, { settle: 'none' })` |
+| throws a `GovernanceBlocked` (a service that re-verifies the request refused it) | **released** (`guard.void`) — nothing ran. Not a refusal raised by a guard wrapper itself (a guarded call nested inside the tool): the tool may have acted before it, so that keeps the hold. | — |
+| throws an error with `nothingExecuted: true` | **released** | — |
+| throws anything else | **kept**: a tool that threw may still have acted | `{ releaseOnError: true }` or `{ releaseOnError: (err) => boolean }` |
+
+The agent can never release a hold a service has **claimed**: the issuer refuses it (`COUNTERPARTY_MISMATCH`), because
+the service may already have acted. To release one yourself, `await guard.void(authorizationId, reason)` — signed as the
+agent, and `{ voided, reasonCode }` back (`NOT_HELD` means it was already settled or released).
 
 ## Trust model
 

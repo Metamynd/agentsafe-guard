@@ -168,9 +168,10 @@ __all__ = [
     "governance_headers",
     "GovernanceBlocked",
     "GovernanceRefusal",
+    "ToolNotExecuted",
 ]
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1484,6 +1485,15 @@ class GovernanceBlocked(RuntimeError):
         self.action = action
 
 
+class ToolNotExecuted(Exception):
+    """Raise from a guarded tool when it failed BEFORE it did anything (0.12.0): input validation, a missing credential, an
+    upstream that answered "not processed". `guard_tool` then releases the hold the call was granted instead of keeping it
+    reserved. Any other exception keeps the hold, because a tool that raised may still have acted. An exception of your own
+    can say the same with an attribute: `nothing_executed = True`."""
+
+    nothing_executed = True
+
+
 # Reason codes that mean "the gate gave no decision" (a rate-limit or server error with a JSON body is read as a block
 # with one of these), not "the gate refused this request". Telling the model never to retry those would be wrong.
 _NO_DECISION_REASONS = frozenset({"", "UNKNOWN", "REFUSED", "GATE_UNREACHABLE"})
@@ -1539,8 +1549,26 @@ def guard_tool(
     map_args: "Any" = None,
     *,
     on_refusal: "Any" = "raise",
+    settle: str = "capture",
+    release_on_error: "Any" = False,
+    resume_timeout: float = 600.0,
 ) -> "Any":
     """Wrap a callable so it runs ONLY on a permit.
+
+    What becomes of the hold a permitted call was granted (0.12.0; before, nothing — an unclaimed hold lapses with its
+    TTL, so a tool that RAN handed its budget back after 15 minutes, and one that FAILED kept it reserved until then):
+      - the tool returns → the hold is CAPTURED at the authorized amount (`settle="none"` opts out). Where a gateway
+        claimed it, the gateway has already settled it and the gate refuses the agent's capture — harmless, ignored.
+      - the tool raises `GovernanceBlocked` (a service that re-verifies the request refused it) or `ToolNotExecuted`, or
+        an exception with `nothing_executed = True` → the hold is RELEASED (`client.void`).
+      - it raises anything else → the hold is KEPT: a tool that raised may still have acted. `release_on_error=True`, or a
+        callable `release_on_error(exc) -> bool`, says otherwise. The gate never lets the agent release a hold a service
+        has CLAIMED, because that service may already have acted.
+
+    An escalated call (an ESCALATE refusal carries `verdict.escalation_id`) is resumed with
+    `governed.resume(escalation_id, *args, **kwargs)` and the SAME arguments: it waits up to `resume_timeout` seconds
+    for the owner's decision, then runs the tool exactly once under the approval's authorization (a fresh signed request
+    carrying it is what `governance_headers()` returns inside), settled as above. Not approved → `GovernanceBlocked`.
 
     The Node guard's `guardTool()` has always had this; Python did not, and its absence was
     the real gap. A client that only returns verdicts leaves every caller to remember to
@@ -1619,6 +1647,10 @@ def guard_tool(
     if not (callable(on_refusal) or on_refusal in _ON_REFUSAL_MODES):
         # Refused at wrap time: a typo here ("retrun") must not silently fall back to either behaviour.
         raise ValueError(f'on_refusal must be "raise", "return" or a callable, not {on_refusal!r}')
+    if settle not in ("capture", "none"):
+        raise ValueError(f'settle must be "capture" or "none", not {settle!r}')
+    if not (isinstance(release_on_error, bool) or callable(release_on_error)):
+        raise ValueError(f"release_on_error must be a bool or a callable, not {release_on_error!r}")
 
     def _is_async_callable(f: "Any") -> bool:
         return inspect.iscoroutinefunction(f) or inspect.iscoroutinefunction(getattr(f, "__call__", None))
@@ -1636,7 +1668,7 @@ def guard_tool(
             return GovernanceRefusal(refused.verdict, refused.action)
         return on_refusal(refused)
 
-    def _gate(*args: "Any", **kwargs: "Any") -> "Verdict":
+    def _gate(*args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any]]":
         payload = map_args(*args, **kwargs) if map_args else {}
         try:
             verdict = client.authorize(
@@ -1653,11 +1685,93 @@ def guard_tool(
             # No decision is a block (rule 5), and a block with its code like any other (L-g): raised as GovernanceBlocked
             # (still a RuntimeError), or under on_refusal="return" handed to the model as a GovernanceRefusal that says
             # the gate gave no decision and the call may be retried later — not a bare framework error.
-            raise GovernanceBlocked(Verdict(decision="block", reason_code=GateUnreachable.reason_code, hint=str(exc)), action) from exc
+            raise _guard_refusal(Verdict(decision="block", reason_code=GateUnreachable.reason_code, hint=str(exc))) from exc
         if not verdict.permitted:
             # Fail closed, loudly, and before the tool is touched.
-            raise GovernanceBlocked(verdict, action)
-        return verdict
+            raise _guard_refusal(verdict)
+        return verdict, payload
+
+    def _guard_refusal(verdict: "Verdict") -> "GovernanceBlocked":
+        """This wrapper's own refusal, marked as such: raised inside an ENCLOSING guarded tool it says nothing about what
+        that tool had already done, so it must never release the enclosing call's hold (see _nothing_ran)."""
+        refused = GovernanceBlocked(verdict, action)
+        refused.raised_by_guard = True  # type: ignore[attr-defined]
+        return refused
+
+    def _approved(escalation_id: str, *args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any]]":
+        """The permit an owner's approval minted, as if the gate had allowed the call itself — or GovernanceBlocked."""
+        payload = map_args(*args, **kwargs) if map_args else {}
+        try:
+            state = client.wait_for_escalation(escalation_id, timeout=resume_timeout)
+            if not state.may_proceed:
+                # Pending at the timeout is still a hold; denied / expired / modified is not this action, approved.
+                decision = "escalate" if state.status == "pending" else "block"
+                code = state.reason_code or f"ESCALATION_{state.status.upper()}"
+                raise _guard_refusal(Verdict(decision=decision, reason_code=code, escalation_id=escalation_id, raw=state.raw))
+            # Once only: run while the approved authorization is still unused. A second resume — after a settled run, a
+            # gateway's claim, an expiry — is refused without touching the tool. (Two resumes RACING in one in-process agent
+            # can both pass this before either settles; a claiming gateway is what makes concurrent resumes exactly-once.)
+            used = client.outcome(state.authorization_id)
+        except GateUnreachable as exc:
+            raise _guard_refusal(Verdict(decision="block", reason_code=GateUnreachable.reason_code, escalation_id=escalation_id, hint=str(exc))) from exc
+        if used.outcome != "not_started":
+            raise _guard_refusal(Verdict(decision="block", reason_code="AUTHORIZATION_ALREADY_USED", authorization_id=state.authorization_id,
+                                         escalation_id=escalation_id, hint=f"outcome: {used.outcome}"))
+        # The original signed request is old by now (a service refuses one older than a few minutes): sign the SAME
+        # request again, carrying the approval's authorization, for governance_headers() to hand to a gateway.
+        signed = client.sign_request(
+            action,
+            payload.get("amount", 0),
+            currency=payload.get("currency", "USD"),
+            merchant=payload.get("merchant", ""),
+            context=payload.get("context", {}),
+            resource=payload.get("resource"),
+            authorization_id=state.authorization_id,
+            payload=payload.get("payload", NO_PAYLOAD),
+            jurisdiction=payload.get("jurisdiction"),
+        )
+        verdict = Verdict(decision="allow", reason_code=state.reason_code or "ESCALATION_APPROVED", authorization_id=state.authorization_id,
+                          escalation_id=escalation_id, raw=state.raw, signed=signed)
+        return verdict, payload
+
+    def _nothing_ran(exc: BaseException) -> bool:
+        if not isinstance(exc, Exception):
+            return False  # a cancellation or an interpreter exit says nothing about what the tool did
+        if isinstance(exc, GovernanceBlocked) and getattr(exc, "raised_by_guard", False) is True:
+            return False  # a NESTED guarded call's refusal: this tool may have acted before it
+        if isinstance(exc, (GovernanceBlocked, ToolNotExecuted)) or getattr(exc, "nothing_executed", False) is True:
+            return True
+        if release_on_error is True:
+            return True
+        return callable(release_on_error) and release_on_error(exc) is True
+
+    def _after_failure(verdict: "Verdict", exc: BaseException) -> None:
+        """Release the hold of a call that cannot have run; keep it otherwise. Best effort: the TTL is the backstop."""
+        if not verdict.authorization_id or not _nothing_ran(exc):
+            return
+        code = exc.verdict.reason_code if isinstance(exc, GovernanceBlocked) else str(getattr(exc, "code", "") or type(exc).__name__)
+        try:
+            client.void(verdict.authorization_id, reason=f"tool did not run: {code}"[:200])
+        except Exception:  # noqa: BLE001 — best effort
+            pass
+
+    def _after_success(verdict: "Verdict", payload: "Mapping[str, Any]") -> None:
+        """Commit the hold of a call that ran, at the authorized amount. Best effort; a gateway may already have."""
+        amount = payload.get("amount")
+        if settle != "capture" or not verdict.authorization_id or isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            return
+        # Retried briefly when the gate cannot be reached: a capture that never lands lets the hold of an action that RAN
+        # lapse with its TTL, and its spend stop counting. A refusal (a gateway already settled it) is an answer, not retried.
+        for wait in (0.0, 0.25, 1.0):
+            if wait:
+                time.sleep(wait)
+            try:
+                client.capture(verdict.authorization_id, amount)
+                return
+            except GateUnreachable:
+                continue
+            except Exception:  # noqa: BLE001 — best effort
+                return
 
     if inspect.isasyncgenfunction(fn):
         # One authorization covers one action; a generator would yield many results over time, after the
@@ -1670,7 +1784,7 @@ def guard_tool(
         # handle to: release it, best effort (the hold's TTL is the backstop), off the event loop.
         if task.cancelled() or task.exception() is not None:
             return
-        held = task.result()
+        held, _payload = task.result()
 
         def _void() -> None:
             try:
@@ -1686,11 +1800,10 @@ def guard_tool(
         # naive wrapper gets wrong: it must STAY a coroutine function — frameworks decide how to
         # call a tool by asking — and the gate call is blocking I/O, which must not stall the
         # event loop, so it runs in a worker thread.
-        @functools.wraps(fn)
-        async def governed_async(*args: "Any", **kwargs: "Any") -> "Any":
-            gate_call = asyncio.ensure_future(asyncio.to_thread(_gate, *args, **kwargs))
+        async def _run_async(gate: "Any", args: "tuple", kwargs: "dict") -> "Any":
+            gate_call = asyncio.ensure_future(asyncio.to_thread(gate, *args, **kwargs))
             try:
-                verdict = await asyncio.shield(gate_call)
+                verdict, payload = await asyncio.shield(gate_call)
             except asyncio.CancelledError:
                 gate_call.add_done_callback(_release_if_cancelled)
                 raise
@@ -1701,16 +1814,29 @@ def guard_tool(
                 return (await result) if inspect.isawaitable(result) else result
             token = _GOVERNANCE.set(verdict.signed)
             try:
-                return await fn(*args, **kwargs)
+                out = await fn(*args, **kwargs)
+            except Exception as exc:  # a cancellation is not evidence of anything: it propagates at once, hold kept
+                await asyncio.to_thread(_after_failure, verdict, exc)
+                raise
             finally:
                 _GOVERNANCE.reset(token)
+            # The tool RAN. A cancellation from here on cannot stop the capture: it runs in its own thread to completion.
+            await asyncio.to_thread(_after_success, verdict, payload)
+            return out
 
+        @functools.wraps(fn)
+        async def governed_async(*args: "Any", **kwargs: "Any") -> "Any":
+            return await _run_async(_gate, args, kwargs)
+
+        async def resume_async(escalation_id: str, *args: "Any", **kwargs: "Any") -> "Any":
+            return await _run_async(lambda *a, **k: _approved(escalation_id, *a, **k), args, kwargs)
+
+        governed_async.resume = resume_async  # type: ignore[attr-defined]
         return governed_async
 
-    @functools.wraps(fn)
-    def governed(*args: "Any", **kwargs: "Any") -> "Any":
+    def _run(gate: "Any", args: "tuple", kwargs: "dict") -> "Any":
         try:
-            verdict = _gate(*args, **kwargs)
+            verdict, payload = gate(*args, **kwargs)
         except GovernanceBlocked as refused:
             if on_refusal == "raise":
                 raise
@@ -1724,8 +1850,9 @@ def guard_tool(
         token = _GOVERNANCE.set(verdict.signed)
         try:
             result = fn(*args, **kwargs)
-        except BaseException:
+        except BaseException as exc:
             _GOVERNANCE.reset(token)
+            _after_failure(verdict, exc)
             raise
         if inspect.isawaitable(result):
             # A sync function that RETURNS a coroutine (a lambda over an async tool, an `functools.partial`
@@ -1737,18 +1864,41 @@ def guard_tool(
             async def _await_with_governance() -> "Any":
                 inner = _GOVERNANCE.set(verdict.signed)
                 try:
-                    return await result
+                    out = await result
+                except Exception as exc:  # a cancellation propagates at once, hold kept
+                    await asyncio.to_thread(_after_failure, verdict, exc)
+                    raise
                 finally:
                     _GOVERNANCE.reset(inner)
+                await asyncio.to_thread(_after_success, verdict, payload)
+                return out
 
             return _await_with_governance()
         _GOVERNANCE.reset(token)
+        _after_success(verdict, payload)
         return result
 
+    @functools.wraps(fn)
+    def governed(*args: "Any", **kwargs: "Any") -> "Any":
+        return _run(_gate, args, kwargs)
+
+    def resume(escalation_id: str, *args: "Any", **kwargs: "Any") -> "Any":
+        return _run(lambda *a, **k: _approved(escalation_id, *a, **k), args, kwargs)
+
+    governed.resume = resume  # type: ignore[attr-defined]
     return governed
 
 
-def guard_agent_tool(client: "MetaMyndClient", action: str, fn: "Any", map_args: "Any" = None) -> "Any":
+def guard_agent_tool(
+    client: "MetaMyndClient",
+    action: str,
+    fn: "Any",
+    map_args: "Any" = None,
+    *,
+    settle: str = "capture",
+    release_on_error: "Any" = False,
+    resume_timeout: float = 600.0,
+) -> "Any":
     """Wrap a tool you hand to an AGENT FRAMEWORK so it runs ONLY on a permit (0.9.0).
 
     Exactly `guard_tool(client, action, fn, map_args, on_refusal="return")`: a refusal comes back as a
@@ -1770,7 +1920,7 @@ def guard_agent_tool(client: "MetaMyndClient", action: str, fn: "Any", map_args:
     Signature, type hints and sync/async-ness are preserved, so a framework builds the same tool schema it would
     for `fn` unguarded.
     """
-    return guard_tool(client, action, fn, map_args, on_refusal="return")
+    return guard_tool(client, action, fn, map_args, on_refusal="return", settle=settle, release_on_error=release_on_error, resume_timeout=resume_timeout)
 
 
 # The signed request of the guarded tool call currently running, if any. A ContextVar, so it is
