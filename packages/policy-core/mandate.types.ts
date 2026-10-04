@@ -64,6 +64,12 @@ export interface Permission {
    */
   riskTier?: 'low' | 'medium' | 'high' | 'critical';
   /**
+   * How risk the agent cannot lower is DERIVED for this action (spec §6.4.3, `riskSignalsFor`): `false` turns it off;
+   * otherwise `amountShare` (a fraction in (0, 1], default 0.7, or `false`) and `newMerchant` (default true). Like
+   * `riskTier`, it changes what the RULES see, never what `evaluateMandate` decides.
+   */
+  riskSignals?: false | { amountShare?: number | false; newMerchant?: boolean };
+  /**
    * The mandate OWNER requires the agent to bind the payload it executes (spec §8.3.9): the gate refuses an authorization
    * that carries no signed payload digest (`PAYLOAD_BINDING_REQUIRED`), and refuses to let a hold with no digest — one a
    * reviewer's MODIFY produced, say — be claimed until the agent has bound one (§8.3.11). Without it, binding is the agent's

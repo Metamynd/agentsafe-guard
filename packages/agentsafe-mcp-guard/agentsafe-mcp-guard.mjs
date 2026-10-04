@@ -12,7 +12,7 @@
 // Dependencies are the two generated, zero-external-dependency bundles:
 //   policy-core.mjs (deterministic evaluator) and magp-did.mjs (key-in-DID verify).
 import crypto from 'node:crypto';
-import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, effectiveRiskFloor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 
 /**
@@ -773,7 +773,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         unsigned: itinerary,
         signed: { action, agentDid, amount, currency, merchant, resource, ...(jurisdiction ? { jurisdiction } : {}) },
         gatewayDerived: trustedContext,
-        riskFloor: riskFloorFor(mandate, action),
+        riskFloor: effectiveRiskFloor(mandate, action, amount),
       }),
       mandateRequest: mandate
         ? {
@@ -904,7 +904,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // The risk it judges is the EFFECTIVE one — the owner's tier (in the signed bundle) and this Service's own
       // derivation are floors under the agent's claim, so "low" cannot dodge the SUPERVISED high-risk escalation.
       const mandateForRisk = (bundle?.mandates ?? []).find((m) => m.action === action)?.document;
-      const effectiveRisk = maxRisk(riskFloorFor(mandateForRisk, action), normalizeRiskLevel(trustedContext?.riskLevel), normalizeRiskLevel(signed?.itinerary?.riskLevel)) ?? undefined;
+      const effectiveRisk = maxRisk(effectiveRiskFloor(mandateForRisk, action, amount), normalizeRiskLevel(trustedContext?.riskLevel), normalizeRiskLevel(signed?.itinerary?.riskLevel)) ?? undefined;
       const modeGate = operatingModeGate(bundle?.__operatingMode?.mode, { amount, riskLevel: effectiveRisk });
       if (modeGate.decision === 'block') return { decision: 'block', reasonCode: modeGate.reasonCode };
       // 3b. Signed-bundle verification (MAGP §6.2). With a pinned policy key, an unsigned, tampered or

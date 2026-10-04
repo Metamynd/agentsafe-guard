@@ -70,7 +70,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // Required: the scaffold's npm run resume uses .resume().
 // 0.22.0: a concurrent resume of one escalation in a process is refused AUTHORIZATION_IN_USE, and a hold minted for an
 // authorize whose answer never arrived is found by nonce and released. Required: npm run resume relies on the lock.
-const GUARD_VERSION = '^0.22.0';
+// 0.23.0: the guard derives the same risk floor as the gate (owner tier + a payment at or above the owner's share of the
+// per-transaction cap is HIGH), so a local check and the gate agree on a large payment's review. No template change.
+const GUARD_VERSION = '^0.23.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -150,7 +152,8 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.24.0: reportOutcome() signs a reportId and an occurrence count (aggregated refusals, a durable spool).
 // 0.25.0: honourApprovals — a Service without requireAuthorization (the value-less gateway) still runs an owner-approved
 // escalation, exactly once (MAGP §8.7.18). Required: the non-financial gateway sets it and asserts guard.honoursApprovals.
-const MCP_GUARD_VERSION = '^0.25.0';
+// 0.26.0: a gateway judges the same derived risk floor as the gate (owner tier + amount share of the cap).
+const MCP_GUARD_VERSION = '^0.26.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -182,7 +185,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.22.0: depends on agentsafe-mcp-guard ^0.23.0.
 // 0.23.0: refusals aggregated with their count, and `reportSpool` (both hosted templates set it); depends on agentsafe-mcp-guard ^0.24.0.
 // 0.24.0: depends on agentsafe-mcp-guard ^0.25.0 (one guard in the tree with MCP_GUARD_VERSION above). No template change.
-const GATEWAY_VERSION = '^0.24.0';
+// 0.25.0: depends on agentsafe-mcp-guard ^0.26.0 (one guard in the tree). No template change.
+const GATEWAY_VERSION = '^0.25.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `
@@ -269,6 +273,11 @@ ${c.b('Options')}
   --max-amount <n>     Total mandate budget (default 10000)
   --currency <cur>     Currency (default USD)
   --merchants <a,b>    Allowed merchants, comma-separated (optional)
+  --risk-tier <level>  The owner's risk floor for the action: low | medium | high | critical. The agent's own
+                       riskLevel can raise it, never lower it (high = every call is reviewed by a person).
+  --amount-review <f>  A single payment at or above this share of the per-transaction cap is high risk (reviewed),
+                       whatever the agent claims. A fraction in (0, 1] (default 0.7), or "off". Without --merchants,
+                       the first payment to each merchant is reviewed too.
   --byok               Bring-your-own-key: generate the keypair locally, provision + prove control
                        (MetaMynd never sees the private key). Overridden by --public-key.
   --public-key <hex>   BYOK with a key you already hold (SPKI/raw hex); you prove control yourself
@@ -4256,6 +4265,13 @@ async function main() {
     Array.isArray(fileConfig?.merchants) ? fileConfig.merchants.join(',') : '',
   );
   const merchants = String(merchantsRaw).split(',').map((s) => s.trim()).filter(Boolean);
+  // Risk the agent cannot lower (MAGP 6.4.3): the owner's floor, and the amount share of the cap that is reviewed.
+  const riskTier = typeof args['risk-tier'] === 'string' ? args['risk-tier'].trim().toLowerCase() : undefined;
+  if (riskTier !== undefined && !['low', 'medium', 'high', 'critical'].includes(riskTier)) fail('--risk-tier must be low, medium, high or critical');
+  const amountReviewRaw = typeof args['amount-review'] === 'string' ? args['amount-review'].trim().toLowerCase() : undefined;
+  const amountShare = amountReviewRaw === undefined ? undefined : amountReviewRaw === 'off' ? false : Number(amountReviewRaw);
+  if (typeof amountShare === 'number' && !(amountShare > 0 && amountShare <= 1)) fail('--amount-review must be a fraction in (0, 1], or "off"');
+  const riskFields = { ...(riskTier ? { riskTier } : {}), ...(amountShare !== undefined && financial ? { riskSignals: { amountShare } } : {}) };
 
   // BYOK: --byok generates a keypair on THIS machine (MetaMynd never sees the private key) —
   // either locally in this process (default) or, opt-in, via an already-running agentsafe-signer
@@ -4326,6 +4342,7 @@ async function main() {
     network: 'testnet',
     ...(financial ? { currency, maxAmount, perTxnMax } : {}),
     merchants,
+    ...riskFields,
     ...(publicKey ? { publicKey } : {}),
     ...sopFields,
   };
@@ -4334,6 +4351,11 @@ async function main() {
   if (!config?.agentDid) fail('Provisioning did not return a config with an agentDid.');
   console.log(`  ${c.green('✓')} agent DID ${c.b(config.agentDid)}`);
   if (config.standards?.length) console.log(`  ${c.green('✓')} enforced Standards: ${config.standards.join(', ')}`);
+  if (financial && merchants.length === 0) {
+    console.log(c.dim('     no --merchants list: the FIRST payment to each merchant is held for your review (a risk the agent cannot'));
+    console.log(c.dim('     lower). Pass --merchants a,b to pre-approve them, or register them as payees in the dashboard.'));
+  }
+  if (riskTier) console.log(`  ${c.green('✓')} risk floor: ${riskTier} (the agent's own claim can raise it, never lower it)`);
 
   // 3b. BYOK: prove control of the key (verify-key), else the gate blocks with AGENT_KEY_UNVERIFIED.
   if (daemonPublicKeyHex) {
