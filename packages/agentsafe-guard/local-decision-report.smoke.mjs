@@ -106,6 +106,23 @@ async function main() {
   const cut = localReceiptDetailOf({ amount: 1, merchant: long }).merchant;
   check(cut.length <= 120 && !/[\uD800-\uDBFF]$/.test(cut), 'a merchant is cut at 120 UTF-16 units without splitting a surrogate pair');
 
+  // N-4 (pre-beta rerun 5): a CONTAINED agent's attempt, refused locally from the bundle's `contained` flag, is reported
+  // too (0.31.1) — the containment is the server's state, but that the agent kept trying was recorded nowhere.
+  {
+    const contained = [];
+    globalThis.fetch = async (url, opts) => {
+      if (String(url).includes('/policy/bundle/')) return { ok: true, json: async () => ({ data: bundle, contained: { status: 'suspended', reason: 'OWNER' } }) };
+      if (String(url).endsWith('/policy/decisions/local')) { contained.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({ data: {} }) }; }
+      return { ok: false, json: async () => null };
+    };
+    const containedGuard = createGuard({ api: 'http://unused.local/api/v1', agentDid, agentKey });
+    const v = await containedGuard.authorizeLocal({ action: 'flight-purchase', amount: 0, currency: 'USD', context: { riskLevel: 'low' } });
+    await new Promise((r) => setTimeout(r, 50));
+    check(v.decision === 'suspend' && v.reasonCode === 'AGENT_SUSPENDED', `a contained agent is refused locally (got ${v.decision}/${v.reasonCode})`);
+    check(contained.length === 1 && contained[0].decision === 'suspend' && contained[0].reasonCode === 'AGENT_SUSPENDED', 'the refused attempt is reported as suspend/AGENT_SUSPENDED');
+    check(contained[0] && verifyDidSignature(agentDid, buildLocalReceiptMessage(contained[0]), contained[0].signature), 'and signed like any other receipt');
+  }
+
   globalThis.fetch = originalFetch;
   void neverResolvingReportHang; // keep it referenced; nothing awaits it, which is the point
 
