@@ -230,7 +230,7 @@ claim, by default, so an agent that says `low` cannot talk its way past review:
 | Signal | When it applies | Owner setting |
 |---|---|---|
 | `amount-share` | a payment at or above **70%** of the action's per-transaction cap (`mm:payAmount`) | `--amount-review <share\|off>`; mandate `riskSignals: { amountShare }` |
-| `new-merchant` | the **first payment** to a merchant that is not on the mandate's merchant list, not a registered payee and never paid before (only where the mandate lists no merchants) | mandate `riskSignals: { newMerchant: false }` |
+| `new-merchant` | the **first payment** to a merchant that is not on the mandate's merchant list, not a registered payee and never paid before (only where the mandate lists no merchants) | mandate `riskSignals: { newMerchant: false }`. A payment that names **no** merchant is outside this review unless the owner sets `newMerchant: 'strict'` |
 | `owner-tier` | the owner's `riskTier` for the action | `--risk-tier <level>` |
 
 Each is `high` (the tier is whatever the owner set). Only the owner can change them, per grant; an agent
