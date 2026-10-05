@@ -528,6 +528,26 @@ const gatedBookFlight = guard.guardTool(
   outcome polls `guard.effectStatus(authorizationId)`. The export stays so existing imports keep working; remove the
   call from your code.
 
+### Calling a gateway from a guarded tool (`decision.governanceHeaders()`, since 0.31.0)
+
+When the tool's real work runs behind a MAGP gateway (the scaffold's `gateway/`), the tool hands the gateway the permitted
+request. The decision a guarded tool receives does that for you: `governanceHeaders()` signs the same request again (a fresh
+nonce, its payload bound), adds the authorization the call was granted, and returns the header the gateway reads.
+
+```js
+const book = guard.guardTool('flight-purchase', async (args, decision) => {
+  const res = await fetch(`${GATEWAY}/book-flight`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(await decision.governanceHeaders()) },
+    body: JSON.stringify(payloadOf(args)), // exactly the payload mapArgs bound
+  });
+  return res.json();
+}, (args) => ({ amount: args.amount, currency: 'USD', merchant: args.merchant, context: { riskLevel: args.riskLevel }, payload: payloadOf(args) }));
+```
+
+It is the Node counterpart of the Python client's `governance_headers()`. Send the body your `mapArgs` returned as `payload`:
+a gateway that requires payload binding refuses any other.
+
 ### Jurisdiction (signed, since 0.16.0)
 
 Pass `jurisdiction` (ISO 3166-1 alpha-2, e.g. `'SG'`) to `authorize()`, `buildSignedRequest()`, `guardTool`'s

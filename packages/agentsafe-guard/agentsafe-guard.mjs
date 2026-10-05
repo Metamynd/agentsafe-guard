@@ -249,6 +249,12 @@ export async function createGuardFromConfig(source, overrides = {}) {
  */
 export const HANDSHAKE_NONCE = /^[A-Za-z0-9_-]{16,128}$/;
 
+/** The fields of a tool's mapped request that buildSignedRequest() signs (everything but the action, which the tool names). */
+function requestFieldsOf(mapped = {}) {
+  const { amount, currency, merchant, resource, jurisdiction, context, trace, materiality, payload } = mapped;
+  return { amount, currency, merchant, resource, jurisdiction, context, trace, materiality, payload };
+}
+
 export function createGuard(opts = {}) {
   // Accept a portable agent config (from /onboarding/agent) via `config` or `configPath`, in
   // addition to explicit { api, agentDid, agentKey }. Explicit fields win over the config.
@@ -1131,7 +1137,18 @@ export function createGuard(opts = {}) {
         try { await capture(authorizationId, amount); return; } catch { /* unreachable — try again */ }
       }
     }
-    async function run(args, decision, mapped) {
+    async function run(args, permit, mapped) {
+      // The headers a tool hands a MAGP-protected service (a gateway) to have THIS permitted call executed there
+      // (0.31.0; pre-beta rerun 5, FW N-3): the same request, freshly signed with its payload bound, carrying the
+      // authorization it was granted. Python's guarded tools have governance_headers(); a Node tool used to rebuild and
+      // re-sign the request by hand. Non-enumerable, so a decision compared or logged as data is unchanged.
+      const decision = Object.defineProperty({ ...permit }, 'governanceHeaders', {
+        enumerable: false,
+        value: async () => {
+          const signed = await buildSignedRequest({ action, ...requestFieldsOf(mapped) });
+          return { 'x-magp-request': JSON.stringify(permit.authorizationId ? { ...signed, authorizationId: permit.authorizationId } : signed) };
+        },
+      });
       let result;
       try {
         // ExecutionAdapter seam (§19): the adapter runs the real handler (proceed) or substitutes it.
