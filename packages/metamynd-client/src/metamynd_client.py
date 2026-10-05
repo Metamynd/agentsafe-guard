@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.17.0"
+__version__ = "0.17.1"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -754,7 +754,8 @@ class SettlementResult:
     ok: bool
     message: str = ""
     raw: Mapping[str, Any] = field(default_factory=dict)
-    # Added in 0.5.3 (after `raw`, so positional construction is unchanged). Empty on success.
+    # Added in 0.5.3 (after `raw`, so positional construction is unchanged). On success, the gate's code when it gives one
+    # (`HOLD_VOIDED` for a void, since 0.17.1), else empty (a capture). Branch on `ok`, not on this being empty.
     reason_code: str = ""
     detail: str = ""
 
@@ -1504,7 +1505,9 @@ class MetaMyndClient:
         message = str(payload.get("message") or data.get("reasonCode") or "")
         # The code, never the sentence: `data.reasonCode` first (the one field every refusal carries, and the only place
         # the code is on a 200 NOT_HELD void), then the bare-code `message` of the standard refusal body (MAGP §8.7.8).
-        reason_code = "" if ok else str(data.get("reasonCode") or payload.get("message") or "REFUSED")
+        # On success, the code the gate gave (a void's `HOLD_VOIDED`, as the Node guard reports it; pre-beta rerun 4, F-10), or
+        # "" when it gave none (a capture).
+        reason_code = str(data.get("reasonCode") or "") if ok else str(data.get("reasonCode") or payload.get("message") or "REFUSED")
         return SettlementResult(ok=ok, message=message, raw=data, reason_code=reason_code, detail=str(data.get("detail") or ""))
 
     def _get_data(self, path: str) -> Mapping[str, Any]:
@@ -2366,7 +2369,7 @@ def _selftest_gate() -> None:
                     return refusal(403, "voided", "COUNTERPARTY_MISMATCH", "only the claimer of this hold may release it")
                 if "settled-1" in self.path:  # repeating a void that already happened is a 200, not an error
                     return self._send(200, {"success": False, "message": "Not voided (NOT_HELD)", "data": {"voided": False, "authorizationId": "settled-1", "status": "captured", "reasonCode": "NOT_HELD"}})
-                return self._send(200, {"success": True, "message": "Hold voided", "data": {"voided": True}})
+                return self._send(200, {"success": True, "message": "Hold voided", "data": {"voided": True, "authorizationId": self.path.split("/")[-2], "reasonCode": "HOLD_VOIDED"}})
             return self._send(404, {"success": False, "message": "no such route", "data": None})
 
         def do_GET(self) -> None:
@@ -2458,7 +2461,8 @@ def _selftest_gate() -> None:
         again_captured = client.capture("settled-1", 100)
         assert not again_captured.ok and again_captured.reason_code == "NOT_HELD", "a repeat capture is 409 NOT_HELD — read outcome()"
         assert client.capture("missing", 100).reason_code == "AUTHORIZATION_NOT_FOUND"
-        assert client.void("auth-9").ok
+        voided = client.void("auth-9")
+        assert voided.ok and voided.reason_code == "HOLD_VOIDED", "a void says HOLD_VOIDED, as the Node guard does (F-10)"
         claimed = client.void("claimed-1")
         assert not claimed.ok and claimed.reason_code == "COUNTERPARTY_MISMATCH", claimed
         assert seen[-1][1] == {} or "reason" not in seen[-1][1]
