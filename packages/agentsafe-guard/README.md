@@ -690,9 +690,11 @@ It throws a `GovernanceBlocked` when the escalation was not approved (rejected, 
 timeout, or the gate was unreachable), with the status in `err.governance`. It runs the tool only while the approved
 authorization is still unused: a second resume of the same escalation is refused `AUTHORIZATION_ALREADY_USED` without
 touching the tool, and one started while another resume of it is still running in this process is refused
-`AUTHORIZATION_IN_USE` (0.22.0). Separate *processes* resuming the same escalation at once need a lock of their own — the
-scaffold's `npm run resume` takes its saved call with an atomic rename — or a gateway, which claims the authorization
-atomically.
+`AUTHORIZATION_IN_USE` (0.22.0). Since 0.28.0 that holds across *processes* too: before running, `.resume()` takes the
+approval's one resume at the issuer (`POST /policy/escalations/:id/resume-claim`, signed `MAGP-RESUME-CLAIM-v1`), a single
+atomic update — a second process gets `AUTHORIZATION_IN_USE` and never runs the tool. It is at most once: a resume that
+crashed after taking it does not hand the approval to another run (the owner approves again). A key provider that cannot
+sign the claim (the signer daemon), or an issuer that predates it, resumes as before.
 
 **Only what was approved** (0.24.0). The approval is for one request: this amount, this merchant, this payload. The
 escalation status carries a `requestDigest` of it, and `.resume()` recomputes that digest from the args it is given. Args

@@ -30,12 +30,18 @@ function buildResumeBindingMessage(f) {
     f.payloadDigest ?? ""
   ].map((v) => escapeField(String(v))).join("|");
 }
+var RESUME_CLAIM_PREFIX = "MAGP-RESUME-CLAIM-v1";
+function buildResumeClaimMessage(f) {
+  return [RESUME_CLAIM_PREFIX, f.escalationId, f.authorizationId, f.agentDid, f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+}
 function resumeRequestDigest(f) {
   return "sha256:" + createHash("sha256").update(buildResumeBindingMessage(f), "utf8").digest("hex");
 }
 export {
   RESUME_BINDING_PREFIX,
+  RESUME_CLAIM_PREFIX,
   buildResumeBindingMessage,
+  buildResumeClaimMessage,
   canonicalAmount,
   resumeRequestDigest
 };
