@@ -1,8 +1,8 @@
 """An agent settling its OWN hold that nobody has claimed (MAGP section 8.7.4; 2026-10-03 pre-beta rerun, N-8).
 
 The gate used to accept an unsigned capture or void of an unclaimed hold from anyone holding the authorization id — which the
-agent hands to every gateway it asks to execute. It now takes one only from the hold's agent (a MAGP-SETTLE-v1 signature), a
-counterparty the owner registered, or, for an open testnet owner, anyone. This checks what the client puts on the wire: a
+agent hands to every gateway it asks to execute. It now takes one only from the hold's agent (a MAGP-SETTLE-v1 signature) or a
+counterparty the owner registered, on every owner. This checks what the client puts on the wire: a
 signature over exactly that call, which verifies for it and for no other.
 """
 

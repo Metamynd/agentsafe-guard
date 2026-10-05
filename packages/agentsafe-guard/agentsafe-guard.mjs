@@ -586,7 +586,7 @@ export function createGuard(opts = {}) {
    */
   async function capture(authorizationId, amountCharged, bookingRef, settlementTxHash) {
     // Signed as this agent (MAGP-SETTLE-v1) when the key provider can: a hold nobody has claimed is settled only by its own
-    // agent, a counterparty the owner registered, or — for an open testnet owner — anyone (MAGP §8.7.4).
+    // agent or a counterparty the owner registered, on every owner (MAGP §8.7.4; an authorizationId alone settles nothing).
     const agentProof = await settleProof('capture', authorizationId, [String(amountCharged), bookingRef ?? '', settlementTxHash ?? '']).catch(() => undefined);
     const res = await fetch(`${base}/policy/mandate/authorize/${authorizationId}/capture`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

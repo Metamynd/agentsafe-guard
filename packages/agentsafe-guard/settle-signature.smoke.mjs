@@ -1,7 +1,7 @@
 // settle-signature.smoke.mjs — an agent settling its OWN hold that nobody has claimed (MAGP §8.7.4; 2026-10-03 pre-beta
 // rerun, N-8). The issuer used to accept an unsigned capture or void of an unclaimed hold from anyone holding the
 // authorization id, which the agent hands to every gateway it asks to execute. It now takes one only from the hold's agent
-// (MAGP-SETTLE-v1), a counterparty the owner registered, or — for an open testnet owner — anyone. guard.capture() signs as
+// (MAGP-SETTLE-v1) or a counterparty the owner registered, on every owner. guard.capture() signs as
 // the agent; a key provider that cannot (a caller's own, or a signer daemon older than 0.20.0) settles unsigned, as before.
 //
 //   node settle-signature.smoke.mjs   → PASS when every case matches.
