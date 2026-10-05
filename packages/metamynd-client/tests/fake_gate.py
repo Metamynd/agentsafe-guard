@@ -86,6 +86,7 @@ class FakeGate:
         self.signature_failures = 0  # requests whose eight-field signature did not verify
         self.payload_failures = 0  # requests whose payload-binding signature did not verify
         self.resume_binding = True  # a gate that predates MAGP 9a.5 returns no requestDigest; False plays that gate
+        self.context_binding = True  # a gate that predates the approved-context binding returns no contextDigest; False plays it
         self.resume_claims = True  # a gate that predates MAGP 9a.6 has no /resume-claim route (404); False plays that gate
         self._lock = threading.Lock()
         self.echo_payload_digest = True  # a gate that predates binding (or a proxy that strips it) does not acknowledge the digest
@@ -239,6 +240,8 @@ class FakeGate:
                 data["payloadBound"] = e.get("payloadDigest") is not None
                 if self.resume_binding:
                     data["requestDigest"] = self._request_digest(e)
+                if self.context_binding:
+                    data["contextDigest"] = self._context_digest(e.get("itinerary"))
             if e["status"] == "modified":
                 data["reasonCode"] = "MODIFIED"
                 data["nextEscalationId"] = "esc-next"
@@ -300,6 +303,12 @@ class FakeGate:
         return 200, {"success": True, "data": {"decision": "allow", "reasonCode": "AUTHORIZED", "authorizationId": auth_id, "eventId": self.last_event_id, **self._ack(digest)}}
 
     @staticmethod
+    def _context_digest(itinerary: Any) -> str:
+        """The approved-context digest (MAGP 9a.5) rebuilt BY HAND: sorted-key compact JSON of the domain-wrapped itinerary."""
+        text = json.dumps({"MAGP-APPROVED-CONTEXT-v1": {} if itinerary is None else itinerary}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _request_digest(e: Mapping[str, Any]) -> str:
         """The resume binding (MAGP 9a.5) rebuilt BY HAND, never with the client's own builder."""
         esc = lambda v: v.replace("\\", "\\\\").replace("|", "\\|")  # noqa: E731
@@ -319,7 +328,7 @@ class FakeGate:
     def _hold(self, code: str, digest: Optional[str] = None, amount: float = 0.0, currency: str = "USD", request: Optional[Mapping[str, Any]] = None) -> "tuple[int, Any]":
         esc_id = str(uuid.uuid4())
         self.escalations[esc_id] = {"status": "pending", "authorizationId": str(uuid.uuid4()), "amount": amount, "currency": currency, "payloadDigest": digest,
-                                   "action": (request or {}).get("action", ""), "merchant": (request or {}).get("merchant", ""), "resource": (request or {}).get("resource") or ""}
+                                   "action": (request or {}).get("action", ""), "merchant": (request or {}).get("merchant", ""), "resource": (request or {}).get("resource") or "", "itinerary": (request or {}).get("itinerary")}
         return 403, {"success": False, "data": {"decision": "escalate", "reasonCode": code, "escalationId": esc_id, **self._ack(digest)}}
 
     @staticmethod

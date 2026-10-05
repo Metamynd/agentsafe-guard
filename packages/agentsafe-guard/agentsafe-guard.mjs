@@ -14,7 +14,7 @@ import { resolve as resolvePath } from 'node:path';
 import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, effectiveRiskFloor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
-import { resumeRequestDigest } from './resume-binding.mjs';
+import { approvedContextDigest, resumeRequestDigest } from './resume-binding.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { checkSettlementBinding } from './x402.mjs';
 import { resolveKeyProvider, decryptAgentKeyWithPassword } from './key-providers.mjs';
@@ -381,6 +381,7 @@ export function createGuard(opts = {}) {
   const orphanDelaysMs = Array.isArray(opts.orphanReleaseDelaysMs) ? opts.orphanReleaseDelaysMs : [2_000, 10_000, 30_000];
   let warnedNoRequestDigest = false; // once per guard: the gate predates the resume binding (§9a.5)
   let warnedNoResumeClaim = false; // once per guard: the gate predates the resume claim (§9a.6)
+  let warnedNoContextDigest = false; // once per guard: the gate predates the approved-context binding (§9a.5, rerun 5 F-1-NF)
   // Escalations being resumed in THIS process right now, by any gated tool of this guard: a second, concurrent resume of
   // the same one is refused instead of racing the first past the "still unused?" check (since 0.22.0).
   const resumesInFlight = new Set();
@@ -1164,6 +1165,14 @@ export function createGuard(opts = {}) {
         payloadDigest,
       });
     };
+    // The approved-context digest of the context these args map to, as the gate receives it (JSON on the wire; none is {}).
+    const resumeContextDigestFor = (mapped) => {
+      try {
+        return approvedContextDigest(toWireJson(mapped.context ?? {}));
+      } catch {
+        return 'unbindable';
+      }
+    };
     // 'claimed' | 'unsupported' (no signer for it, or an issuer that predates it: run as before) | a refusal code.
     const claimResume = async (escalationId, authorizationId) => {
       if (typeof keyProvider.signResumeClaim !== 'function') return 'unsupported';
@@ -1223,6 +1232,16 @@ export function createGuard(opts = {}) {
         console.warn('[agentsafe] this gate returns no requestDigest (it predates MAGP §9a.5): resume() cannot check its args against the approved request, so pass the SAME args; a gateway still re-verifies them');
       }
       if (st.requestDigest && resumeDigestFor(st, mapped) !== st.requestDigest) {
+        throw refusal({ decision: 'block', reasonCode: 'ESCALATION_REQUEST_MISMATCH', escalationId, authorizationId: st.authorizationId, status: 'approved' });
+      }
+      // And only the CONTEXT that was approved (0.29.0, §9a.5): the digest above binds what the approval spends — for an action
+      // that spends nothing, little more than its name — so an approval of { target: 'record-A', op: 'read' } could run as
+      // { target: 'record-B', op: 'delete-all' }. The status carries a digest of the itinerary the reviewer was shown.
+      if (st.requestDigest && !st.contextDigest && !warnedNoContextDigest) {
+        warnedNoContextDigest = true;
+        console.warn('[agentsafe] this gate returns no contextDigest (it predates the approved-context binding, MAGP §9a.5): resume() cannot check the context against the approval, so pass the SAME args');
+      }
+      if (st.contextDigest && resumeContextDigestFor(mapped) !== st.contextDigest) {
         throw refusal({ decision: 'block', reasonCode: 'ESCALATION_REQUEST_MISMATCH', escalationId, authorizationId: st.authorizationId, status: 'approved' });
       }
       // The ONE resume (0.28.0, §9a.6): taken at the issuer, atomically, so a second PROCESS resuming the same escalation

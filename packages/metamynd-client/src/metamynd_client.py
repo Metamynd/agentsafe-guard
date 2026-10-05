@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.17.2"
+__version__ = "0.18.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -519,6 +519,21 @@ def resume_request_digest(authorization_id: str, action: str, amount: Any = None
               merchant or "", resource or "", payload_digest_value or ""]
     message = "|".join(_escape_field(str(f)) for f in fields)
     return "sha256:" + hashlib.sha256(message.encode("utf-8")).hexdigest()
+
+
+APPROVED_CONTEXT_DOMAIN = "MAGP-APPROVED-CONTEXT-v1"
+
+
+def approved_context_digest(context: Any) -> str:
+    """The digest of the context (itinerary) an approval was given for (MAGP 9a.5), byte-for-byte the gate's
+    `approvedContextDigest`: RFC 8785 canonical JSON of {"MAGP-APPROVED-CONTEXT-v1": context}, an absent context being {}.
+
+    The request digest binds what an approval SPENDS — for an action that spends nothing, little more than its name — so an
+    approval of {"target": "record-A", "op": "read"} could otherwise run as {"target": "record-B", "op": "delete-all"}. The
+    escalation status returns this as `contextDigest`, and `resume()` refuses a call whose context differs. Pinned by
+    docs/protocol/resume-binding-vectors.json (`contextVectors`).
+    """
+    return payload_digest({APPROVED_CONTEXT_DOMAIN: {} if context is None else context})
 
 
 ENVELOPE_VERSION = "1.0"
@@ -1883,6 +1898,21 @@ def guard_tool(
         if expected and _resume_digest_for(state, payload) != expected:
             raise _guard_refusal(Verdict(decision="block", reason_code="ESCALATION_REQUEST_MISMATCH", authorization_id=state.authorization_id,
                                          escalation_id=escalation_id, hint="these arguments are not the request the owner approved"))
+        # And only the CONTEXT that was approved (0.18.0, MAGP 9a.5): the digest above binds what the approval spends, which for
+        # an action that spends nothing is little more than its name. The status carries a digest of the approved itinerary.
+        expected_context = state.raw.get("contextDigest")
+        if expected and not expected_context and not getattr(client, "_warned_no_context_digest", False):
+            client._warned_no_context_digest = True
+            warnings.warn("this gate returns no contextDigest (it predates the approved-context binding, MAGP 9a.5): resume() cannot "
+                          "check the context against the approval, so pass the SAME args", stacklevel=3)
+        if expected_context:
+            try:
+                actual_context = approved_context_digest(payload.get("context", {}))
+            except PayloadNotCanonicalizable:
+                actual_context = "unbindable"
+            if actual_context != expected_context:
+                raise _guard_refusal(Verdict(decision="block", reason_code="ESCALATION_REQUEST_MISMATCH", authorization_id=state.authorization_id,
+                                             escalation_id=escalation_id, hint="this context is not the one the owner approved"))
         # The original signed request is old by now (a service refuses one older than a few minutes): sign the SAME
         # request again, carrying the approval's authorization, for governance_headers() to hand to a gateway.
         signed = client.sign_request(

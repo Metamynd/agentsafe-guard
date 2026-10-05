@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { buildHederaDid } from './magp-did.mjs';
 import { createGuard } from './agentsafe-guard.mjs';
-import { buildResumeBindingMessage, buildResumeClaimMessage, resumeRequestDigest } from './resume-binding.mjs';
+import { approvedContextDigest, buildResumeBindingMessage, buildResumeClaimMessage, resumeRequestDigest } from './resume-binding.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
@@ -93,7 +93,7 @@ await check('a different payload under the same amount and merchant is refused',
   } finally { f.restore(); }
 });
 
-await check('the agent\'s riskLevel is not part of the binding (it is not what the hold authorizes)', async () => {
+await check('the request digest alone does not bind the agent\'s riskLevel (it is not what the hold spends; the context digest binds it)', async () => {
   const r = await resumeWith(bound, { amount: 5, merchant: 'skyward-air', riskLevel: 'low' });
   assert.equal(r.err, undefined, r.err?.message);
   assert.equal(r.ran.length, 1);
@@ -108,6 +108,49 @@ await check('a hold with no payload digest (a MODIFY) binds amount and merchant 
 await check('an issuer that predates requestDigest: resume behaves as before (the gateway still re-verifies)', async () => {
   const r = await resumeWith({ payloadBound: true }, { amount: 5000, merchant: 'skyward-air' });
   assert.equal(r.err, undefined);
+  assert.equal(r.ran.length, 1);
+});
+
+// F-1-NF (0.29.0, pre-beta rerun 5): the request digest binds what an approval SPENDS. For a value-less action that is little
+// more than its name, so an approval of { target: 'record-A', op: 'read' } ran as { target: 'record-B', op: 'delete-all' }. The
+// status now carries a digest of the context the reviewer approved, and resume() refuses any other.
+const recordArgs = (a) => ({ context: { riskLevel: a.riskLevel, target: a.target, op: a.op } });
+const valueless = { payloadBound: false, requestDigest: resumeRequestDigest({ authorizationId: HOLD, action: 'perform-action', amount: null, currency: 'USD', merchant: '', resource: '', payloadDigest: '' }) };
+const approvedRead = { ...valueless, contextDigest: approvedContextDigest({ riskLevel: 'high', target: 'record-A', op: 'read' }) };
+async function resumeRecord(status, args) {
+  const f = fakeIssuer(status);
+  const ran = [];
+  try {
+    const tool = guard.guardTool('perform-action', async (a) => { ran.push(a); return { done: true }; }, recordArgs);
+    try { return { out: await tool.resume('esc-1', args, { timeoutMs: 1000 }), ran, calls: f.calls }; }
+    catch (e) { return { err: e, ran, calls: f.calls }; }
+  } finally { f.restore(); }
+}
+
+await check('the reproduced defect: an approval of "read record-A" resumed as "delete-all record-B" is refused and nothing runs', async () => {
+  const r = await resumeRecord(approvedRead, { riskLevel: 'high', target: 'record-B', op: 'delete-all' });
+  assert.equal(r.err?.governance?.reasonCode, 'ESCALATION_REQUEST_MISMATCH');
+  assert.equal(r.ran.length, 0);
+  assert.ok(!r.calls.some((u) => u.endsWith('/resume-claim')), 'the one resume is not spent on the wrong request');
+});
+
+await check('the approved context runs, once — whatever order its keys come in', async () => {
+  const r = await resumeRecord(approvedRead, { op: 'read', target: 'record-A', riskLevel: 'high' });
+  assert.equal(r.err, undefined, r.err?.message);
+  assert.equal(r.ran.length, 1);
+});
+
+await check('any change to the approved context is refused, its risk level included', async () => {
+  for (const args of [{ riskLevel: 'high', target: 'record-A', op: 'write' }, { riskLevel: 'low', target: 'record-A', op: 'read' }, { riskLevel: 'high', target: 'record-A' }]) {
+    const r = await resumeRecord(approvedRead, args);
+    assert.equal(r.err?.governance?.reasonCode, 'ESCALATION_REQUEST_MISMATCH', JSON.stringify(args));
+    assert.equal(r.ran.length, 0);
+  }
+});
+
+await check('an issuer that predates the context binding: resume checks what it can, as before', async () => {
+  const r = await resumeRecord(valueless, { riskLevel: 'high', target: 'record-B', op: 'delete-all' });
+  assert.equal(r.err, undefined, r.err?.message);
   assert.equal(r.ran.length, 1);
 });
 
@@ -168,6 +211,7 @@ await check('the bundled resume-binding reproduces docs/protocol/resume-binding-
     assert.equal(buildResumeBindingMessage(c.fields), c.message, c.name);
     assert.equal(resumeRequestDigest(c.fields), c.digest, c.name);
   }
+  for (const c of v.contextVectors) assert.equal(approvedContextDigest(c.context), c.digest, c.name);
 });
 
 if (failed) { console.log(`\n${failed} FAILED`); process.exit(1); }

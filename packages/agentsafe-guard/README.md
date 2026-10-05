@@ -699,9 +699,14 @@ sign the claim (the signer daemon), or an issuer that predates it, resumes as be
 **Only what was approved** (0.24.0). The approval is for one request: this amount, this merchant, this payload. The
 escalation status carries a `requestDigest` of it, and `.resume()` recomputes that digest from the args it is given. Args
 that do not reproduce it — a different amount, another merchant, a different payload — are refused
-`ESCALATION_REQUEST_MISMATCH` before the tool runs, and the approved hold is left for the right request. The agent's own
-`riskLevel` is not part of it (it is not what the hold authorizes). A gateway re-verifies all of this at claim time anyway;
-the check matters for a tool that runs in this process, where nothing else stands between the args and the tool.
+`ESCALATION_REQUEST_MISMATCH` before the tool runs, and the approved hold is left for the right request.
+
+**And only the context that was approved** (0.29.0). For an action that spends nothing, amount and merchant say little: an
+approval of `{ target: 'record-A', op: 'read' }` must not run as `{ target: 'record-B', op: 'delete-all' }`. The status also
+carries a `contextDigest` of the context (itinerary) the owner reviewed, and `.resume()` refuses args whose context does not
+reproduce it — its `riskLevel` included, so resume with exactly the args the escalation was raised with. A gateway checks the
+same digest when it claims the hold (agentsafe-mcp-guard 0.27.0+, MAGP §8.7.20); the in-process check matters for a tool that
+runs in this process, where nothing else stands between the args and the tool.
 
 **An authorize whose answer never arrived** (a timeout, a dropped connection, a proxy's 5xx) may still have minted a hold:
 the gate commits it whether or not anyone is waiting, and nothing could use or settle it until its TTL. Since 0.22.0 the
