@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import net from 'node:net';
 import path from 'node:path';
 import { buildAgentSettleMessage, buildAuthMessage, buildLocalDecisionMessage } from './policy-core.mjs';
+import { buildLocalReceiptMessage } from './local-receipt.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { buildPayloadBindingMessage, buildPayloadRebindMessage } from './payload-binding.mjs';
@@ -48,6 +49,11 @@ export function createStaticKeyProvider(agentKeyHex) {
     },
     async signLocalDecision(fields) {
       return rawSign(buildLocalDecisionMessage(fields));
+    },
+    // The v2 receipt (0.26.0, MAGP-LOCAL-DECISION-v2): the same verdict plus the request's detail (amount, currency,
+    // merchant, payload digest) bound into the signature. OPTIONAL: a provider without it (the signer daemon) reports v1.
+    async signLocalReceipt(fields) {
+      return rawSign(buildLocalReceiptMessage(fields));
     },
     // Payload binding (spec 8.3.9): sign the digest of the COMPLETE payload, bound to this authorization. OPTIONAL like
     // signLocalDecision; the guard refuses (fail closed) to send an unbound request when a binding was asked for and the
