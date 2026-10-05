@@ -140,8 +140,14 @@ export async function verify({ configPath = './agent.metamynd.json', require: re
     const amount = found.perTxn.configured ? Math.max(1, Math.floor(found.perTxn.limit / 2)) : 1;
     const merchant = found.merchants.list?.length ? found.merchants.list[0] : 'any-merchant';
     const v = evaluate({ action, amount, ...baselineCurrency, merchant, context: { riskLevel: 'low', ...baseContext } });
+    // With no merchant allow-list, the rules permit this, but the GATE holds the first payment to each merchant for the
+    // owner's review (new-merchant, MAGP 6.4.3) — a check that needs the payment history, so it is not run here. Said on
+    // this line, because a fresh agent's first real payment then escalates and "allow" alone read as a contradiction (F-5r).
+    const firstPaymentHeld = permits(v) && amount > 0 && !found.merchants.configured && !found.merchants.empty;
     add('baseline', permits(v) ? PASS : FAIL, 'permits ordinary in-scope work', v,
-      permits(v) ? null : 'the agent cannot perform the action it was issued for');
+      permits(v)
+        ? (firstPaymentHeld ? 'allowed by the rules; the gate still holds the FIRST payment to each new merchant for review, so expect that one to escalate' : null)
+        : 'the agent cannot perform the action it was issued for');
   }
 
   // 2. Scope. Needs no configuration and no special anti-self-escalation rule: an agent

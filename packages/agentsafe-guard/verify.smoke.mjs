@@ -89,6 +89,14 @@ console.log('\n  verify — the sandbox bug: an omitted merchant constraint\n');
   ok('reported NOT CONFIGURED, not passed', status(r, 'merchants') === 'not-configured');
   ok('says every merchant is permitted', /EVERY merchant is permitted/.test(r.output));
   ok('still exits 0 without --require', r.ok === true);
+  // F-5r (pre-beta rerun 5): the scaffold's demo then escalates its first payment (new merchant, a gate-side check), so
+  // the baseline line says so rather than a bare "allow".
+  ok('the baseline says the first payment to a new merchant is held', /FIRST payment to each new merchant/.test(r.output));
+}
+{
+  // With an allow-list the agent pays only listed merchants: the baseline line carries no such note.
+  const r = await run([CAP, TOTAL, MERCHANTS]);
+  ok('no new-merchant note where merchants are listed', !/FIRST payment to each new merchant/.test(r.output));
 }
 
 console.log('\n  verify — a PRESENT but empty allow-list is the opposite problem\n');
