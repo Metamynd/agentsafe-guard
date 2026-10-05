@@ -69,6 +69,9 @@ const UNSIGNED_JURISDICTION_KEYS = ['jurisdiction', 'mm:jurisdiction'];
  * The detail a v2 local receipt binds (0.26.0, MAGP-LOCAL-DECISION-v2): the request's amount, currency (only with an amount),
  * merchant and the digest of its payload. Bounded to the issuer's columns; a payload that cannot be canonicalised binds none.
  */
+/** Effect outcomes (GET …/effect) after which a hold is final: there is nothing left for an agent to capture. */
+const SETTLED_OUTCOMES = new Set(['settled', 'not_executed', 'expired', 'reversing', 'reversed', 'reversal_failed']);
+
 /** At most `max` UTF-16 units (the issuer's column limit), never ending in half of a surrogate pair. */
 function cutUtf16(s, max) {
   if (s.length <= max) return s;
@@ -1081,7 +1084,16 @@ export function createGuard(opts = {}) {
       releaseOnError === true || (typeof releaseOnError === 'function' && releaseOnError(err) === true);
     // A capture that cannot reach the gate is retried briefly: one that never lands lets the hold of an action that RAN
     // lapse with its TTL, and its spend stop counting against the cap. A refusal (already settled by a gateway) is final.
+    //
+    // A hold a counterparty CLAIMED is not this agent's to settle (0.27.0, pre-beta rerun 4 F-3): the gateway that ran the
+    // tool claimed it before executing and settles it itself, at what it really charged and attested as its own. Capturing
+    // here raced that settlement — an agent's full-amount capture landing first was recorded `unattested` and the gateway's
+    // own (possibly lower) charge was refused HOLD_STATE_CHANGED. The claim precedes execution and execution precedes the
+    // response this tool returned, so by now a claim is visible. Only when the gate cannot be asked does the agent capture
+    // (counting the spend is the safe side).
     async function captureRan(authorizationId, amount) {
+      const fx = await effectStatus(authorizationId);
+      if (fx?.claimed === true || SETTLED_OUTCOMES.has(fx?.outcome)) return;
       for (const wait of [0, 250, 1000]) {
         if (wait) await new Promise((r) => setTimeout(r, wait));
         try { await capture(authorizationId, amount); return; } catch { /* unreachable — try again */ }

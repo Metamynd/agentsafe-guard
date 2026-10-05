@@ -67,6 +67,37 @@ await check('a tool that RAN has its hold captured at the authorized amount, sig
   } finally { f.restore(); }
 });
 
+// F-3 (0.27.0): a hold the tool's gateway CLAIMED is the gateway's to settle. The agent capturing it too raced the gateway's
+// own settlement — the agent's full-amount capture landed first, recorded `unattested`, and the gateway's real charge was refused.
+for (const [label, effect] of [
+  ['claimed by the gateway that ran the tool', { outcome: 'in_flight', effectState: 'dispatching', claimed: true }],
+  ['already settled by the gateway', { outcome: 'settled', effectState: 'succeeded', claimed: true }],
+]) {
+  await check(`a hold ${label} is left to the gateway: no agent capture`, async () => {
+    const f = fakeIssuer();
+    const real = globalThis.fetch;
+    globalThis.fetch = async (url, init) => (String(url).endsWith('/effect') ? { ok: true, status: 200, json: async () => ({ success: true, data: effect }) } : real(url, init));
+    try {
+      const out = await guard.guardTool('flight-purchase', async () => ({ pnr: 'PNR-GW' }), mapArgs)({ amount: 120 });
+      assert.equal(out.pnr, 'PNR-GW');
+      assert.deepEqual(settlements(f.calls), [], 'the agent settled nothing');
+    } finally { globalThis.fetch = real; f.restore(); }
+  });
+}
+
+await check('when the gate cannot say whether the hold was claimed, the agent still captures (counting the spend is the safe side)', async () => {
+  const f = fakeIssuer();
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/effect')) throw new TypeError('fetch failed');
+    return real(url, init);
+  };
+  try {
+    await guard.guardTool('flight-purchase', async () => ({ ok: true }), mapArgs)({ amount: 120 });
+    assert.deepEqual(settlements(f.calls), ['capture']);
+  } finally { globalThis.fetch = real; f.restore(); }
+});
+
 await check("settle: 'none' leaves the hold to whoever settles it", async () => {
   const f = fakeIssuer();
   try {

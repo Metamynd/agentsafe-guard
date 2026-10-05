@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -477,6 +477,9 @@ def payload_digest(value: Any) -> str:
     """`sha256:` + the hex SHA-256 of the canonical text — what the agent signs and the executing service compares."""
     return PAYLOAD_DIGEST_PREFIX + hashlib.sha256(canonical_payload(value).encode("utf-8")).hexdigest()
 
+
+# Effect outcomes after which a hold is final: nothing is left for an agent to capture (F-3).
+_SETTLED_OUTCOMES = frozenset({"settled", "not_executed", "expired", "reversing", "reversed", "reversal_failed"})
 
 RESUME_BINDING_PREFIX = "MAGP-RESUME-BIND-v1"
 
@@ -1883,6 +1886,15 @@ def guard_tool(
         amount = payload.get("amount")
         if settle != "capture" or not verdict.authorization_id or isinstance(amount, bool) or not isinstance(amount, (int, float)):
             return
+        # A hold a counterparty CLAIMED is not this agent's to settle (0.16.0, pre-beta rerun 4 F-3): the gateway that ran the
+        # tool claimed it before executing and settles it itself, at what it really charged. Capturing here raced that and
+        # left the settlement `unattested`. Only when the gate cannot be asked does the agent capture (the safe side).
+        try:
+            state = client.outcome(verdict.authorization_id)
+            if state.claimed or state.outcome in _SETTLED_OUTCOMES:
+                return
+        except Exception:  # noqa: BLE001 — unreachable or unreadable: fall through and count the spend
+            pass
         # Retried briefly when the gate cannot be reached: a capture that never lands lets the hold of an action that RAN
         # lapse with its TTL, and its spend stop counting. A refusal (a gateway already settled it) is an answer, not retried.
         for wait in (0.0, 0.25, 1.0):

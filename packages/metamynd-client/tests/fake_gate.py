@@ -220,8 +220,8 @@ class FakeGate:
                 return 404, {"success": False, "message": "AUTHORIZATION_NOT_FOUND", "data": {"authorizationId": auth_id, "reasonCode": "AUTHORIZATION_NOT_FOUND", "detail": "AUTHORIZATION_NOT_FOUND: no authorization with this id"}}
             settled = h["state"] == "captured"
             return 200, {"success": True, "data": {
-                "authorizationId": auth_id, "outcome": "settled" if settled else ("not_executed" if h["state"] == "voided" else "not_started"),
-                "nothingExecuted": not settled, "retrySafe": h["state"] == "voided", "claimed": False, "spendStatus": h["state"],
+                "authorizationId": auth_id, "outcome": "settled" if settled else ("not_executed" if h["state"] == "voided" else ("in_flight" if h.get("claimed") else "not_started")),
+                "nothingExecuted": not settled and not h.get("claimed"), "retrySafe": h["state"] == "voided", "claimed": bool(h.get("claimed")), "spendStatus": h["state"],
                 # As the real gate now reports it: the authorized amount survives settlement, and a settlement says what it
                 # rests on (this double only accepts a capture at the full amount, so it is always the unattested kind).
                 "currency": h["currency"], "authorizedAmount": h["amount"], "settledAmount": h["amount"] if settled else None,
