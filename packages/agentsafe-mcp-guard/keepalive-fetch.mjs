@@ -15,7 +15,8 @@
 // built-in fetch unchanged.
 //
 // Tests that stub `globalThis.fetch` keep working: when the global has been replaced since this module loaded, calls go
-// to the replacement.
+// to the replacement. So does a stub installed BEFORE this module loaded (pre-beta rerun 4, F-9): the global seen at load
+// is then not Node's own fetch, and every call goes to whatever the global is at call time.
 
 import http from 'node:http';
 import https from 'node:https';
@@ -24,6 +25,9 @@ export const IDLE_KEEPALIVE_MS = 60_000;
 const MAX_REDIRECTS = 20;
 
 const nativeFetch = globalThis.fetch;
+// Node's own fetch (18 to 24) reads `function fetch(input, init = undefined) {`, async in older lines. Anything else at load
+// was put there by a test or the host. Should a future Node read differently, the cost is only the keep-alive.
+const loadedNative = typeof nativeFetch === 'function' && /^(async )?function fetch\(input, init/.test(Function.prototype.toString.call(nativeFetch));
 const agents = {
   'https:': new https.Agent({ keepAlive: true, timeout: IDLE_KEEPALIVE_MS, scheduling: 'lifo' }),
   'http:': new http.Agent({ keepAlive: true, timeout: IDLE_KEEPALIVE_MS, scheduling: 'lifo' }),
@@ -108,8 +112,8 @@ function webBody(res, signal) {
 }
 
 export async function keepAliveFetch(input, init = {}) {
-  // A test (or the host) replaced the global fetch since this module loaded: honour it.
-  if (globalThis.fetch !== nativeFetch) return globalThis.fetch(input, init);
+  // A test (or the host) replaced the global fetch, before this module loaded or since: honour it.
+  if (!loadedNative || globalThis.fetch !== nativeFetch) return globalThis.fetch(input, init);
 
   const isRequest = typeof input === 'object' && input !== null && typeof input.url === 'string' && !(input instanceof URL);
   let url;
