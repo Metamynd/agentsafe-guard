@@ -65,7 +65,7 @@ a dashboard that would have shown you is not.
   ok   refuses an action the mandate never granted   → block/NO_PERMISSION_FOR_ACTION
   ok   refuses 501 against a cap of 500              → block/SOP_SPEND_CAP
   n/a  no merchant allow-list in this mandate
-       EVERY merchant is permitted
+       EVERY merchant is permitted (the gate holds the first payment to each for review)
 
   1 control(s) are not configured — reported, not passed.
   Fail the build on these with:  verify --require merchants

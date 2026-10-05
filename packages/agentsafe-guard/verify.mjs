@@ -184,7 +184,9 @@ export async function verify({ configPath = './agent.metamynd.json', require: re
     add('merchants', permits(v) ? FAIL : PASS, 'refuses an unlisted merchant, under the cap', v,
       permits(v) ? 'the merchant allow-list did not hold' : null);
   } else {
-    add('merchants', ABSENT, 'no merchant allow-list in this mandate', null, 'EVERY merchant is permitted');
+    // Permitted, not unreviewed: with no list the issuer holds the FIRST payment to each merchant for the owner's review
+    // (new-merchant, MAGP 6.4.3), a gate-side check this local evaluation cannot run (it needs the payment history).
+    add('merchants', ABSENT, 'no merchant allow-list in this mandate', null, 'EVERY merchant is permitted (the gate holds the first payment to each for review)');
   }
 
   const failed = checks.filter((c) => c.status === FAIL);
