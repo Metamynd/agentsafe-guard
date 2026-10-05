@@ -123,6 +123,18 @@ the unguarded function. If the awaiting task is cancelled (a timeout) while the 
 the gate permits, the hold that call created is voided rather than left reserving the budget.
 Async generator tools are refused when you wrap them: one authorization covers one action.
 
+**A tool that raises keeps its hold.** When a permitted tool returns, `guard_tool` captures the hold; when it raises,
+the hold is kept, because a tool that raised may already have acted (charged the card, then failed). A kept hold counts
+against the mandate's cumulative cap until it lapses with the hold TTL (15 minutes unless the issuer sets
+`MANDATE_HOLD_TTL_MS`), so a burst of failures can use up the budget for that window with nothing bought. Once you
+know an error means nothing happened, tell the wrapper:
+- raise `ToolNotExecuted`, or any exception with `nothing_executed = True`, and the hold is released; or
+- pass `release_on_error=True`, or `release_on_error=lambda exc: isinstance(exc, MyValidationError)` for the errors you
+  know come before any action.
+
+`GovernanceBlocked` from a service that re-verified the request is always released: nothing ran. A hold a service has
+**claimed** is that service's to settle, and the gate refuses an agent's release.
+
 **In-process and cooperative.** `guard_tool` runs in your own process: it makes the governed path the one
 your agent takes, and records every decision, but code that can import `book_flight` (or reach the credential it
 uses) can still call it directly. The enforcement boundary is a **separate process** that holds the tool and its
