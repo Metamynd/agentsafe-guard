@@ -31,7 +31,7 @@ npm create metamynd-agent@latest -- --harness   # or: npx create-metamynd-agent 
 
 No login, no KYB, **no network call at all** — generates a local identity and a local rules file
 (mandate + starter SOP), and scaffolds a project whose `guardTool()` calls are decided entirely on
-your machine by the same deterministic evaluator ([`policy-core`](../agentsafe-guard/policy-core.mjs))
+your machine by the same deterministic evaluator ([`policy-core`](https://github.com/Metamynd/agentsafe-guard/tree/main/packages/policy-core))
 the hosted gate runs. An escalated action is held for **you** to approve at a small local dashboard
 (`http://127.0.0.1:4400` by default) — there's no hosted owner queue in this mode, because there's
 no hosted anything. Real gating, your own rules, free, forever.
@@ -75,7 +75,7 @@ flow. See [Policy config file](#policy-config-file---config) below.
 The dashboard's rules panel is a real editor, not just JSON with input boxes: edit an existing
 rule's values, **delete** a rule, or **add a new one** from a form (predicate + its typed config
 fields + decision) driven by the same atom catalog and validator
-([`policy-core`](../agentsafe-guard/policy-core.mjs)) the hosted gate itself uses — so nothing you
+([`policy-core`](https://github.com/Metamynd/agentsafe-guard/tree/main/packages/policy-core)) the hosted gate itself uses — so nothing you
 add through it can be invalid. Hand-editing `metamynd-rules.json` still works too, if you prefer.
 
 ## Try it instantly — sandbox (no account, no KYB)
@@ -384,7 +384,7 @@ key you already hold elsewhere — then you complete `verify-key` yourself (the 
 
 ### Keeping the key out of this process entirely (`--daemon-socket`)
 
-If you already have an [agentsafe-signer](../agentsafe-signer/README.md) daemon running for this
+If you already have an [agentsafe-signer](https://www.npmjs.com/package/@metamynd/agentsafe-signer) daemon running for this
 agent (`agentsafe-signer start --admin`, per its own install guide), point `--byok` at it instead:
 
 ```bash
@@ -456,5 +456,5 @@ should never be able to hold, or leak, a credential it doesn't have.
 
 ## Full guide
 
-`docs/integration/INTEGRATE-WITH-METAMYND.md` — the complete integration front-door (payments,
+[metamynd.ai/developers/integrate](https://metamynd.ai/developers/integrate) — the complete integration front-door (payments,
 handshake, edge evaluation, escalation).
