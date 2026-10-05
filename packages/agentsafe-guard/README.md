@@ -720,6 +720,18 @@ until then. Now:
 | throws an error with `nothingExecuted: true` | **released** | — |
 | throws anything else | **kept**: a tool that threw may still have acted | `{ releaseOnError: true }` or `{ releaseOnError: (err) => boolean }` |
 
+**What a kept hold costs, and how to give it back sooner.** A kept hold still counts against the mandate's cumulative
+cap until it lapses with the hold TTL (15 minutes unless the issuer sets `MANDATE_HOLD_TTL_MS`), so a burst of failing
+calls can exhaust the budget for that window with nothing bought. That is deliberate: the guard cannot tell a tool that
+failed before acting from one that charged the card and then threw. Once *you* know nothing happened, say so:
+- throw (or rethrow) the error with `nothingExecuted: true`, and `guardTool()` releases the hold itself; or
+- pass `releaseOnError` for the error types you know are pre-action (a validation error, a refused connection); or
+- release it afterwards with `await guard.void(authorizationId, reason)`. The tool receives the decision as its second
+  argument (`handler(args, decision)`), so `decision.authorizationId` is the id to keep; `await
+  guard.effectStatus(authorizationId)` says whether a service has claimed or settled it first.
+
+A hold a service has **claimed** is that service's to settle; the agent cannot release it.
+
 The agent can never release a hold a service has **claimed**: the issuer refuses it (`COUNTERPARTY_MISMATCH`), because
 the service may already have acted. To release one yourself, `await guard.void(authorizationId, reason)` — signed as the
 agent, and `{ voided, reasonCode }` back (`NOT_HELD` means it was already settled or released).
