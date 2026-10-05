@@ -5,9 +5,11 @@
 //
 //   node local-decision-report.smoke.mjs
 import crypto from 'node:crypto';
-import { createGuard } from './agentsafe-guard.mjs';
+import { createGuard, localReceiptDetailOf } from './agentsafe-guard.mjs';
 import { verifyDidSignature, buildHederaDid } from './magp-did.mjs';
+import { buildLocalReceiptMessage } from './local-receipt.mjs';
 import { buildLocalDecisionMessage } from './policy-core.mjs';
+import { payloadDigestOf } from './payload-binding.mjs';
 
 let failed = 0;
 function check(ok, name) {
@@ -62,9 +64,47 @@ async function main() {
     const r = reportedRequests[0];
     check(r.agentDid === agentDid && r.action === 'vehicle-inspection', 'report carries the right agentDid/action');
     check(r.decision === verdict.decision && r.reasonCode === verdict.reasonCode, 'report carries the ACTUAL verdict, not a fabricated one');
-    const message = buildLocalDecisionMessage(r);
-    check(verifyDidSignature(agentDid, message, r.signature), 'report signature verifies against buildLocalDecisionMessage');
+    check(r.v === 2, 'it is a v2 receipt (0.26.0): the request detail is bound into the signature');
+    check(verifyDidSignature(agentDid, buildLocalReceiptMessage(r), r.signature), 'report signature verifies against buildLocalReceiptMessage');
   }
+
+  // AUD-1: an over-cap refusal decided locally names what was refused: the amount, currency, merchant and payload digest,
+  // signed with the verdict, so a tampered amount does not verify.
+  reportedRequests.length = 0;
+  bundle.mandates[0].action = 'flight-purchase';
+  bundle.mandates[0].document.permission[0].constraint = [{ leftOperand: 'mm:payAmount', operator: 'lteq', rightOperand: 100, unit: 'USD' }];
+  const payload = { amount: 500, merchant: 'skyward-air', currency: 'USD' };
+  const overCap = await guard.authorizeLocal({ action: 'flight-purchase', amount: 500, currency: 'USD', merchant: 'skyward-air', payload, context: { riskLevel: 'low' } });
+  check(overCap.decision === 'block', `over-cap blocked locally (got ${overCap.decision}/${overCap.reasonCode})`);
+  await new Promise((r) => setTimeout(r, 50));
+  const rc = reportedRequests[0];
+  check(rc?.v === 2 && rc.detail?.amount === 500 && rc.detail?.currency === 'USD' && rc.detail?.merchant === 'skyward-air', 'the receipt carries amount 500 USD to skyward-air');
+  check(rc?.detail?.payloadDigest === payloadDigestOf(payload), 'and the digest of the payload the agent asked to run');
+  check(rc && verifyDidSignature(agentDid, buildLocalReceiptMessage(rc), rc.signature), 'the v2 signature verifies');
+  check(rc && !verifyDidSignature(agentDid, buildLocalReceiptMessage({ ...rc, detail: { ...rc.detail, amount: 5 } }), rc.signature), 'a receipt with the amount changed does NOT verify');
+
+  // An issuer that predates v2 strips v/detail and refuses SIGNATURE_INVALID: the guard reports the verdict once more as v1.
+  reportedRequests.length = 0;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes('/policy/bundle/')) return { ok: true, json: async () => ({ data: bundle }) };
+    if (String(url).endsWith('/policy/decisions/local')) {
+      reportedRequests.push(JSON.parse(opts.body));
+      return reportedRequests.length === 1
+        ? { ok: false, status: 400, json: async () => ({ success: false, data: { recorded: false, reasonCode: 'SIGNATURE_INVALID' } }) }
+        : { ok: true, status: 200, json: async () => ({ success: true, data: { recorded: true, reasonCode: 'ACCEPTED' } }) };
+    }
+    return { ok: false, json: async () => null };
+  };
+  await guard.authorizeLocal({ action: 'flight-purchase', amount: 500, currency: 'USD', merchant: 'skyward-air', context: { riskLevel: 'low' } });
+  await new Promise((r) => setTimeout(r, 100));
+  const [first, second] = reportedRequests;
+  check(reportedRequests.length === 2 && first.v === 2 && second.v === undefined && second.detail === undefined, 'refused v2 → one v1 report follows');
+  check(second && second.nonce !== first.nonce && verifyDidSignature(agentDid, buildLocalDecisionMessage(second), second.signature), 'the v1 report has its own nonce and a valid v1 signature');
+
+  // A merchant cut to the issuer's 120 never ends in half of a surrogate pair (Postgres refuses a lone surrogate).
+  const long = 'a'.repeat(119) + '\u{1F600}';
+  const cut = localReceiptDetailOf({ amount: 1, merchant: long }).merchant;
+  check(cut.length <= 120 && !/[\uD800-\uDBFF]$/.test(cut), 'a merchant is cut at 120 UTF-16 units without splitting a surrogate pair');
 
   globalThis.fetch = originalFetch;
   void neverResolvingReportHang; // keep it referenced; nothing awaits it, which is the point

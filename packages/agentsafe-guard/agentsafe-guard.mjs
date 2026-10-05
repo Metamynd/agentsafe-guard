@@ -65,6 +65,36 @@ const UNSIGNED_JURISDICTION_KEYS = ['jurisdiction', 'mm:jurisdiction'];
  * owner's share of the per-transaction cap, a first payment to a new merchant), as a note for the refusal message: an agent
  * that said "low" can tell why it is held. Empty when none applied (then the agent's own riskLevel decided it).
  */
+/**
+ * The detail a v2 local receipt binds (0.26.0, MAGP-LOCAL-DECISION-v2): the request's amount, currency (only with an amount),
+ * merchant and the digest of its payload. Bounded to the issuer's columns; a payload that cannot be canonicalised binds none.
+ */
+/** At most `max` UTF-16 units (the issuer's column limit), never ending in half of a surrogate pair. */
+function cutUtf16(s, max) {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
+export function localReceiptDetailOf(request = {}) {
+  const amount = typeof request.amount === 'number' && Number.isFinite(request.amount) && request.amount !== 0 ? request.amount : null;
+  let payloadDigest = null;
+  if (request.payload !== undefined) {
+    try {
+      payloadDigest = payloadDigestOf(toWireJson(request.payload));
+    } catch {
+      payloadDigest = null;
+    }
+  }
+  return {
+    amount,
+    currency: amount !== null ? String(request.currency ?? 'USD').slice(0, 8) : null,
+    merchant: typeof request.merchant === 'string' && request.merchant ? cutUtf16(request.merchant, 120) : null,
+    payloadDigest,
+  };
+}
+
 export function derivedRiskNote(decision) {
   const signals = Array.isArray(decision?.riskSignals) ? decision.riskSignals : [];
   if (signals.length === 0) return '';
@@ -807,12 +837,36 @@ export function createGuard(opts = {}) {
    * keyProvider, which doesn't implement signLocalDecision in this version) or the verdict
    * isn't one the endpoint accepts. Never throws, never delays the caller.
    */
-  function reportLocalDecision(action, decision, reasonCode) {
-    if (typeof keyProvider.signLocalDecision !== 'function') return;
+  function reportLocalDecision(action, decision, reasonCode, request = {}) {
+    if (typeof keyProvider.signLocalDecision !== 'function' && typeof keyProvider.signLocalReceipt !== 'function') return;
     if (!REPORTABLE_LOCAL_DECISIONS.has(decision)) return;
     const nonce = crypto.randomUUID();
     const issuedAt = new Date().toISOString();
     void (async () => {
+      // v2 (0.26.0, AUD-1): the receipt names WHAT was refused — amount, currency, merchant and the payload digest, signed
+      // with the verdict — so the owner's Activity Log can show it. A provider that cannot sign v2 still reports v1.
+      if (typeof keyProvider.signLocalReceipt === 'function') {
+        const detail = localReceiptDetailOf(request);
+        const signature = await keyProvider.signLocalReceipt({ agentDid, action, decision, reasonCode, nonce, issuedAt, detail });
+        const res = await fetch(`${base}/policy/decisions/local`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agentDid, action, decision, reasonCode, nonce, issuedAt, signature, v: 2, detail }),
+        });
+        // An issuer that predates v2 strips `v`/`detail`, checks the v1 message and refuses SIGNATURE_INVALID: report the
+        // verdict once more as v1 (a fresh nonce), so the decision is still on the record, just without its detail.
+        const body = res.ok ? null : await res.json().catch(() => null);
+        if (body?.data?.reasonCode !== 'SIGNATURE_INVALID' || typeof keyProvider.signLocalDecision !== 'function') return;
+        const nonceV1 = crypto.randomUUID();
+        const issuedAtV1 = new Date().toISOString();
+        const signatureV1 = await keyProvider.signLocalDecision({ agentDid, action, decision, reasonCode, nonce: nonceV1, issuedAt: issuedAtV1 });
+        await fetch(`${base}/policy/decisions/local`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agentDid, action, decision, reasonCode, nonce: nonceV1, issuedAt: issuedAtV1, signature: signatureV1 }),
+        });
+        return;
+      }
       const signature = await keyProvider.signLocalDecision({ agentDid, action, decision, reasonCode, nonce, issuedAt });
       await fetch(`${base}/policy/decisions/local`, {
         method: 'POST',
@@ -866,11 +920,11 @@ export function createGuard(opts = {}) {
         const decision = contained.status === 'quarantined' ? 'quarantine' : 'suspend';
         const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
         const local = { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
-        reportLocalDecision(action, local.decision, local.reasonCode);
+        reportLocalDecision(action, local.decision, local.reasonCode, input);
         return local;
       }
       const local = { decision: 'block', reasonCode: revoked ? 'MANDATE_REVOKED' : anyMandates ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE', authorizationId: null, remaining: null, proofRef: null };
-      reportLocalDecision(action, local.decision, local.reasonCode);
+      reportLocalDecision(action, local.decision, local.reasonCode, input);
       return local;
     }
     const local = evaluateLocally({ ...bundleForAction, request: input });
@@ -884,11 +938,11 @@ export function createGuard(opts = {}) {
     // allow/observe both PERMIT; block/contain (and an offline escalate) are decided locally with no network.
     const permits = local.decision === 'allow' || local.decision === 'observe';
     if (!permits) {
-      reportLocalDecision(action, local.decision, local.reasonCode); // fire-and-forget — see above
+      reportLocalDecision(action, local.decision, local.reasonCode, input); // fire-and-forget — see above
       return local; // denied/escalated locally, no network
     }
     if (amount > 0 && sealValueActions) return authorize(input); // seal value action remotely (allow or observe)
-    reportLocalDecision(action, local.decision, local.reasonCode); // non-value permit — fire-and-forget
+    reportLocalDecision(action, local.decision, local.reasonCode, input); // non-value permit — fire-and-forget
     return local; // non-value permit — local is sufficient
   }
 

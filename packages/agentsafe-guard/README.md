@@ -736,3 +736,10 @@ block/escalate/non-value-allow — see "Enforcement mode" above) is NOT anchored
 recorded for Activity Log / decision-mix visibility via a best-effort signed receipt (no hold, no
 spend check, not evidence-grade) — `guardToolLocal()`'s pure-offline path has no server-side trail
 at all, by design.
+
+Since 0.26.0 that receipt is **v2** (`MAGP-LOCAL-DECISION-v2`): it names what was refused — the amount,
+currency, merchant and the digest of the payload — signed together with the verdict, so the owner's
+Activity Log shows "SOP_SPEND_CAP · USD 300 · skyward-air" rather than a bare code, and a receipt
+with the amount changed does not verify. The issuer adds the policy bundle version in force when it
+records the receipt. A key provider that cannot sign v2 (the signer daemon) still reports v1, and an
+issuer that predates v2 is sent a v1 receipt instead.
