@@ -86,6 +86,8 @@ class FakeGate:
         self.signature_failures = 0  # requests whose eight-field signature did not verify
         self.payload_failures = 0  # requests whose payload-binding signature did not verify
         self.resume_binding = True  # a gate that predates MAGP 9a.5 returns no requestDigest; False plays that gate
+        self.resume_claims = True  # a gate that predates MAGP 9a.6 has no /resume-claim route (404); False plays that gate
+        self._lock = threading.Lock()
         self.echo_payload_digest = True  # a gate that predates binding (or a proxy that strips it) does not acknowledge the digest
         self.holds: Dict[str, Dict[str, Any]] = {}
         self.escalations: Dict[str, Dict[str, Any]] = {}
@@ -119,6 +121,14 @@ class FakeGate:
                 gate.bodies.append(body)
                 if gate.delay and self.path == "/policy/mandate/authorize":
                     time.sleep(gate.delay)  # a slow gate, so a caller can be cancelled while the hold is being made
+                if self.path.endswith("/resume-claim") and not gate.resume_claims:
+                    # A gate that predates MAGP 9a.6: Express's own 404 page for an unknown route, not JSON.
+                    raw = b"<!DOCTYPE html><html><body><pre>Cannot POST</pre></body></html>"
+                    self.send_response(404)
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
                 if gate.html_200:
                     raw = b"<html>a CDN error page with a 200 status</html>"
                     self.send_response(200)
@@ -160,11 +170,32 @@ class FakeGate:
             return self._authorize(body)
         if path.endswith("/payload-binding"):
             return self._bind_payload(path.split("/")[-2], body)
+        if path.endswith("/resume-claim") and self.resume_claims:
+            return self._claim_resume(path.split("/")[-2], body)
         for verb in ("capture", "void"):
             if path.endswith("/" + verb):
                 auth_id = path.split("/")[-2]
                 return self._settle(verb, auth_id, body)
         return 404, {"success": False, "message": "no such route", "data": None}
+
+    def _claim_resume(self, esc_id: str, body: Mapping[str, Any]) -> "tuple[int, Any]":
+        """The ONE resume of an approved escalation (MAGP 9a.6), the message rebuilt BY HAND; the first valid claim wins."""
+        e = self.escalations.get(esc_id)
+        if not e:
+            return 404, {"success": False, "message": "NOT_FOUND", "data": {"reasonCode": "NOT_FOUND"}}
+        try:
+            esc = lambda v: v.replace("\\", "\\\\").replace("|", "\\|")  # noqa: E731
+            message = "|".join(esc(f) for f in ["MAGP-RESUME-CLAIM-v1", esc_id, e["authorizationId"], body["agentDid"], body["nonce"], body["issuedAt"]])
+            self.public_key.verify(bytes.fromhex(body["signature"]), message.encode("utf-8"))
+        except Exception:
+            return 401, {"success": False, "message": "SIGNATURE_INVALID", "data": {"reasonCode": "SIGNATURE_INVALID"}}
+        if e["status"] != "approved":
+            return 409, {"success": False, "message": "ESCALATION_NOT_APPROVED", "data": {"reasonCode": "ESCALATION_NOT_APPROVED"}}
+        with self._lock:
+            if e.get("resumeClaimed"):
+                return 409, {"success": False, "message": "AUTHORIZATION_IN_USE", "data": {"reasonCode": "AUTHORIZATION_IN_USE"}}
+            e["resumeClaimed"] = True
+        return 200, {"success": True, "message": "Resume claimed", "data": {"claimed": True}}
 
     def _bind_payload(self, auth_id: str, body: Mapping[str, Any]) -> "tuple[int, Any]":
         """Late binding (MAGP 8.3.11): the rebind message rebuilt BY HAND, never with the client's own builder."""

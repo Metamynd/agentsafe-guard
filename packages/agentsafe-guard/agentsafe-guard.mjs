@@ -380,6 +380,7 @@ export function createGuard(opts = {}) {
   // committed a hold this agent never heard of. It is looked up and released after these delays (ms); [] turns it off.
   const orphanDelaysMs = Array.isArray(opts.orphanReleaseDelaysMs) ? opts.orphanReleaseDelaysMs : [2_000, 10_000, 30_000];
   let warnedNoRequestDigest = false; // once per guard: the gate predates the resume binding (§9a.5)
+  let warnedNoResumeClaim = false; // once per guard: the gate predates the resume claim (§9a.6)
   // Escalations being resumed in THIS process right now, by any gated tool of this guard: a second, concurrent resume of
   // the same one is refused instead of racing the first past the "still unused?" check (since 0.22.0).
   const resumesInFlight = new Set();
@@ -1163,6 +1164,36 @@ export function createGuard(opts = {}) {
         payloadDigest,
       });
     };
+    // 'claimed' | 'unsupported' (no signer for it, or an issuer that predates it: run as before) | a refusal code.
+    const claimResume = async (escalationId, authorizationId) => {
+      if (typeof keyProvider.signResumeClaim !== 'function') return 'unsupported';
+      const nonce = crypto.randomUUID();
+      const issuedAt = new Date().toISOString();
+      const signature = await keyProvider.signResumeClaim({ escalationId, authorizationId, agentDid, nonce, issuedAt });
+      let res;
+      try {
+        res = await fetch(`${base}/policy/escalations/${encodeURIComponent(escalationId)}/resume-claim`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agentDid, nonce, issuedAt, signature }),
+        });
+      } catch {
+        return 'GATE_UNREACHABLE'; // never run a resume the issuer could not be told about
+      }
+      if (res.ok) return 'claimed';
+      const body = await res.json().catch(() => undefined);
+      // An issuer that predates the route answers the framework's own 404 page, not JSON. A JSON 404 (an escalation the
+      // issuer does not know, or a proxy's error body) is a refusal: never run unclaimed on an ambiguous answer.
+      if (res.status === 404 && body === undefined) {
+        if (!warnedNoResumeClaim) {
+          warnedNoResumeClaim = true;
+          console.warn('[agentsafe] this gate has no resume claim (it predates MAGP §9a.6): resume() runs unclaimed, so two processes resuming one approval could both run it');
+        }
+        return 'unsupported';
+      }
+      const code = body?.data?.reasonCode;
+      return typeof code === 'string' && code ? code : `GATE_HTTP_${res.status}`;
+    };
     gated.resume = async (escalationId, args, opts = {}) => {
       if (resumesInFlight.has(escalationId)) {
         throw refusal({ decision: 'block', reasonCode: 'AUTHORIZATION_IN_USE', escalationId, status: 'approved' });
@@ -1193,6 +1224,13 @@ export function createGuard(opts = {}) {
       }
       if (st.requestDigest && resumeDigestFor(st, mapped) !== st.requestDigest) {
         throw refusal({ decision: 'block', reasonCode: 'ESCALATION_REQUEST_MISMATCH', escalationId, authorizationId: st.authorizationId, status: 'approved' });
+      }
+      // The ONE resume (0.28.0, §9a.6): taken at the issuer, atomically, so a second PROCESS resuming the same escalation
+      // is refused AUTHORIZATION_IN_USE instead of running an in-process tool twice (the in-process lock above covers one
+      // process only). At most once — a crash after this does not hand the approval to another run.
+      const claimed = await claimResume(escalationId, st.authorizationId);
+      if (claimed !== 'claimed' && claimed !== 'unsupported') {
+        throw refusal({ decision: 'block', reasonCode: claimed, escalationId, authorizationId: st.authorizationId, status: 'approved' });
       }
       return run(args, { decision: 'allow', reasonCode: st.reasonCode ?? 'ESCALATION_APPROVED', authorizationId: st.authorizationId, escalationId }, mapped);
     };

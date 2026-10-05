@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { buildHederaDid } from './magp-did.mjs';
 import { createGuard } from './agentsafe-guard.mjs';
-import { buildResumeBindingMessage, resumeRequestDigest } from './resume-binding.mjs';
+import { buildResumeBindingMessage, buildResumeClaimMessage, resumeRequestDigest } from './resume-binding.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
@@ -22,13 +22,19 @@ const HOLD = '1e7506c4-cdc6-40e0-a513-23a314535fb0';
 const approvedPayload = { amount: 5, merchant: 'skyward-air', currency: 'USD' };
 
 /** A fake issuer: the escalation is approved with the given status fields; captures and voids are recorded. */
-function fakeIssuer(status) {
+function fakeIssuer(status, { claim = 'ok' } = {}) {
   const calls = [];
   const real = globalThis.fetch;
   globalThis.fetch = async (url, init = {}) => {
     const u = String(url);
     calls.push(u);
     const reply = (data, code = 200) => ({ ok: code < 400, status: code, json: async () => ({ success: code < 400, data }) });
+    if (u.endsWith('/resume-claim')) {
+      // 'ok': taken. 'missing': an issuer that predates it (Express's HTML 404). 'json404': a JSON 404 (a proxy's error body).
+      if (claim === 'missing') return { ok: false, status: 404, json: async () => { throw new SyntaxError('Unexpected token < in JSON'); } };
+      if (claim === 'json404') return reply({ error: 'not found' }, 404);
+      return reply({ claimed: true });
+    }
     if (u.includes('/escalations/')) return reply({ escalationId: 'esc-1', status: 'approved', reasonCode: 'ESCALATION_APPROVED', authorizationId: HOLD, ...status });
     if (u.endsWith('/effect')) return reply({ outcome: 'not_started', effectState: 'authorized' });
     if (u.endsWith('/capture')) return reply({ captured: true });
@@ -47,8 +53,8 @@ let failed = 0;
 async function check(label, fn) {
   try { await fn(); console.log(`ok    ${label}`); } catch (e) { failed++; console.log(`FAIL  ${label}\n      ${e.stack ?? e.message}`); }
 }
-async function resumeWith(status, args) {
-  const f = fakeIssuer(status);
+async function resumeWith(status, args, opts) {
+  const f = fakeIssuer(status, opts);
   const ran = [];
   try {
     const tool = guard.guardTool('flight-purchase', async (a) => { ran.push(a); return { pnr: 'PNR-1' }; }, mapArgs);
@@ -103,6 +109,57 @@ await check('an issuer that predates requestDigest: resume behaves as before (th
   const r = await resumeWith({ payloadBound: true }, { amount: 5000, merchant: 'skyward-air' });
   assert.equal(r.err, undefined);
   assert.equal(r.ran.length, 1);
+});
+
+// F-2 (0.28.0): two PROCESSES resuming one approval with an in-process tool both ran it — the in-process lock covers one
+// process. The resume is now taken at the issuer (MAGP-RESUME-CLAIM-v1), atomically: exactly one process runs.
+await check('two guards (two processes) resuming one approval at once: exactly one runs, the other is refused AUTHORIZATION_IN_USE', async () => {
+  const real = globalThis.fetch;
+  let taken = false;
+  const claims = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const reply = (data, code = 200) => ({ ok: code < 400, status: code, json: async () => ({ success: code < 400, data, message: data?.reasonCode }) });
+    if (u.endsWith('/resume-claim')) {
+      const body = JSON.parse(init.body);
+      claims.push(body);
+      // The issuer's conditional UPDATE: the first claim wins.
+      if (taken) return reply({ reasonCode: 'AUTHORIZATION_IN_USE' }, 409);
+      taken = true;
+      return reply({ claimed: true });
+    }
+    if (u.includes('/escalations/')) return reply({ escalationId: 'esc-1', status: 'approved', reasonCode: 'ESCALATION_APPROVED', authorizationId: HOLD, ...bound });
+    if (u.endsWith('/effect')) return reply({ outcome: 'not_started', effectState: 'authorized' });
+    if (u.endsWith('/capture')) return reply({ captured: true });
+    return reply({}, 404);
+  };
+  try {
+    const ran = [];
+    const processA = createGuard({ api: 'http://issuer.test/api/v1', agentDid, agentKey, mode: 'remote' });
+    const processB = createGuard({ api: 'http://issuer.test/api/v1', agentDid, agentKey, mode: 'remote' });
+    const toolOf = (g) => g.guardTool('flight-purchase', async (a) => { ran.push(a); return { pnr: 'PNR-1' }; }, mapArgs);
+    const args = { amount: 5, merchant: 'skyward-air', riskLevel: 'high' };
+    const results = await Promise.allSettled([toolOf(processA).resume('esc-1', args, { timeoutMs: 1000 }), toolOf(processB).resume('esc-1', args, { timeoutMs: 1000 })]);
+    assert.equal(ran.length, 1, 'the tool ran once');
+    assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+    assert.equal(results.find((r) => r.status === 'rejected')?.reason?.governance?.reasonCode, 'AUTHORIZATION_IN_USE');
+    // The claim is the agent's own signature over MAGP-RESUME-CLAIM-v1 for this escalation and its hold.
+    const c = claims[0];
+    const msg = buildResumeClaimMessage({ escalationId: 'esc-1', authorizationId: HOLD, agentDid, nonce: c.nonce, issuedAt: c.issuedAt });
+    assert.ok(crypto.verify(null, Buffer.from(msg, 'utf8'), publicKey, Buffer.from(c.signature, 'hex')), 'the claim is signed by the agent');
+  } finally { globalThis.fetch = real; }
+});
+
+await check('an issuer that predates the resume claim (its HTML 404): the resume runs as before', async () => {
+  const r = await resumeWith(bound, { amount: 5, merchant: 'skyward-air', riskLevel: 'high' }, { claim: 'missing' });
+  assert.equal(r.err, undefined, r.err?.message);
+  assert.equal(r.ran.length, 1);
+});
+
+await check('a JSON 404 (a proxy, not an old issuer) is ambiguous, so the resume is refused and the tool never runs', async () => {
+  const r = await resumeWith(bound, { amount: 5, merchant: 'skyward-air', riskLevel: 'high' }, { claim: 'json404' });
+  assert.equal(r.err?.governance?.reasonCode, 'GATE_HTTP_404');
+  assert.equal(r.ran.length, 0);
 });
 
 await check('the bundled resume-binding reproduces docs/protocol/resume-binding-vectors.json', async () => {

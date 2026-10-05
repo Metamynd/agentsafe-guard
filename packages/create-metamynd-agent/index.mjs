@@ -80,7 +80,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // it refused, so the owner's Activity Log shows what was asked. Required: the scaffold demo's local refusals are those rows.
 // 0.27.0: guardTool leaves a hold the gateway CLAIMED to the gateway (it settles what it really charged) instead of racing
 // it with a full-amount capture. Required: every scaffolded agent calls its gateway, which claims and settles.
-const GUARD_VERSION = '^0.27.0';
+// 0.28.0: .resume() takes the approval's one resume at the issuer, so two processes resuming it cannot both run the tool.
+// Required: npm run resume relies on it (its file rename only covers one machine's working directory).
+const GUARD_VERSION = '^0.28.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {

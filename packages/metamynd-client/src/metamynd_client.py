@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -497,6 +497,14 @@ def _resume_amount(amount: Any) -> str:
     if number == 0:
         return ""
     return js_number_to_string(int(number) if number.is_integer() and abs(number) <= 2**53 else number)
+
+
+RESUME_CLAIM_PREFIX = "MAGP-RESUME-CLAIM-v1"
+
+
+def resume_claim_message(escalation_id: str, authorization_id: str, agent_did: str, nonce: str, issued_at: str) -> str:
+    """The agent's claim of the ONE resume of an approved escalation (MAGP 9a.6) — byte-for-byte the gate's builder."""
+    return "|".join(_escape_field(str(f)) for f in [RESUME_CLAIM_PREFIX, escalation_id, authorization_id, agent_did, nonce, issued_at])
 
 
 def resume_request_digest(authorization_id: str, action: str, amount: Any = None, currency: Optional[str] = None,
@@ -999,6 +1007,10 @@ class _LocalKeySigner:
         message = agent_settle_message(fields["verb"], fields["agentDid"], fields["authorizationId"], fields["nonce"], fields["issuedAt"], list(fields["fields"]))
         return self._key.sign(message.encode("utf-8"))
 
+    def sign_resume_claim(self, fields: Mapping[str, Any]) -> bytes:
+        message = resume_claim_message(fields["escalationId"], fields["authorizationId"], fields["agentDid"], fields["nonce"], fields["issuedAt"])
+        return self._key.sign(message.encode("utf-8"))
+
 
 class _DaemonSigner:
     """Signs by asking `agentsafe-signer` — the key never enters this process."""
@@ -1428,6 +1440,46 @@ class MetaMyndClient:
             raw=data,
         )
 
+    def claim_resume(self, escalation_id: str, authorization_id: str) -> str:
+        """Take the ONE resume of an approved escalation at the gate (0.17.0, MAGP 9a.6) before running a tool under it.
+
+        Returns "claimed"; "unsupported" when this signer cannot sign the claim (a daemon) or the gate predates it (the
+        resume then runs unclaimed, as before); or the refusal code, e.g. AUTHORIZATION_IN_USE when another process took
+        it first. Raises GateUnreachable when the gate cannot be reached — never run a resume the gate was not told about.
+        """
+        if not hasattr(self._signer, "sign_resume_claim"):
+            return "unsupported"
+        nonce = secrets.token_hex(16)
+        issued_at = utc_now_rfc3339()
+        signature = self._signer.sign_resume_claim({"escalationId": escalation_id, "authorizationId": authorization_id, "agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at})
+        request = urllib.request.Request(
+            f"{self.api}/policy/escalations/{urllib.parse.quote(escalation_id, safe='')}/resume-claim",
+            data=json.dumps({"agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at, "signature": signature.hex()}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout):
+                return "claimed"
+        except urllib.error.HTTPError as exc:
+            try:
+                body = json.loads(exc.read())
+            except ValueError:
+                body = None
+            # A gate that predates the route answers the framework's own 404 page, not JSON. A JSON 404 (an escalation the gate
+            # does not know, or a proxy's error body) is a refusal: never run unclaimed on an ambiguous answer.
+            if exc.code == 404 and body is None:
+                if not getattr(self, "_warned_no_resume_claim", False):
+                    self._warned_no_resume_claim = True
+                    warnings.warn("this gate has no resume claim (it predates MAGP 9a.6): resume() runs unclaimed, so two processes "
+                                  "resuming one approval could both run it", stacklevel=3)
+                return "unsupported"
+            data = body.get("data") if isinstance(body, dict) else None
+            code = data.get("reasonCode") if isinstance(data, dict) else None
+            return code if isinstance(code, str) and code else f"GATE_HTTP_{exc.code}"
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise GateUnreachable(f"gate unreachable ({getattr(exc, 'reason', exc)}) — the resume was not claimed, so it did not run") from exc
+
     def _settle_proof(self, verb: str, authorization_id: str, fields: list[str]) -> Optional[dict[str, str]]:
         """This agent's MAGP-SETTLE-v1 signature over settling its own unclaimed hold (MAGP §8.7.4). The gate accepts a
         settlement of a hold nobody has claimed only from its agent, a counterparty the owner registered, or — for an open
@@ -1841,6 +1893,16 @@ def guard_tool(
             payload=payload.get("payload", NO_PAYLOAD),
             jurisdiction=payload.get("jurisdiction"),
         )
+        # The ONE resume (0.17.0, MAGP 9a.6): taken at the gate, atomically, so a second PROCESS resuming the same escalation
+        # is refused AUTHORIZATION_IN_USE instead of running an in-process tool twice (the in-process lock covers one process
+        # only). Taken last, right before the tool runs: it is at most once, so nothing that could still fail locally comes after.
+        try:
+            claim = client.claim_resume(escalation_id, state.authorization_id or "")
+        except GateUnreachable as exc:
+            raise _guard_refusal(Verdict(decision="block", reason_code=GateUnreachable.reason_code, escalation_id=escalation_id, hint=str(exc))) from exc
+        if claim not in ("claimed", "unsupported"):
+            raise _guard_refusal(Verdict(decision="block", reason_code=claim, authorization_id=state.authorization_id, escalation_id=escalation_id,
+                                         hint="another process took this approval's one resume" if claim == "AUTHORIZATION_IN_USE" else None))
         verdict = Verdict(decision="allow", reason_code=state.reason_code or "ESCALATION_APPROVED", authorization_id=state.authorization_id,
                           escalation_id=escalation_id, raw=state.raw, signed=signed)
         return verdict, payload

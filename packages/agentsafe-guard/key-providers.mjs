@@ -12,6 +12,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { buildAgentSettleMessage, buildAuthMessage, buildLocalDecisionMessage } from './policy-core.mjs';
 import { buildLocalReceiptMessage } from './local-receipt.mjs';
+import { buildResumeClaimMessage } from './resume-binding.mjs';
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 import { buildPayloadBindingMessage, buildPayloadRebindMessage } from './payload-binding.mjs';
@@ -54,6 +55,11 @@ export function createStaticKeyProvider(agentKeyHex) {
     // merchant, payload digest) bound into the signature. OPTIONAL: a provider without it (the signer daemon) reports v1.
     async signLocalReceipt(fields) {
       return rawSign(buildLocalReceiptMessage(fields));
+    },
+    // The resume claim (0.28.0, MAGP-RESUME-CLAIM-v1): takes the one resume of an approved escalation. OPTIONAL: without it
+    // (the signer daemon) a resume runs unclaimed, as before.
+    async signResumeClaim(fields) {
+      return rawSign(buildResumeClaimMessage(fields));
     },
     // Payload binding (spec 8.3.9): sign the digest of the COMPLETE payload, bound to this authorization. OPTIONAL like
     // signLocalDecision; the guard refuses (fail closed) to send an unbound request when a binding was asked for and the
