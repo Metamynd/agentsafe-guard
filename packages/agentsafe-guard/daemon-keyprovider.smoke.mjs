@@ -66,11 +66,11 @@ async function main() {
 
     let threw = null;
     try {
-      await keyProvider.signLocalDecision({ ...fields, decision: 'quarantine' });
+      await keyProvider.signLocalDecision({ ...fields, decision: 'decommission' });
     } catch (err) {
       threw = err;
     }
-    check(threw !== null && threw.code === 'DAEMON_MALFORMED_REQUEST', 'the daemon itself rejects a non-reportable decision (e.g. "quarantine") even when asked over the real socket, not just in-process');
+    check(threw !== null && threw.code === 'DAEMON_MALFORMED_REQUEST', 'the daemon itself rejects a non-reportable decision (e.g. "decommission") even when asked over the real socket, not just in-process');
   }
 
   // --- payload binding through the REAL daemon (MAGP 8.3.9 / 8.3.11): before signer 0.15.0 a daemon-custody agent asked to bind

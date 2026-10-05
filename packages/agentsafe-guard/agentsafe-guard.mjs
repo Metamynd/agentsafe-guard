@@ -837,11 +837,11 @@ export function createGuard(opts = {}) {
     return _anchor;
   }
 
-  // Verdicts the backend's /policy/decisions/local will actually accept (local-decision.service.ts's
-  // LOCAL_DECISIONS) — 'quarantine'/'suspend' are containment, a SERVER-state decision whose audit
-  // trail already lives on the server (the `contained` flag this very evaluation read came FROM
-  // the server's own bundle response), so there is nothing new to report for those.
-  const REPORTABLE_LOCAL_DECISIONS = new Set(['allow', 'observe', 'block', 'escalate']);
+  // Verdicts the backend's /policy/decisions/local accepts (local-decision.service.ts's LOCAL_DECISIONS). Since 0.31.1 a
+  // containment refusal ('suspend' / 'quarantine', given from the server's own `contained` flag) is reported too: the
+  // containment is the server's state, but that a contained agent kept TRYING was recorded nowhere (pre-beta rerun 5,
+  // N-4). An issuer that predates it refuses the report, which is fire-and-forget, so nothing else changes there.
+  const REPORTABLE_LOCAL_DECISIONS = new Set(['allow', 'observe', 'block', 'escalate', 'suspend', 'quarantine']);
 
   /**
    * Best-effort, NEVER awaited by the caller: reports a purely-local verdict to the gate
