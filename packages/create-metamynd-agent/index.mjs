@@ -84,7 +84,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // Required: npm run resume relies on it (its file rename only covers one machine's working directory).
 // 0.29.0: .resume() runs only the CONTEXT the owner approved too (the escalation's contextDigest), so an approval of one
 // operation cannot be resumed as another. Required: with an issuer that binds it, the gateway claim needs the same context.
-const GUARD_VERSION = '^0.29.0';
+// 0.30.0: a local permit or containment refusal is only given on a bundle at most lifecycleMaxAgeMs (5 s) old, so a
+// suspension or reinstatement reaches a running agent within seconds, not within the bundle's 10-minute maxStaleness.
+const GUARD_VERSION = '^0.30.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
