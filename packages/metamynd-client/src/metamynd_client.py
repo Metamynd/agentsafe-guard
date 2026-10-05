@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.18.1"
+__version__ = "0.18.2"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1498,9 +1498,9 @@ class MetaMyndClient:
 
     def _settle_proof(self, verb: str, authorization_id: str, fields: list[str]) -> Optional[dict[str, str]]:
         """This agent's MAGP-SETTLE-v1 signature over settling its own unclaimed hold (MAGP §8.7.4). The gate accepts a
-        settlement of a hold nobody has claimed only from its agent, a counterparty the owner registered, or — for an open
-        testnet owner — anyone. None when the signer cannot sign one (a daemon older than signer 0.20.0): the call then goes
-        unsigned, as before."""
+        settlement of a hold nobody has claimed only from its agent or a counterparty the owner registered — on every owner,
+        an open testnet one included: an authorizationId alone settles nothing (COUNTERPARTY_AUTH_REQUIRED). None when the
+        signer cannot sign one (a daemon older than signer 0.20.0): the call then goes unsigned, and the gate refuses it."""
         nonce = secrets.token_hex(16)
         issued_at = utc_now_rfc3339()
         try:
