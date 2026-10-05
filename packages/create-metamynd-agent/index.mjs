@@ -82,7 +82,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // it with a full-amount capture. Required: every scaffolded agent calls its gateway, which claims and settles.
 // 0.28.0: .resume() takes the approval's one resume at the issuer, so two processes resuming it cannot both run the tool.
 // Required: npm run resume relies on it (its file rename only covers one machine's working directory).
-const GUARD_VERSION = '^0.28.0';
+// 0.29.0: .resume() runs only the CONTEXT the owner approved too (the escalation's contextDigest), so an approval of one
+// operation cannot be resumed as another. Required: with an issuer that binds it, the gateway claim needs the same context.
+const GUARD_VERSION = '^0.29.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -163,7 +165,10 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.25.0: honourApprovals — a Service without requireAuthorization (the value-less gateway) still runs an owner-approved
 // escalation, exactly once (MAGP §8.7.18). Required: the non-financial gateway sets it and asserts guard.honoursApprovals.
 // 0.26.0: a gateway judges the same derived risk floor as the gate (owner tier + amount share of the cap).
-const MCP_GUARD_VERSION = '^0.26.0';
+// 0.27.0: a claim of a person-approved hold states the digest of the context it executes (MAGP §9a.5), and a grant naming
+// another (or none) is released and refused. Required: the issuer refuses AUTHORIZATION_CONTEXT_REQUIRED to a claimer that
+// states none, so an older gateway could no longer run an approved escalation.
+const MCP_GUARD_VERSION = '^0.27.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -196,7 +201,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.23.0: refusals aggregated with their count, and `reportSpool` (both hosted templates set it); depends on agentsafe-mcp-guard ^0.24.0.
 // 0.24.0: depends on agentsafe-mcp-guard ^0.25.0 (one guard in the tree with MCP_GUARD_VERSION above). No template change.
 // 0.25.0: depends on agentsafe-mcp-guard ^0.26.0 (one guard in the tree). No template change.
-const GATEWAY_VERSION = '^0.25.0';
+// 0.26.0: depends on agentsafe-mcp-guard ^0.27.0 (the approved-context binding). Required with MCP_GUARD_VERSION above.
+const GATEWAY_VERSION = '^0.26.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `

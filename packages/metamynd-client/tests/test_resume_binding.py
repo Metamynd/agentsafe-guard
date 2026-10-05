@@ -13,7 +13,7 @@ import unittest
 
 from _support import new_agent_key
 from fake_gate import FakeGate
-from metamynd_client import GovernanceBlocked, MetaMyndClient, guard_agent_tool, guard_tool, resume_request_digest
+from metamynd_client import GovernanceBlocked, MetaMyndClient, approved_context_digest, guard_agent_tool, guard_tool, resume_request_digest
 
 VECTORS = pathlib.Path(__file__).resolve().parents[3] / "docs" / "protocol" / "resume-binding-vectors.json"
 FLIGHT = lambda airline, amount, risk="high": {"amount": amount, "merchant": airline, "context": {"riskLevel": risk},  # noqa: E731
@@ -27,6 +27,11 @@ class Vectors(unittest.TestCase):
             with self.subTest(v["name"]):
                 self.assertEqual(resume_request_digest(f["authorizationId"], f["action"], f.get("amount"), f.get("currency"),
                                                        f.get("merchant"), f.get("resource"), f.get("payloadDigest")), v["digest"])
+
+    def test_reproduces_every_context_vector(self) -> None:
+        for v in json.loads(VECTORS.read_text(encoding="utf-8"))["contextVectors"]:
+            with self.subTest(v["name"]):
+                self.assertEqual(approved_context_digest(v["context"]), v["digest"])
 
 
 class ResumeBinding(unittest.TestCase):
@@ -65,7 +70,17 @@ class ResumeBinding(unittest.TestCase):
                 hold = self.gate.holds[self.gate.escalations[esc]["authorizationId"]]
                 self.assertEqual(hold["state"], "held", "the approved hold is left for the right request")
 
-    def test_the_agents_risk_claim_is_not_part_of_the_binding(self) -> None:
+    def test_the_approved_context_is_bound_too_its_risk_level_included(self) -> None:
+        # F-1-NF (0.18.0): the context the owner approved is bound, so a resume that lowers the agent's risk claim is refused.
+        esc = self.approved_escalation()
+        with self.assertRaises(GovernanceBlocked) as refused:
+            self.book.resume(esc, "skyward-air", 5, "low")
+        self.assertEqual(refused.exception.verdict.reason_code, "ESCALATION_REQUEST_MISMATCH")
+        self.assertEqual(self.ran, [])
+        self.assertEqual(self.book.resume(esc, "skyward-air", 5, "high"), "booked")
+
+    def test_a_gate_that_predates_the_context_binding_checks_what_it_can(self) -> None:
+        self.gate.context_binding = False
         esc = self.approved_escalation()
         self.assertEqual(self.book.resume(esc, "skyward-air", 5, "low"), "booked")
 
@@ -80,6 +95,33 @@ class ResumeBinding(unittest.TestCase):
         self.gate.resume_binding = False
         esc = self.approved_escalation()
         self.assertEqual(self.book.resume(esc, "skyward-air", 5000), "booked")
+
+
+class ValuelessContextBinding(unittest.TestCase):
+    """F-1-NF (pre-beta rerun 5): an approval of read record-A was resumed as delete-all record-B and ran."""
+
+    def setUp(self) -> None:
+        key, seed = new_agent_key()
+        self.gate = FakeGate(key.public_key(), grants={"perform-action": 0.0})
+        self.client = MetaMyndClient(self.gate.start(), "did:key:z6MkResumeCtx", seed, timeout=5)
+        self.ran: list = []
+        self.act = guard_tool(self.client, "perform-action", lambda target, op: self.ran.append((target, op)) or "done",
+                              lambda target, op: {"context": {"riskLevel": "high", "target": target, "op": op}}, resume_timeout=2)
+
+    def tearDown(self) -> None:
+        self.gate.stop()
+
+    def test_an_altered_operation_is_refused_and_nothing_runs(self) -> None:
+        with self.assertRaises(GovernanceBlocked) as held:
+            self.act("record-A", "read")
+        esc = held.exception.verdict.escalation_id
+        self.gate.approve(esc)
+        with self.assertRaises(GovernanceBlocked) as refused:
+            self.act.resume(esc, "record-B", "delete-all")
+        self.assertEqual(refused.exception.verdict.reason_code, "ESCALATION_REQUEST_MISMATCH")
+        self.assertEqual(self.ran, [])
+        self.assertEqual(self.act.resume(esc, "record-A", "read"), "done")
+        self.assertEqual(self.ran, [("record-A", "read")])
 
 
 if __name__ == "__main__":

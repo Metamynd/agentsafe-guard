@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { buildAuthMessage } from './policy-core.mjs';
 import { buildHederaDid } from './magp-did.mjs';
 import { createA2aGuard, MAGP_A2A_EXTENSION_URI } from './agentsafe-a2a-guard.mjs';
+import { payloadDigestOf } from './payload-binding.mjs';
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
 const spki = publicKey.export({ type: 'spki', format: 'der' });
@@ -35,7 +36,10 @@ function mockIssuer(claim) {
   globalThis.fetch = async (url, opts) => {
     const path = String(url).replace(ISSUER, '');
     calls.push({ path, body: opts?.body ? JSON.parse(opts.body) : null });
-    const { status, body } = path.endsWith('/effect/dispatching') ? claim() : { status: 200, body: { success: true, data: {} } };
+    const sent = opts?.body ? JSON.parse(opts.body) : null;
+    const { status, body } = path.endsWith('/effect/dispatching') ? claim(sent) : { status: 200, body: { success: true, data: {} } };
+    // A current issuer names, on a person-approved grant, the context it compared the claim's with (§9a.5) — the one stated.
+    if (body?.data?.approvedByHuman === true && !('contextDigest' in body.data)) body.data.contextDigest = sent?.expect?.contextDigest;
     return { ok: status < 300, status, json: async () => body };
   };
   return { calls, restore: () => { globalThis.fetch = real; } };
@@ -54,6 +58,21 @@ test('the issuer says a person approved it: the escalated task executes, once', 
     assert.equal(d.reasonCode, 'ESCALATION_APPROVED');
     assert.equal(io.calls[0].body.requireHumanApproval, true);
   } finally { io.restore(); }
+});
+
+// F-1-NF (pre-beta rerun 5): a person-approved hold runs only the context that person approved (§9a.5).
+const contextDigestOf = (itinerary) => payloadDigestOf({ 'MAGP-APPROVED-CONTEXT-v1': itinerary ?? {} });
+test('the claim states the context digest; a person-approved grant naming another context (or none) is refused and released', async () => {
+  for (const contextDigest of [contextDigestOf({ riskLevel: 'high', target: 'other' }), undefined]) {
+    const io = mockIssuer(() => grant({ approvedByHuman: true, contextDigest }));
+    try {
+      const d = await mk().verifyRequest(envelope());
+      assert.equal(io.calls[0].body.expect.contextDigest, contextDigestOf({ riskLevel: 'high' }));
+      assert.equal(d.decision, 'block');
+      assert.equal(d.reasonCode, 'AUTHORIZATION_CONTEXT_MISMATCH');
+      assert.equal(io.calls.filter((c) => c.path.endsWith('/void')).length, 1);
+    } finally { io.restore(); }
+  }
 });
 
 test('no person approved it: still an escalate, hold untouched', async () => {

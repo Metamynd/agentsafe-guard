@@ -10,6 +10,8 @@ import crypto from 'node:crypto';
 import { buildAuthMessage } from './policy-core.mjs';
 import { buildHederaDid } from './magp-did.mjs';
 import { createMcpGuard } from './agentsafe-mcp-guard.mjs';
+import { readFileSync } from 'node:fs';
+import { payloadDigestOf } from './payload-binding.mjs';
 
 function mint(topic) {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
@@ -46,6 +48,9 @@ function issuer(claim) {
     calls.push({ url: String(url), body });
     if (/\/effect\/dispatching$/.test(String(url))) {
       const { status, body: out } = claim(body);
+      // A current issuer names, on a person-approved grant, the context it compared the claim's with (§9a.5) — here, the
+      // one the claim stated, as if it matched. A case that sets `contextDigest` itself plays another issuer.
+      if (out?.data?.approvedByHuman === true && !('contextDigest' in out.data)) out.data.contextDigest = body?.expect?.contextDigest;
       return { ok: status < 300, status, json: async () => out };
     }
     if (/\/void$/.test(String(url))) return { ok: true, status: 200, json: async () => ({ success: true, data: { voided: true } }) };
@@ -192,6 +197,58 @@ test('...but a loopback development issuer over http is fine', async () => {
   try {
     const r = await mk({ issuerApi: 'http://localhost:9926/api/v1' }).verifyRequest(signed({ authorizationId: 'auth-approved' }));
     assert.equal(r.decision, 'allow');
+  } finally { io.restore(); }
+});
+
+// F-1-NF (pre-beta rerun 5): an owner approved { target: 'record-A', op: 'read' }; the agent presented the hold with
+// { target: 'record-B', op: 'delete-all' } and this gateway ran it — the claim bound only what the hold spends. The claim now
+// states the digest of the context this gateway is about to execute, and a person-approved grant must name the same one.
+const contextDigestOf = (itinerary) => payloadDigestOf({ 'MAGP-APPROVED-CONTEXT-v1': itinerary ?? {} });
+function signedWith(itinerary, authorizationId) {
+  const r = signed({ amount: 0, authorizationId });
+  return { ...r, itinerary };
+}
+
+test('the claim states the digest of the context this gateway is about to execute (pinned by the protocol vectors)', async () => {
+  const io = issuer(() => grant({ approvedByHuman: true }));
+  try {
+    await mk().verifyRequest(signed({ authorizationId: 'auth-approved' }));
+    assert.equal(io.calls[0].body.expect.contextDigest, contextDigestOf({ riskLevel: 'high' }));
+    const v = JSON.parse(readFileSync(new URL('../../docs/protocol/resume-binding-vectors.json', import.meta.url), 'utf8'));
+    for (const c of v.contextVectors) assert.equal(contextDigestOf(c.context), c.digest, c.name);
+  } finally { io.restore(); }
+});
+
+test('the reproduced defect: the issuer refuses the altered context, so nothing executes', async () => {
+  const approved = contextDigestOf({ riskLevel: 'high', target: 'record-A', op: 'read' });
+  // The issuer, as it now behaves: a claim whose stated context is not the approved one is refused before it is claimed.
+  const io = issuer((b) => (b.expect?.contextDigest !== approved ? { status: 403, body: { success: false, message: 'AUTHORIZATION_CONTEXT_MISMATCH' } } : valueless({ approvedByHuman: true })));
+  try {
+    const g = mk({ requireAuthorization: false, honourApprovals: true });
+    const altered = await g.verifyRequest(signedWith({ riskLevel: 'high', target: 'record-B', op: 'delete-all' }, 'auth-read'));
+    assert.equal(altered.decision, 'block');
+    assert.equal(altered.reasonCode, 'AUTHORIZATION_CONTEXT_MISMATCH');
+    const same = await g.verifyRequest(signedWith({ riskLevel: 'high', target: 'record-A', op: 'read' }, 'auth-read'));
+    assert.equal(same.decision, 'allow');
+  } finally { io.restore(); }
+});
+
+test('an issuer that predates the binding (a person-approved grant naming no context): released and refused, never run', async () => {
+  const io = issuer(() => valueless({ approvedByHuman: true, contextDigest: undefined }));
+  try {
+    const r = await mk({ requireAuthorization: false, honourApprovals: true }).verifyRequest(signedWith({ riskLevel: 'high', target: 'record-B', op: 'delete-all' }, 'auth-old'));
+    assert.equal(r.decision, 'block');
+    assert.equal(r.reasonCode, 'AUTHORIZATION_CONTEXT_MISMATCH');
+    assert.equal(io.calls.filter((c) => /\/void$/.test(c.url)).length, 1, 'the claim it took is released');
+  } finally { io.restore(); }
+});
+
+test('a request lowered to "low" still presents a person-approved hold: the context it names is checked all the same', async () => {
+  const io = issuer(() => grant({ approvedByHuman: true, contextDigest: contextDigestOf({ riskLevel: 'high' }) }));
+  try {
+    const r = await mk().verifyRequest(signed({ riskLevel: 'low', authorizationId: 'auth-approved' }));
+    assert.equal(r.decision, 'block');
+    assert.equal(r.reasonCode, 'AUTHORIZATION_CONTEXT_MISMATCH');
   } finally { io.restore(); }
 });
 

@@ -97,6 +97,14 @@ function contextSignatureRefusal(signed, itinerary, required) {
 import { envelopeHashFor } from './governance-envelope.mjs';
 import { verifyBundle } from './magp-policy.mjs';
 import { PAYLOAD_DIGEST_HEADER, buildPayloadBindingMessage, claimDigestField, isPayloadDigest, payloadDigestOf, toWireJson } from './payload-binding.mjs';
+
+// The approved-context binding (MAGP §9a.5, pre-beta rerun 5 F-1-NF): a hold a PERSON approved is bound to the context
+// (itinerary) that person was shown. The claim states the digest of the context this Service is about to execute; the issuer
+// refuses any other. RFC 8785 canonical JSON under its own domain key, pinned by docs/protocol/resume-binding-vectors.json.
+const APPROVED_CONTEXT_DOMAIN = 'MAGP-APPROVED-CONTEXT-v1';
+function approvedContextDigest(context) {
+  return payloadDigestOf({ [APPROVED_CONTEXT_DOMAIN]: context ?? {} });
+}
 // fetch() with a 60 s keep-alive (metamynd.ai sits behind Cloudflare, which strips the Keep-Alive header, so the built-in
 // fetch would drop an idle connection after 4 s) — see keepalive-fetch.mjs.
 import { keepAliveFetch as fetch } from './keepalive-fetch.mjs';
@@ -446,6 +454,9 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
           payloadDigest: body?.data?.payloadDigest,
           // Whether a person approved this hold (§8.7.18). Only `true` counts; absent (an older issuer) is not an approval.
           approvedByHuman: body?.data?.approvedByHuman === true,
+          // For a person-approved hold, the digest of the context the person approved (§9a.5); absent from an issuer that
+          // predates the binding, which a reviewed claim then refuses rather than take as compared.
+          contextDigest: body?.data?.contextDigest,
           // The settlement token the issuer hands ONLY the caller whose claim succeeded. Once a hold is
           // claimed it can be settled below its amount, or voided, only with this token — so the skill
           // that executes must keep it and present it (captureAuthorization / releaseAuthorization).
@@ -729,7 +740,11 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         // The claim states the digest of what THIS receiver is about to execute — only when the agent bound one (a digest for an
         // unbound authorization is refused by the issuer: this receiver would be asserting a binding that does not exist).
         const claimDigest = payloadDigest !== undefined && signedDigest !== undefined ? payloadDigest : undefined;
-        const expect = { agentDid, action, ...(Number.isFinite(Number(amount)) ? { amount: Number(amount) } : {}), currency, merchant };
+        // The context this Service is about to execute (§9a.5): compared by the issuer for a hold a person approved.
+        let contextDigest;
+        // A context JSON cannot carry states none: the issuer then refuses it only for a hold a person approved (AUTHORIZATION_CONTEXT_REQUIRED).
+        try { contextDigest = approvedContextDigest(toWireJson(signed.itinerary ?? {})); } catch { contextDigest = undefined; }
+        const expect = { agentDid, action, ...(Number.isFinite(Number(amount)) ? { amount: Number(amount) } : {}), currency, merchant, contextDigest };
         const claim = await claimAuthorization({ authorizationId: signed.authorizationId, payloadDigest: claimDigest, x402: x402 === true, requireHumanApproval: reviewed, expect });
         claimToken = claim.claimToken; claimAuthenticated = claim.counterpartyAuthenticated === true;
         // A mismatch found only after the grant (an issuer that predates §8.7.19) must not strand the hold: release, then refuse.
@@ -758,6 +773,9 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         if (claim.amount !== undefined && Number(claim.amount) !== Number(amount)) return refuseClaimed('AUTHORIZATION_AMOUNT_MISMATCH');
         if (claim.currency !== undefined && claim.currency !== currency) return refuseClaimed('AUTHORIZATION_CURRENCY_MISMATCH');
         if (claim.merchant !== undefined && claim.merchant !== merchant) return refuseClaimed('AUTHORIZATION_MERCHANT_MISMATCH');
+        // A hold a person approved runs only the context that person approved (§9a.5). The issuer compared it before granting;
+        // a grant that names none comes from an issuer that predates the binding and did not, so it is refused, never trusted.
+        if (claim.approvedByHuman && (contextDigest === undefined || claim.contextDigest !== contextDigest)) return refuseClaimed('AUTHORIZATION_CONTEXT_MISMATCH');
       }
       return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
     } catch (err) {

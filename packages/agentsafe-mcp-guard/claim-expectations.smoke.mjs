@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import { buildAuthMessage } from './policy-core.mjs';
 import { buildHederaDid } from './magp-did.mjs';
 import { createMcpGuard } from './agentsafe-mcp-guard.mjs';
+import { payloadDigestOf } from './payload-binding.mjs';
 
 function mint(topic) {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
@@ -55,7 +56,9 @@ test('the claim states what this gateway is about to execute — the SIGNED valu
   const io = issuer(() => victimGrant());
   try {
     await mk(victim.did).verifyRequest(signedBy(victim));
-    assert.deepEqual(io.calls[0].body.expect, { agentDid: victim.did, action: 'flight-purchase', amount: 200, currency: 'USD', merchant: 'skyward-air' });
+    // ...and the context it is about to execute (here none: {}), which the issuer compares for a person-approved hold (§9a.5).
+    const contextDigest = payloadDigestOf({ 'MAGP-APPROVED-CONTEXT-v1': {} });
+    assert.deepEqual(io.calls[0].body.expect, { agentDid: victim.did, action: 'flight-purchase', amount: 200, currency: 'USD', merchant: 'skyward-air', contextDigest });
   } finally { io.restore(); }
 });
 
