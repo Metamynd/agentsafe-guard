@@ -1237,9 +1237,14 @@ if (process.argv[2] === '--resume') {
 `;
 }
 
-function exampleIndexNoGateway(scope, perTxnMax, currency, merchant, sandbox = false) {
+function exampleIndexNoGateway(scope, perTxnMax, currency, merchant, sandbox = false, merchantListed = true) {
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
+  // With no merchant list the issuer holds the FIRST payment to each merchant for review (new-merchant, MAGP 6.4.3), so step 1
+  // is a review, not a pass: say so rather than label it "Expected to pass" and then show ESCALATED (pre-beta rerun 4, F-5).
+  const step1Intent = merchantListed
+    ? `a ${currency} ${under} booking, low risk. Expected to pass.`
+    : `a ${currency} ${under} booking to ${merchant}, low risk. With no --merchants list, a FIRST payment to a merchant is held for your review, so expect ESCALATED.`;
   return `// index.mjs — your agent, governed by MetaMynd/AgentSafe.
 // Every governed tool call is checked (allow / block / escalate) before it runs.
 import { createGuardFromConfig } from '${GUARD_PKG}';
@@ -1345,7 +1350,9 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
     console.log(dim('     ' + WHY.AUTHORIZED));
   } catch (e) {
     const g = e.governance ?? {};
-    const why = WHY[g.reasonCode] ?? e.message;
+    // Risk the issuer derived (a first payment to a merchant, a large share of the cap, the owner's tier) names itself.
+    const derived = Array.isArray(g.riskSignals) && g.riskSignals.length ? 'held because MetaMynd derived the risk: ' + g.riskSignals.map((x) => x.detail ?? x.signal).join('; ') : null;
+    const why = derived ?? WHY[g.reasonCode] ?? e.message;
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
       console.log(dim('     ' + why));
@@ -1360,7 +1367,7 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
 
 console.log('');
 console.log(rule(66));
-await attempt(1, 'a ${currency} ${under} booking, low risk. Expected to pass.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
+await attempt(1, ${JSON.stringify(step1Intent)}, { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
 await attempt(2, 'a ${currency} ${over} booking, deliberately over the cap.', { amount: ${over}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
 await attempt(3, 'a ${currency} ${under} booking, but flagged high risk.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'high' });
 await attempt(
@@ -1408,9 +1415,14 @@ console.log('');
  * directly: it only exists in ./gateway, which independently re-verifies every request against
  * this agent's own policy bundle before it runs, and holds any real credentials the tool needs.
  */
-function exampleIndex(scope, perTxnMax, gatewayPort, currency, merchant) {
+function exampleIndex(scope, perTxnMax, gatewayPort, currency, merchant, merchantListed = true) {
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
+  // With no merchant list the issuer holds the FIRST payment to each merchant for review (new-merchant, MAGP 6.4.3), so step 1
+  // is a review, not a pass: say so rather than label it "Expected to pass" and then show ESCALATED (pre-beta rerun 4, F-5).
+  const step1Intent = merchantListed
+    ? `a ${currency} ${under} booking, low risk. Expected to pass.`
+    : `a ${currency} ${under} booking to ${merchant}, low risk. With no --merchants list, a FIRST payment to a merchant is held for your review, so expect ESCALATED.`;
   return `// index.mjs — your agent, governed by MetaMynd/AgentSafe.
 // Every governed tool call is checked TWICE before it runs: once here (fast, local, client-side),
 // and independently again by ./gateway — a SEPARATE process that holds the real tool and its
@@ -1554,7 +1566,9 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
     return true;
   } catch (e) {
     const g = e.governance ?? {};
-    const why = WHY[g.reasonCode] ?? e.message;
+    // Risk the issuer derived (a first payment to a merchant, a large share of the cap, the owner's tier) names itself.
+    const derived = Array.isArray(g.riskSignals) && g.riskSignals.length ? 'held because MetaMynd derived the risk: ' + g.riskSignals.map((x) => x.detail ?? x.signal).join('; ') : null;
+    const why = derived ?? WHY[g.reasonCode] ?? e.message;
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for a human - ' + g.reasonCode);
       console.log(dim('     ' + why));
@@ -1569,7 +1583,7 @@ async function attempt(n, intent, args, tool = gatedBookFlight) {
 
 console.log('');
 console.log(rule(66));
-const step1Ran = await attempt(1, 'a ${currency} ${under} booking, low risk. Expected to pass.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
+const step1Ran = await attempt(1, ${JSON.stringify(step1Intent)}, { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
 await attempt(2, 'a ${currency} ${over} booking, deliberately over the cap.', { amount: ${over}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'low' });
 await attempt(3, 'a ${currency} ${under} booking, but flagged high risk.', { amount: ${under}, currency: '${currency}', merchant: '${merchant}', riskLevel: 'high' });
 await attempt(
@@ -2588,7 +2602,7 @@ function assertScaffoldTarget(outDir, force) {
  */
 // `demo` (from buildPolicyCases) selects the NON-financial project; without it this is the historical
 // payment scaffold. `merchant` defaults to a payment demo's merchant only in that financial branch.
-function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'USD', merchant, sandbox, withGateway, gatewayPort = DEFAULT_GATEWAY_PORT, force = false, demo = null, gatewayIdentity = null }) {
+function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'USD', merchant, merchantListed = true, sandbox, withGateway, gatewayPort = DEFAULT_GATEWAY_PORT, force = false, demo = null, gatewayIdentity = null }) {
   const neutral = !!demo;
   assertScaffoldTarget(outDir, force);
   console.log(`\n  ${c.b('Scaffolding')} ${c.dim(outDir)}`);
@@ -2601,8 +2615,8 @@ function scaffoldProject({ outDir, config, slug, scope, perTxnMax, currency = 'U
     neutral
       ? exampleIndexNeutral({ scope, gatewayPort: withGateway ? gatewayPort : null, demo, merchant, sandbox: !!sandbox })
       : withGateway
-        ? exampleIndex(scope, perTxnMax, gatewayPort, currency, paymentMerchant)
-        : exampleIndexNoGateway(scope, perTxnMax, currency, paymentMerchant, !!sandbox),
+        ? exampleIndex(scope, perTxnMax, gatewayPort, currency, paymentMerchant, merchantListed)
+        : exampleIndexNoGateway(scope, perTxnMax, currency, paymentMerchant, !!sandbox, merchantListed),
     force,
   );
   // Resumable = the index carries the resume path (resumeBlock): every agent but the shared sandbox, where nobody can approve.
@@ -3502,7 +3516,9 @@ async function attempt(n, intent, action, args, tool = gatedBookFlight) {
     console.log(dim('     ' + WHY.AUTHORIZED));
   } catch (e) {
     const g = e.governance ?? {};
-    const why = WHY[g.reasonCode] ?? e.message;
+    // Risk the issuer derived (a first payment to a merchant, a large share of the cap, the owner's tier) names itself.
+    const derived = Array.isArray(g.riskSignals) && g.riskSignals.length ? 'held because MetaMynd derived the risk: ' + g.riskSignals.map((x) => x.detail ?? x.signal).join('; ') : null;
+    const why = derived ?? WHY[g.reasonCode] ?? e.message;
     if (g.decision === 'escalate') {
       console.log('\\x1b[33m     ESCALATED\\x1b[0m  held for you to approve - ' + g.reasonCode);
       console.log(dim('     ' + why));
@@ -4441,7 +4457,7 @@ async function main() {
   }
   if (!args['no-gateway'] && !(await ensurePolicyKey(config, config.apiBase ?? base))) keepConfigAndFail(outDir, config, NO_POLICY_KEY(base));
   if (!args['no-gateway'] && !(await ensureOwnerPrincipal(config, config.apiBase || base))) keepConfigAndFail(outDir, config, NO_OWNER_PRINCIPAL(base));
-  scaffoldProject({ demo, outDir, config, slug, scope, perTxnMax, currency, merchant: financial ? merchants[0] || 'demo-merchant' : merchants[0], sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force, gatewayIdentity });
+  scaffoldProject({ demo, outDir, config, slug, scope, perTxnMax, currency, merchant: financial ? merchants[0] || 'demo-merchant' : merchants[0], merchantListed: merchants.length > 0, sandbox: false, withGateway: !args['no-gateway'], gatewayPort: Number(args['gateway-port']) || DEFAULT_GATEWAY_PORT, force: !!args.force, gatewayIdentity });
 }
 
 // Exported so the smoke tests can exercise the generators directly. Importing this file must not
