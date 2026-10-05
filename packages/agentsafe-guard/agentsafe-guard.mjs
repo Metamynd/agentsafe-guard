@@ -393,6 +393,11 @@ export function createGuard(opts = {}) {
   let _bundle = null;
   let _bundleAt = 0;
   let _bundleMaxAgeMs = 10 * 60 * 1000; // overwritten by the bundle's maxStaleness
+  // How old a cached bundle may be for a LOCAL permit or containment refusal (0.30.0, rerun 5 N-1): the agent's live state
+  // (suspended, reinstated, rules edited) reaches this process within this window, not within maxStaleness. 0 = every time.
+  const lifecycleMaxAgeOpt = opts.lifecycleMaxAgeMs ?? cfg?.lifecycleMaxAgeMs;
+  const lifecycleMaxAgeMs = typeof lifecycleMaxAgeOpt === 'number' && Number.isFinite(lifecycleMaxAgeOpt) ? Math.max(0, lifecycleMaxAgeOpt) : 5_000;
+  let _bundleRefresh = null; // one forced re-fetch shared by every call that finds the bundle too old at once
   let _anchor = null;
   let _anchorAt = 0;
   let _highestSeq = 0; // monotonic: never accept a mirror response with fewer policy ops than seen
@@ -889,8 +894,27 @@ export function createGuard(opts = {}) {
    * MUST be server-side); set `sealValueActions:false` for pure offline. If the bundle
    * can't be loaded, defers to the authoritative remote gate rather than blind-allow.
    */
-  async function authorizeLocal(input) {
+  function authorizeLocal(input) {
+    return authorizeLocalOn(input, false);
+  }
+  async function authorizeLocalOn(input, refreshed) {
     const { action, amount = 0 } = input;
+    // A local PERMIT, or a local refusal for containment, rests on the agent's live state (suspended, quarantined, the
+    // rules as they stand) — which the cached bundle may have outlived: it is kept for its maxStaleness (10 minutes), so a
+    // suspended agent's process kept permitting value-less calls, and a reinstated one kept refusing, for that long
+    // (pre-beta rerun 5, N-1). Such a verdict is only given on a bundle younger than `lifecycleMaxAgeMs` (5 s by default);
+    // an older one is fetched again first, and if that fails the authoritative gate decides. A rule BLOCK is still decided
+    // on the cached bundle with no network: refusing on slightly older rules can only refuse more, not run anything.
+    const onFreshBundle = async (decide) => {
+      if (refreshed || Date.now() - _bundleAt <= lifecycleMaxAgeMs) return decide();
+      try {
+        _bundleRefresh ??= loadBundle(true).finally(() => { _bundleRefresh = null; });
+        await _bundleRefresh;
+      } catch {
+        return authorize(input);
+      }
+      return authorizeLocalOn(input, true);
+    };
     try {
       normalizeJurisdiction(input.jurisdiction);
     } catch (err) {
@@ -922,11 +946,13 @@ export function createGuard(opts = {}) {
     if (!mandateFound) {
       const contained = bundleForAction.contained;
       if (contained && contained.status) {
-        const decision = contained.status === 'quarantined' ? 'quarantine' : 'suspend';
-        const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
-        const local = { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
-        reportLocalDecision(action, local.decision, local.reasonCode, input);
-        return local;
+        return onFreshBundle(() => {
+          const decision = contained.status === 'quarantined' ? 'quarantine' : 'suspend';
+          const reasonCode = contained.status === 'quarantined' ? 'AGENT_QUARANTINED' : 'AGENT_SUSPENDED';
+          const local = { decision, reasonCode, authorizationId: null, remaining: null, proofRef: null };
+          reportLocalDecision(action, local.decision, local.reasonCode, input);
+          return local;
+        });
       }
       const local = { decision: 'block', reasonCode: revoked ? 'MANDATE_REVOKED' : anyMandates ? 'NO_PERMISSION_FOR_ACTION' : 'NO_MANDATE', authorizationId: null, remaining: null, proofRef: null };
       reportLocalDecision(action, local.decision, local.reasonCode, input);
@@ -942,13 +968,17 @@ export function createGuard(opts = {}) {
     if (local.decision === 'escalate' && sealValueActions) return authorize(input);
     // allow/observe both PERMIT; block/contain (and an offline escalate) are decided locally with no network.
     const permits = local.decision === 'allow' || local.decision === 'observe';
-    if (!permits) {
+    const containment = local.decision === 'suspend' || local.decision === 'quarantine';
+    if (!permits && !containment) {
       reportLocalDecision(action, local.decision, local.reasonCode, input); // fire-and-forget — see above
       return local; // denied/escalated locally, no network
     }
-    if (amount > 0 && sealValueActions) return authorize(input); // seal value action remotely (allow or observe)
-    reportLocalDecision(action, local.decision, local.reasonCode, input); // non-value permit — fire-and-forget
-    return local; // non-value permit — local is sufficient
+    if (permits && amount > 0 && sealValueActions) return authorize(input); // seal value action remotely (allow or observe)
+    // A non-value permit, or a containment refusal: only on a fresh bundle (see onFreshBundle above).
+    return onFreshBundle(() => {
+      reportLocalDecision(action, local.decision, local.reasonCode, input); // fire-and-forget
+      return local; // local is sufficient
+    });
   }
 
   /** Mode-aware decision used by guardTool: 'local' (default) or 'remote'. */

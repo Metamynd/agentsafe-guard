@@ -372,9 +372,17 @@ const guard = await createGuardFromConfig('./agent.metamynd.json', { verifyOnCha
 await guard.policyAnchor(); // → { sigDigest, seq } read from Hedera (or null)
 ```
 
+### How fast a change reaches a running agent (`lifecycleMaxAgeMs`)
+
+A local decision that PERMITS a call, or refuses it because the agent is suspended or quarantined, is only given on a
+bundle at most `lifecycleMaxAgeMs` old (default **5 s**, since 0.30.0); an older one is fetched again first, and if that
+fetch fails the gate decides. So an owner's suspension, reinstatement or rule edit reaches a running agent within
+seconds. A rule BLOCK is still decided on the cached bundle with no network — refusing on slightly older rules can only
+refuse more. `createGuard({ ..., lifecycleMaxAgeMs: 0 })` re-fetches for every such decision.
+
 ### Push invalidation (`watchPolicy`)
 
-By default a rule change is picked up within the bundle's `maxStaleness` (or on the
+Every other decision picks a rule change up within the bundle's `maxStaleness` (or on the
 next on-chain check). `guard.watchPolicy()` subscribes to a Server-Sent-Events stream
 (`GET /policy/events/:did`, zero-dep — plain `fetch`) so a change **invalidates the
 guard's cache in ~1s** and the next call re-fetches (and re-verifies) the new rules.
