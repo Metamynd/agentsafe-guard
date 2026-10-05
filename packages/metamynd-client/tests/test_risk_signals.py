@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from metamynd_client import GovernanceRefusal, Verdict, _refusal_message
+from metamynd_client import GovernanceBlocked, GovernanceRefusal, Verdict, _refusal_message
 
 SIGNAL = {"signal": "amount-share", "level": "high", "detail": "70% of the 150 per-transaction cap (review from 70%)"}
 
@@ -33,6 +33,12 @@ class RiskSignals(unittest.TestCase):
         self.assertEqual(v.risk_signals, [])
         self.assertNotIn("derived", _refusal_message(v, "flight-purchase"))
         self.assertNotIn("riskSignals", GovernanceRefusal(v, "flight-purchase"), "every other refusal keeps its shape")
+
+    def test_the_raised_exception_names_it_too(self) -> None:
+        # FW N-1 (pre-beta rerun 5): Node's thrown message named the derived risk, Python's raised one did not.
+        raised = str(GovernanceBlocked(escalated(riskSignals=[SIGNAL]), "flight-purchase"))
+        self.assertIn("escalate/RISK_REVIEW (risk derived by the issuer: amount-share: 70% of the 150 per-transaction cap", raised)
+        self.assertEqual(str(GovernanceBlocked(escalated(), "flight-purchase")), "flight-purchase refused: escalate/RISK_REVIEW")
 
     def test_anything_that_is_not_a_list_of_objects_is_ignored(self) -> None:
         self.assertEqual(escalated(riskSignals="high").risk_signals, [])

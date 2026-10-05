@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.18.0"
+__version__ = "0.18.1"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1635,7 +1635,11 @@ class GovernanceBlocked(RuntimeError):
     """Raised instead of running a tool the gate did not permit."""
 
     def __init__(self, verdict: Verdict, action: str):
-        super().__init__(f"{action} refused: {verdict.decision}/{verdict.reason_code}")
+        # Name the risk the issuer derived, as the Node guard's message does (0.18.1; pre-beta rerun 5, FW N-1): a $200
+        # "low" booking held for review otherwise reads as an unexplained RISK_REVIEW.
+        derived = "; ".join(f"{s.get('signal')}: {s.get('detail') or s.get('level')}" for s in (verdict.risk_signals or []))
+        why = f" (risk derived by the issuer: {derived})" if derived else ""
+        super().__init__(f"{action} refused: {verdict.decision}/{verdict.reason_code}{why}")
         self.verdict = verdict
         self.action = action
 
