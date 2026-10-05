@@ -2120,7 +2120,7 @@ the check itself: a client-side convenience, not a boundary. Anything able to ca
 directly gets the same result the gate would have given it. If this tool ever holds a real credential,
 re-scaffold without \`--no-gateway\` so it lives behind a separate process instead.`}
 
-Full integration guide: \`docs/integration/INTEGRATE-WITH-METAMYND.md\`.
+Full integration guide: https://metamynd.ai/developers/integrate
 `;
 }
 
@@ -2146,7 +2146,7 @@ function exampleReadme(slug, scope, withGateway, gatewayPort, daemonKey = false,
   const configFileLine = daemonKey
     ? `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
   **Holds no secret key.** Signing goes through your already-running agentsafe-signer daemon
-  (\`daemonSocketPath\`) instead — see \`docs/integration/INSTALL-AGENTSAFE-SIGNER.md\`. Context signing (on by default) signs through the daemon too; use agentsafe-signer 0.19.0 or later (an older one refuses this agent's no-amount requests with CONTEXT_SIGNING_UNSUPPORTED).${withGateway ? ' Payload binding is on by default and signs through the daemon too, which needs agentsafe-signer 0.15.0 or later.' : ''}`
+  (\`daemonSocketPath\`) instead — see https://www.npmjs.com/package/@metamynd/agentsafe-signer and https://metamynd.ai/developers/identity. Context signing (on by default) signs through the daemon too; use agentsafe-signer 0.19.0 or later (an older one refuses this agent's no-amount requests with CONTEXT_SIGNING_UNSUPPORTED).${withGateway ? ' Payload binding is on by default and signs through the daemon too, which needs agentsafe-signer 0.15.0 or later.' : ''}`
     : `- \`agent.metamynd.json\` — your portable guard config (identity, mandate scope \`${scope}\`, issuer keys).
   **Contains the agent's secret key — never commit it.** It is already in \`.gitignore\`.`;
   const gatewaySection = withGateway
@@ -2238,7 +2238,7 @@ ${clonedFreshSection(daemonKey)}
 
 ${changeRulesSection(sandbox, !sandbox)}
 
-Full integration guide: \`docs/integration/INTEGRATE-WITH-METAMYND.md\`.
+Full integration guide: https://metamynd.ai/developers/integrate
 `;
 }
 
