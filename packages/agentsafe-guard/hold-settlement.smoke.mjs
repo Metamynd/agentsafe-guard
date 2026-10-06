@@ -215,6 +215,24 @@ await check('a second .resume() of the same approved escalation is refused AUTHO
   } finally { f.restore(); }
 });
 
+// Pre-beta rerun 6 (resume-status nit): an in-process resume of an action that spends nothing used to leave its hold unsettled,
+// so a repeat resume reached the issuer's claim and was told AUTHORIZATION_IN_USE. Since 0.33.1 (FW6-4) the hold is settled
+// at 0 once the tool ran, and the repeat is AUTHORIZATION_ALREADY_USED without a claim.
+await check('a resume of an action that spends nothing settles its hold at 0, so a repeat resume is AUTHORIZATION_ALREADY_USED', async () => {
+  const f = fakeIssuer({ escalation: [{ status: 'approved', reasonCode: 'ESCALATION_APPROVED', authorizationId: 'auth-nf' }] });
+  try {
+    let runs = 0;
+    const perms = guard.guardTool('permissions.update', async () => { runs++; return { ok: true }; }, (a) => ({ context: { riskLevel: 'high', target: a.target } }));
+    await perms.resume('esc-1', { target: 'record-A' }, { intervalMs: 10 });
+    const cap = f.calls.find((c) => c.url.endsWith('/authorize/auth-nf/capture'));
+    assert.ok(cap, 'the hold is captured');
+    assert.equal(cap.body.amountCharged, 0);
+    const err = await perms.resume('esc-1', { target: 'record-A' }, { intervalMs: 10 }).catch((e) => e);
+    assert.equal(err.governance?.reasonCode, 'AUTHORIZATION_ALREADY_USED');
+    assert.equal(runs, 1);
+  } finally { f.restore(); }
+});
+
 await check("a refusal raised by a NESTED guarded call keeps the outer hold (the outer tool may already have acted)", async () => {
   const f = fakeIssuer();
   try {

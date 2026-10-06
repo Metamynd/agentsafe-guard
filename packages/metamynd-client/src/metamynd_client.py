@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -738,6 +738,22 @@ class EscalationStatus:
     def may_proceed(self) -> bool:
         """The ONLY condition under which the held action may run."""
         return self.status == "approved" and bool(self.authorization_id)
+
+    @property
+    def executed(self) -> Optional[bool]:
+        """Whether something ran, or may have run, under the approval (0.21.0, pre-beta rerun 6 resume-status nit). `status`
+        stays `approved` after the action ran, so this says it. None from a gate that predates the field."""
+        value = self.raw.get("executed")
+        return value if isinstance(value, bool) else None
+
+    @property
+    def executed_at(self) -> Optional[str]:
+        return self.raw.get("executedAt")
+
+    @property
+    def outcome(self) -> Optional[str]:
+        """The approval's hold outcome, as `client.outcome()` reports it (not_started, settled, ...), or None."""
+        return self.raw.get("outcome")
 
 
 @dataclass(frozen=True)
