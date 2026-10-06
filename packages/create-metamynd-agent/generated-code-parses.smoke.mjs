@@ -101,8 +101,14 @@ check('hosted financial agent: one `body`, and the signed payload is the body it
     const agent = readFileSync(join(out, 'index.mjs'), 'utf8');
     const decls = agent.match(/^\s*const body\b/gm) ?? [];
     assert.ok(decls.length <= 1, `\`const body\` is declared ${decls.length} times`);
-    assert.match(agent, /payload,\r?\n\s*\}\);/, 'the request handed to the gateway signs `payload`');
+    // The request the gateway gets is the guarded call's own, via decision.governanceHeaders() (guard 0.31; pre-beta
+    // rerun 6, FW6-2): the gatedBookFlight mapping signs the payload, and bookFlightViaGateway sends that same body.
+    const PAYLOAD = "{ amount: a.amount, merchant: a.merchant, currency: a.currency ?? 'USD' }";
+    assert.ok(agent.includes('payload: ' + PAYLOAD), 'the guarded call signs the body as its `payload`');
+    assert.ok(agent.includes("const payload = { amount: args.amount, merchant: args.merchant, currency: args.currency ?? 'USD' };"), 'the gateway call builds the same body');
     assert.match(agent, /body: JSON\.stringify\(payload\)/, 'and sends exactly that');
+    assert.match(agent, /\.\.\.\(await decision\.governanceHeaders\(\)\)/, 'the gateway gets the decision\'s own governance headers');
+    assert.doesNotMatch(agent, /buildSignedRequest|signed\.authorizationId/, 'the agent no longer rebuilds or re-signs the request by hand');
   } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
