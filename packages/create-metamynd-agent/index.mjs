@@ -87,7 +87,8 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.30.0: a local permit or containment refusal is only given on a bundle at most lifecycleMaxAgeMs (5 s) old, so a
 // suspension or reinstatement reaches a running agent within seconds, not within the bundle's 10-minute maxStaleness.
 // 0.31.0: a guarded tool's decision carries governanceHeaders() — the signed request and its authorization, ready for a
-// gateway — so a tool no longer rebuilds and re-signs it. The scaffold's own gateway calls still build it themselves.
+// gateway — so a tool no longer rebuilds and re-signs it. Required: the scaffold's gateway calls (bookFlightViaGateway,
+// performViaGateway, and npm run resume through them) send decision.governanceHeaders() (pre-beta rerun 6, FW6-2).
 const GUARD_VERSION = '^0.31.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
@@ -1452,24 +1453,17 @@ const GATEWAY = process.env.GATEWAY_URL || 'http://localhost:${gatewayPort}';
 // --- value-bearing action (sealValueActions, on by default) — its authorizationId is what lets
 // --- the gateway atomically claim single-use execution, closing replay + cumulative spend, not
 // --- just re-checking policy. See ./gateway/README.md.
+// --- decision.governanceHeaders() is that verdict as headers: the SAME request the gate checked (the
+// --- gatedBookFlight mapping below, payload included), freshly signed, carrying its authorizationId.
+// --- So this file never rebuilds or re-signs the request, and an approved escalation resumed with
+// --- gatedBookFlight.resume() reaches the gateway with the approval's authorization the same way.
 async function bookFlightViaGateway(args, decision) {
-  // The COMPLETE body the tool receives. It is signed as a payload (MAGP 8.3.9): the eight signed fields cover amount and
-  // merchant, not anything else a real tool takes (a payee, a passenger list). The digest covers ALL of it, and the gateway
-  // refuses to run the tool on a body that is not exactly this one.
+  // The COMPLETE body the tool receives — the payload gatedBookFlight signs (MAGP 8.3.9). The gateway refuses to run the
+  // tool on a body that is not exactly the one signed, so keep this in step with the mapping below if you add a field.
   const payload = { amount: args.amount, merchant: args.merchant, currency: args.currency ?? '${currency}' };
-  const signed = await guard.buildSignedRequest({
-    action: '${scope}',
-    amount: args.amount,
-    currency: args.currency ?? '${currency}',
-    merchant: args.merchant,
-    // Passed through as-is (never defaulted): a missing riskLevel must reach the gateway as missing.
-    context: { tool: 'book-flight', riskLevel: args.riskLevel },
-    payload,
-  });
-  signed.authorizationId = decision?.authorizationId;
   const res = await fetch(GATEWAY + '/book-flight', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) },
+    headers: { 'content-type': 'application/json', ...(await decision.governanceHeaders()) },
     body: JSON.stringify(payload),
   });
   const body = await res.json().catch(() => null);
@@ -1496,7 +1490,9 @@ const gatedBookFlight = guard.guardTool(
     // the action for review — never 'low'.
     context: { tool: 'book-flight', riskLevel: a.riskLevel },
     // The authorization is bound to the SAME body bookFlightViaGateway() sends, so the gate records what this agent
-    // signed and the gateway can prove it is running exactly that. Keep the two in step if you add a field.
+    // signed and the gateway can prove it is running exactly that. This mapping is also what governanceHeaders() signs
+    // for the gateway (riskLevel passed through as-is: a missing one reaches the gateway as missing). Keep the two in
+    // step if you add a field.
     payload: { amount: a.amount, merchant: a.merchant, currency: a.currency ?? '${currency}' },
   }),
 );
@@ -1690,13 +1686,14 @@ ${withGateway ? `const GATEWAY = process.env.GATEWAY_URL || 'http://localhost:${
 // --- Calls the gateway process instead of a local function. There is no raw performAction() in
 // --- this file to call directly — the tool, and any real credentials it needs, live only in
 // --- ./gateway, which independently re-verifies this signed request itself.
+// --- decision.governanceHeaders() is the request gatedAction checked (its jurisdiction SIGNED, a top-level
+// --- field, never context), freshly signed, with the authorization it was granted (none for a value-less
+// --- action — see ./gateway/README.md). So this file never rebuilds or re-signs it, and npm run resume
+// --- reaches the gateway through here the same way.
 async function performViaGateway(args, decision) {
-  const { jurisdiction, ...context } = args; // the jurisdiction is SIGNED (a top-level field), never context
-  const signed = await guard.buildSignedRequest({ action: '${scope}', merchant: MERCHANT, jurisdiction, context });
-  signed.authorizationId = decision?.authorizationId; // none for a value-less action — see ./gateway/README.md
   const res = await fetch(GATEWAY + '/perform', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-magp-request': JSON.stringify(signed) },
+    headers: { 'content-type': 'application/json', ...(await decision.governanceHeaders()) },
     body: '{}', // this tool reads nothing from the body; the request's fields travel in the SIGNED context
   });
   const body = await res.json().catch(() => null);

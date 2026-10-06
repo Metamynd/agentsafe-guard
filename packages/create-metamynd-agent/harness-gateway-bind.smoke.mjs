@@ -253,7 +253,9 @@ await check('hosted financial scaffold: agent body and gateway allowedFields agr
   assert.doesNotMatch(agent, /body: JSON\.stringify\(args\)/, 'the agent must not ship its whole argument object to the gateway');
   // Payload binding is ON: the body the agent sends is signed as the payload, the authorization made by guardTool is bound to the
   // same body, and the gateway refuses a request that bound none.
-  assert.match(agent, /^\s+payload,\r?$/m, 'the request handed to the gateway signs the body as its payload');
+  // The request handed to the gateway is the guarded call's own (decision.governanceHeaders(), guard 0.31; pre-beta rerun 6,
+  // FW6-2), so the payload it signs is the one in the guardTool mapping below.
+  assert.match(agent, /\.\.\.\(await decision\.governanceHeaders\(\)\)/, 'the request handed to the gateway is the decision\'s own, payload bound');
   assert.match(agent, /payload: \{ amount: a\.amount, merchant: a\.merchant, currency: a\.currency \?\? /, 'the authorization is bound to the same body');
   assert.match(gw, /requirePayloadBinding: true/, 'the gateway refuses an unbound request');
   rmSync(out, { recursive: true, force: true });
