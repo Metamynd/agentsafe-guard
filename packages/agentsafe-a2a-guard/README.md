@@ -214,6 +214,16 @@ anyone the registry is open and no service is refused; registering the first one
 same check: `COUNTERPARTY_NOT_ALLOWED_FOR_MERCHANT` (the entry is scoped and this hold's merchant is not in scope) and
 `COUNTERPARTY_MISMATCH` (a settlement call was signed by someone other than the service that claimed the hold).
 
+### A refused claim says why — since 0.19.1
+
+When the issuer refuses a claim (`requireAuthorization`, or an approval claimed for an escalated task), the block
+`verifyRequest` returns carries the issuer's sentence as `detail`, the refusal `TaskStatus` relays it in its MAGP metadata
+(`message.metadata[MAGP_A2A_EXTENSION_URI].detail`), and this agent logs one line: `[a2a-guard] the issuer refused the claim
+of authorization …`. A refusal `ESCALATION_NOT_APPROVED` on an approval claim is routine (the task still needs a person) and
+is not logged. An `AUTHORIZATION_CONTEXT_REQUIRED` refusal is what a version older than 0.18.0 gets for a person-approved
+hold — it states no approved context — and its detail says which version to upgrade to. Branch on `reasonCode`, never on
+`detail`. Same behaviour as `@metamynd/agentsafe-mcp-guard` 0.29.0.
+
 ### Proving who you are (0.3.0)
 
 Pass `serviceDid` (a `did:key` / `did:hedera`) and `serviceKey` (the matching Ed25519 private key) and the
