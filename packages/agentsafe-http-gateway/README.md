@@ -66,6 +66,14 @@ It needs a self-certifying `serviceDid` with its key (`SERVICE_DID` / `SERVICE_K
 counterparty — `create-metamynd-agent` does both. Reports run in the background (`drainSettlements` waits for them) and
 never change a response; a failure is logged once per reason.
 
+## A refused claim says why — since 0.28.0
+
+When the issuer refuses this gateway's claim of an authorization, the `403` body carries the issuer's sentence as `detail`
+beside `reasonCode`, and the gateway logs it in one line (through agentsafe-mcp-guard 0.29.0). For
+`AUTHORIZATION_CONTEXT_REQUIRED` that sentence names the gateway versions that state the approved context (an older gateway
+cannot run a person-approved request, MAGP §8.7.20); the agent's guard (0.34.0+) keeps the approval for a resume after the
+upgrade instead of voiding it.
+
 ## Query strings are refused on governed routes — since 0.17.1
 
 **0.17.1 — a governed route refuses a URL query string the signature does not cover (`403 QUERY_NOT_BOUND`).** The

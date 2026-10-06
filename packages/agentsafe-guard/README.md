@@ -744,6 +744,15 @@ them. Since 0.32.0 the resume claim is signed as `MAGP-RESUME-CLAIM-v2`, which a
 says so on the status (`resumeClaimVersion: 2`) and refuses a v1 claim — which guard 0.28–0.31 sign — with
 `AUTHORIZATION_CONTEXT_REQUIRED`: upgrade to 0.32.0 to resume approvals there.
 
+**A gateway too old to run an approval** (0.34.0). A gateway older than agentsafe-mcp-guard 0.27.0 / agentsafe-http-gateway
+0.26.0 / agentsafe-a2a-guard 0.18.0 does not state the approved context when it claims, so the issuer refuses its claim
+`AUTHORIZATION_CONTEXT_REQUIRED` and it runs nothing. When the tool's error carries that code (`err.governance.reasonCode`,
+`err.reasonCode` or `err.code`), `.resume()` does **not** void the approval's hold: the error gets `upgradeRequired: true`,
+`holdKept: true` and a `detail` naming the gateway versions, and one log line says it. The issuer re-opens the approval's one
+resume for that refusal, so once the gateway is upgraded, `.resume()` with the same args runs it — no second approval. An
+approval whose hold *was* voided (by an older guard, its owner, a revoke) is refused `AUTHORIZATION_VOIDED` — its owner must
+approve again — rather than `AUTHORIZATION_ALREADY_USED`, which is kept for an approval that was really spent.
+
 **An authorize whose answer never arrived** (a timeout, a dropped connection, a proxy's 5xx) may still have minted a hold:
 the gate commits it whether or not anyone is waiting, and nothing could use or settle it until its TTL. Since 0.22.0 the
 guard looks it up by the request's nonce (`GET /policy/mandate/authorize/by-request`) after 2, 10 and 30 seconds and

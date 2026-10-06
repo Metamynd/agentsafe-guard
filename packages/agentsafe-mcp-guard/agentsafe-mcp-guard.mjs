@@ -442,7 +442,15 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         // "an overlapping attempt of yours is mid-claim, ask again", which is not a refusal.
         const ambiguous = res.status >= 500 || (res.status === 409 && body?.message === 'EFFECT_TRANSITION_CONTENDED');
         if (ambiguous && attempt < attempts) { lastError = `HTTP ${res.status}`; await sleep(150); continue; }
-        if (!res.ok) return { claimed: false, reasonCode: refusalCode(body, `AUTHORIZATION_CLAIM_HTTP_${res.status}`) };
+        if (!res.ok) {
+          const reasonCode = refusalCode(body, `AUTHORIZATION_CLAIM_HTTP_${res.status}`);
+          // The issuer's sentence for the refusal (0.29.0, pre-beta rerun 6 FW6-1): an older gateway relayed only the code and
+          // logged nothing, so "AUTHORIZATION_CONTEXT_REQUIRED" was all a developer saw. One line in this Service's log, and the
+          // detail travels with the refusal. ESCALATION_NOT_APPROVED is routine here (the request still needs a person): no line.
+          const detail = typeof body?.data?.detail === 'string' && body.data.detail ? body.data.detail.slice(0, 600) : undefined;
+          if (reasonCode !== 'ESCALATION_NOT_APPROVED') console.warn(`[mcp-guard] the issuer refused the claim of authorization ${authorizationId}: ${detail && detail !== reasonCode ? detail : reasonCode}`);
+          return { claimed: false, reasonCode, ...(detail ? { detail } : {}) };
+        }
         return {
           claimed: true,
           agentDid: body?.data?.agentDid,
@@ -984,7 +992,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         };
         // No person approved this hold: the request still needs one, exactly as before — the agent escalates and waits.
         if (reviewed && claim.reasonCode === 'ESCALATION_NOT_APPROVED') return final;
-        if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
+        if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode, ...(claim.detail ? { detail: claim.detail } : {}) };
         if (reviewed) {
           if (!claim.approvedByHuman) {
             // Granted without saying a person approved it — an issuer that predates §8.7.18 ignored the flag. Never execute

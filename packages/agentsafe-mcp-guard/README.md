@@ -582,6 +582,15 @@ field is present and v1 when it is absent, never the other: a jurisdiction strip
   the issuer's gate only, at authorize or claim — `JURISDICTION_MISMATCH`: **a registered payee's country wins**, and a
   signed value that differs is refused.
 
+### A refused claim says why — since 0.29.0
+
+When the issuer refuses a claim (`requireAuthorization`, or an approval claimed under `honourApprovals`), the block
+`verifyRequest` returns carries the issuer's sentence as `detail` (and `guardIncomingTool`'s `GovernanceBlocked` has it in
+`err.governance.detail`), and this Service logs one line: `[mcp-guard] the issuer refused the claim of authorization …`. A
+refusal `ESCALATION_NOT_APPROVED` on an approval claim is routine (the request still needs a person) and is not logged. An
+`AUTHORIZATION_CONTEXT_REQUIRED` refusal is what a version older than 0.27.0 gets for a person-approved hold — it states no
+approved context — and its detail says which version to upgrade to.
+
 ### The agent's context signature (`envelopeSignature`, `requireContextSignature`) — since 0.17.0
 
 The itinerary (and `trace` / `materiality`) is not in the signed message, so anything between the agent and this

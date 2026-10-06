@@ -244,6 +244,29 @@ test('the issuer being unreachable fails CLOSED', async () => {
   } finally { globalThis.fetch = realFetch; }
 });
 
+// Pre-beta rerun 6 FW6-1: an issuer's refusal of the claim carries a `detail` (for AUTHORIZATION_CONTEXT_REQUIRED, which gateway
+// to upgrade). The gateway logs it in one line and the block carries it, so the agent's tool can surface it.
+test('a refused claim carries the issuer detail on the block and logs one line', async () => {
+  const detail = 'AUTHORIZATION_CONTEXT_REQUIRED: ... Upgrade the gateway: @metamynd/agentsafe-mcp-guard >= 0.27.0';
+  const restore = withMockClaim(() => ({ status: 403, body: { success: false, message: 'AUTHORIZATION_CONTEXT_REQUIRED', data: { reasonCode: 'AUTHORIZATION_CONTEXT_REQUIRED', detail } } }));
+  const warn = console.warn; const lines = []; console.warn = (...a) => lines.push(a.join(' '));
+  try {
+    const r = await mk().verifyRequest(signedRequest({ amount: 250, authorizationId: 'auth-ctx' }));
+    assert.equal(r.decision, 'block'); assert.equal(r.reasonCode, 'AUTHORIZATION_CONTEXT_REQUIRED'); assert.equal(r.detail, detail);
+    assert.equal(lines.filter((l) => l.includes('refused the claim of authorization auth-ctx') && l.includes('Upgrade the gateway')).length, 1);
+  } finally { console.warn = warn; restore(); }
+});
+
+test('a refusal without a detail logs the bare code and adds no detail', async () => {
+  const restore = withMockClaim(() => ({ status: 409, body: { success: false, message: 'AUTHORIZATION_ALREADY_CLAIMED', data: { reasonCode: 'AUTHORIZATION_ALREADY_CLAIMED' } } }));
+  const warn = console.warn; const lines = []; console.warn = (...a) => lines.push(a.join(' '));
+  try {
+    const r = await mk().verifyRequest(signedRequest({ amount: 250, authorizationId: 'auth-used' }));
+    assert.equal(r.reasonCode, 'AUTHORIZATION_ALREADY_CLAIMED'); assert.equal(r.detail, undefined);
+    assert.ok(lines.some((l) => l.endsWith('auth-used: AUTHORIZATION_ALREADY_CLAIMED')));
+  } finally { console.warn = warn; restore(); }
+});
+
 let pass = 0, fail = 0;
 for (const [name, fn] of t) {
   try { await fn(); console.log('  \x1b[32mPASS\x1b[0m ' + name); pass++; }

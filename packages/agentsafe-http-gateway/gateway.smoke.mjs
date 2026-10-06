@@ -162,6 +162,18 @@ async function main() {
     ok(res.status === 502 && res.body.decision === 'block' && res.body.reasonCode === 'GOVERNANCE_ERROR' && forwarded.length === before, 'a throwing trustedContext deriver fails CLOSED (502 GOVERNANCE_ERROR) and forwards nothing');
   }
 
+  // Pre-beta rerun 6 FW6-1: an issuer's refusal sentence (the guard's `detail`) reaches the agent in the 403 body; a block
+  // without one stays exactly as before.
+  {
+    const detail = 'AUTHORIZATION_CONTEXT_REQUIRED: ... Upgrade the gateway: @metamynd/agentsafe-mcp-guard >= 0.27.0';
+    const withDetail = createHttpGateway({ guard: { verifyRequest: async () => ({ decision: 'block', reasonCode: 'AUTHORIZATION_CONTEXT_REQUIRED', detail }) }, routes, forward });
+    const res = await withDetail({ method: 'POST', path: '/book/42', headers: signedHeader(), body: {} });
+    ok(res.status === 403 && res.body.reasonCode === 'AUTHORIZATION_CONTEXT_REQUIRED' && res.body.detail === detail, 'a refused claim relays the issuer detail in the 403 body');
+    const bare = createHttpGateway({ guard: guardFor('block', 'AGENT_NOT_ADMITTED'), routes, forward });
+    const res2 = await bare({ method: 'POST', path: '/book/42', headers: signedHeader(), body: {} });
+    ok(res2.status === 403 && !('detail' in res2.body), 'a block without a detail has no detail field');
+  }
+
   if (failed === 0) { console.log('\nPASS — generic HTTP interception gateway governs protected routes'); process.exit(0); }
   else { console.error(`\nFAIL — ${failed} check(s) failed`); process.exit(1); }
 }
