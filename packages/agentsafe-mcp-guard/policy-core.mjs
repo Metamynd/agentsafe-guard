@@ -274,8 +274,91 @@ ${c.output ?? ""}`.toLowerCase();
   // below a soft REVIEW line — intended to author an ESCALATE (route to a human), NOT a hard block.
   // The score is server-derived (signed-last) so the agent's itinerary can't fake it; when no score
   // is present (e.g. no counterparty resolved) the atom simply does not fire — no guidance.
-  "hol-trust-below-review": (c, cfg) => typeof c.holTrustScore === "number" && c.holTrustScore < Number(cfg?.reviewBelow ?? 60)
+  "hol-trust-below-review": (c, cfg) => typeof c.holTrustScore === "number" && c.holTrustScore < Number(cfg?.reviewBelow ?? 60),
+  // --- Owner-keyed context atoms (pre-beta rerun 6, NF-RISK-SELF). For a non-financial action the only risk input
+  //     used to be the riskLevel the agent declares about itself: {riskLevel:'low', op:'delete-all'} ran unreviewed.
+  //     These let the owner key a rule on WHAT is being done — a field of the context the executor acts on — so the
+  //     agent's label no longer decides. See contextValueMatch below for the matching and fail-closed rules. ---
+  // Deny-list: fires when the field's value IS one of the owner's values ("deleting needs approval").
+  "context-value-in": (c, cfg) => contextValueMatch(c, cfg, "in") !== null,
+  // Allow-list: fires when the field's value is NOT one of them ("anything but read/list needs approval"). The sound
+  // choice when the set of safe operations is known: a spelling the owner did not foresee fires instead of passing.
+  "context-value-not-in": (c, cfg) => contextValueMatch(c, cfg, "not-in") !== null
 };
+var LOOKALIKE_FOLD = {
+  // Cyrillic (lower case; upper case is lower-cased before folding)
+  "\u0430": "a",
+  "\u0432": "b",
+  "\u0435": "e",
+  "\u0451": "e",
+  "\u043A": "k",
+  "\u043C": "m",
+  "\u043D": "h",
+  "\u043E": "o",
+  "\u0440": "p",
+  "\u0441": "c",
+  "\u0442": "t",
+  "\u0443": "y",
+  "\u0445": "x",
+  "\u0455": "s",
+  "\u0456": "i",
+  "\u0457": "i",
+  "\u0458": "j",
+  "\u0501": "d",
+  "\u04CF": "l",
+  "\u04BB": "h",
+  "\u051B": "q",
+  "\u051D": "w",
+  // Greek
+  "\u03B1": "a",
+  "\u03B2": "b",
+  "\u03B5": "e",
+  "\u03B7": "n",
+  "\u03B9": "i",
+  "\u03BA": "k",
+  "\u03BD": "v",
+  "\u03BF": "o",
+  "\u03C1": "p",
+  "\u03C4": "t",
+  "\u03C5": "u",
+  "\u03C7": "x",
+  "\u03F2": "c"
+};
+var LOOKALIKE_RE = new RegExp(`[${Object.keys(LOOKALIKE_FOLD).join("")}]`, "g");
+var INVISIBLE_RE = /[­͏؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮⁠-⁯ㅤ︀-️﻿ﾠ]/g;
+function normalizeContextToken(s) {
+  return s.normalize("NFKC").replace(INVISIBLE_RE, "").toLowerCase().normalize("NFKC").replace(LOOKALIKE_RE, (ch) => LOOKALIKE_FOLD[ch] ?? ch).replace(/[\s\-_‐-―−]+/g, "");
+}
+function contextValueAt(ctx, path) {
+  let cur = ctx;
+  for (const seg of path.split(".")) {
+    if (seg === "" || cur === null || typeof cur !== "object" || Array.isArray(cur)) return void 0;
+    if (!Object.prototype.hasOwnProperty.call(cur, seg)) return void 0;
+    cur = cur[seg];
+  }
+  return cur;
+}
+var clip = (s) => (s.length > 80 ? `${s.slice(0, 77)}...` : s).replace(/[\u0000-\u001F\u007F]/g, "");
+function contextValueMatch(ctx, cfg, mode) {
+  const field = typeof cfg?.field === "string" ? cfg.field.trim() : "";
+  if (field === "") return null;
+  const actions = Array.isArray(cfg?.actions) ? cfg.actions.map((a) => String(a).trim()).filter(Boolean) : [];
+  if (actions.length > 0 && !actions.includes(String(ctx.action ?? "").trim())) return null;
+  const listed = (Array.isArray(cfg?.values) ? cfg.values : []).map((v) => normalizeContextToken(String(v))).filter((v) => v !== "");
+  const contains = cfg?.match === "contains";
+  const raw = contextValueAt(ctx, field);
+  const elements = Array.isArray(raw) ? raw : raw === void 0 || raw === null ? [] : [raw];
+  const present = elements.filter((e) => !(typeof e === "string" && e.trim() === "") && e !== null && e !== void 0);
+  if (present.length === 0) return cfg?.missing === "fire" ? { field, reason: "missing" } : null;
+  for (const e of present) {
+    if (typeof e !== "string" && typeof e !== "number" && typeof e !== "boolean") return { field, reason: "malformed" };
+    const v = normalizeContextToken(String(e));
+    const hit = listed.some((l) => contains ? v.includes(l) : v === l);
+    if (mode === "in" && hit) return { field, value: clip(String(e).trim()), reason: "listed" };
+    if (mode === "not-in" && !hit) return { field, value: clip(String(e).trim()), reason: "unlisted" };
+  }
+  return null;
+}
 function notInAllowList(value, allowList) {
   const v = value != null ? String(value).toLowerCase().trim() : "";
   if (v === "") return false;
@@ -448,6 +531,36 @@ var ATOM_SPECS = [
     description: "Fires when the attested evidence confidence is below a required minimum \u2014 or absent (SAFR \xA724). A min of 0 / unset is no requirement. Author with ESCALATE to route low-confidence actions to review.",
     config: [{ key: "min", type: "number", required: true, description: "Minimum evidence confidence (0\u20131) required" }],
     requiredContext: ["evidenceConfidence"]
+  },
+  // Owner-keyed context values (pre-beta rerun 6, NF-RISK-SELF). requiredContext is EMPTY on purpose: the field these
+  // read is chosen per atom instance (`field`), which a per-predicate list cannot express — the same reason amount-over's
+  // optional `currency` is not listed. sop-compiler.input-semantics.ts reads the configured field instead, so the
+  // review screen still says what an absent one does.
+  {
+    predicate: "context-value-in",
+    label: "Context value is on a list (owner-marked operation)",
+    description: 'Fires when a field of the request context (e.g. `op`, or `params.op`) has one of the listed values \u2014 key a rule on WHAT the agent is doing, not on the risk level it declares about itself. Author with ESCALATE ("deleting records needs approval") or BLOCK. Case, width, whitespace, hyphens/underscores, invisible characters and common Cyrillic/Greek look-alike letters are ignored when comparing. A deny-list cannot foresee every spelling: when the safe values are known, prefer context-value-not-in. When it fires, the verdict and the escalation carry a `context-value` risk signal naming the field and value.',
+    config: [
+      { key: "field", type: "string", required: true, description: "Dot path of the context field to read, e.g. op or params.op" },
+      { key: "values", type: "string[]", required: true, description: "Values that make the rule fire, e.g. delete, delete-all, purge" },
+      { key: "match", type: "enum", required: false, options: ["exact", "contains"], description: "exact (default), or contains: the value contains a listed entry ('bulk_delete' contains 'delete')" },
+      { key: "missing", type: "enum", required: false, options: ["pass", "fire"], description: "What an absent field means: pass (default) or fire \u2014 set fire so an agent cannot skip the rule by not sending the field" },
+      { key: "actions", type: "string[]", required: false, description: "Optional: judge only these actions (mandate targets); other actions are out of scope" }
+    ],
+    requiredContext: []
+  },
+  {
+    predicate: "context-value-not-in",
+    label: "Context value is not on an allow-list",
+    description: 'Fires when a field of the request context has a value that is NOT on the owner\'s allow-list ("anything other than read or list needs approval"). The sound form of an operation rule: a spelling or look-alike the owner did not foresee fires instead of passing. Same comparison rules, `missing` and `actions` options as context-value-in, and the same `context-value` risk signal when it fires.',
+    config: [
+      { key: "field", type: "string", required: true, description: "Dot path of the context field to read, e.g. op or params.op" },
+      { key: "values", type: "string[]", required: true, description: "The allowed values, e.g. read, list" },
+      { key: "match", type: "enum", required: false, options: ["exact", "contains"], description: "exact (default), or contains: the value contains an allowed entry" },
+      { key: "missing", type: "enum", required: false, options: ["pass", "fire"], description: "What an absent field means: pass (default) or fire (fail closed)" },
+      { key: "actions", type: "string[]", required: false, description: "Optional: judge only these actions (mandate targets); other actions are out of scope" }
+    ],
+    requiredContext: []
   }
 ];
 var CATALOGUED_ATOMS = ATOM_SPECS.filter((s) => !!ATOM_REGISTRY[s.predicate]);
@@ -467,6 +580,32 @@ function ownEntry(table, key) {
 
 // src/policy-core/standards-rules.ts
 var CONTEXT_UNVERIFIABLE = "CONTEXT_UNVERIFIABLE";
+var CONTEXT_VALUE_ATOMS = ["context-value-in", "context-value-not-in"];
+function contextSignalsOf(m, ctx, decision) {
+  if (decision === "observe" || m.combinator !== "all" && m.combinator !== "any") return [];
+  const out = [];
+  for (const a of m.atoms ?? []) {
+    const predicate = CONTEXT_VALUE_ATOMS.find((p) => p === a.predicate);
+    if (!predicate) continue;
+    let hit = null;
+    try {
+      hit = contextValueMatch(ctx, a.config, predicate === "context-value-in" ? "in" : "not-in");
+    } catch {
+      hit = null;
+    }
+    if (hit) out.push({ ...hit, predicate, moleculeId: m.id, decision });
+  }
+  return out;
+}
+function contextRiskSignals(result) {
+  const out = /* @__PURE__ */ new Map();
+  for (const s of result?.contextSignals ?? []) {
+    const verb = s.decision === "escalate" ? "owner-marked for review" : "owner-marked as not allowed";
+    const detail = s.reason === "listed" ? `${s.field}=${s.value} is ${verb}` : s.reason === "unlisted" ? `${s.field}=${s.value} is not on the owner's list (${s.decision === "escalate" ? "review" : "not allowed"})` : s.reason === "missing" ? `${s.field} was not sent, and the owner requires it` : `${s.field} is not a plain value, so it cannot be checked against the owner's list`;
+    out.set(detail, { signal: "context-value", level: "high", detail });
+  }
+  return [...out.values()];
+}
 var JURISDICTION_ATOM = "jurisdiction-not-allowed";
 function documentEnforcesJurisdiction(doc) {
   return (doc?.molecules ?? []).some((m) => m?.decision !== "observe" && (m?.atoms ?? []).some((a) => a?.predicate === JURISDICTION_ATOM));
@@ -523,10 +662,12 @@ function moleculeUnverifiable(m, ctx) {
 }
 function evaluateStandardRules(molecules, ctx, standardKey = null) {
   let best = null;
+  const contextSignals = [];
   for (const m of molecules ?? []) {
     const fired = moleculeFires(m, ctx);
     const unverifiable = moleculeUnverifiable(m, ctx);
     if (!fired && unverifiable.length === 0) continue;
+    if (fired) contextSignals.push(...contextSignalsOf(m, ctx, m.decision));
     let decision = fired ? m.decision : "escalate";
     if (unverifiable.length > 0 && PRECEDENCE[decision] < PRECEDENCE.escalate) decision = "escalate";
     const reasonCode = fired ? m.reasonCode : CONTEXT_UNVERIFIABLE;
@@ -540,16 +681,22 @@ function evaluateStandardRules(molecules, ctx, standardKey = null) {
     reasonCode: best.reasonCode,
     firedMoleculeId: best.id,
     standardKey,
-    ...best.unverifiable ? { unverifiableContext: best.unverifiable } : {}
+    ...best.unverifiable ? { unverifiableContext: best.unverifiable } : {},
+    ...contextSignals.length > 0 ? { contextSignals } : {}
   };
 }
 function evaluateBoundStandards(standards, ctx) {
   let best = { decision: "allow", reasonCode: null, firedMoleculeId: null, standardKey: null };
+  const contextSignals = [];
   for (const s of standards) {
     const r = evaluateStandardRules(s.document?.molecules, ctx, s.standardKey);
+    if (r.contextSignals) contextSignals.push(...r.contextSignals);
     if (PRECEDENCE[r.decision] > PRECEDENCE[best.decision]) best = r;
   }
-  return standards.some((s) => documentEnforcesJurisdiction(s.document)) ? { ...best, jurisdictionRequired: true } : best;
+  const out = { ...best };
+  delete out.contextSignals;
+  if (contextSignals.length > 0) out.contextSignals = contextSignals;
+  return standards.some((s) => documentEnforcesJurisdiction(s.document)) ? { ...out, jurisdictionRequired: true } : out;
 }
 function configValueValid(field, value) {
   switch (field.type) {
@@ -578,6 +725,8 @@ function validateAtomConfig(predicate, config) {
     }
     if (!configValueValid(field, cfg[field.key])) {
       errors.push(`atom '${predicate}' config '${field.key}' must be a ${field.type}`);
+    } else if (field.required && field.type === "string" && String(cfg[field.key]).trim() === "") {
+      errors.push(`atom '${predicate}' config '${field.key}' must not be blank`);
     }
   }
   return errors;
@@ -866,6 +1015,9 @@ export {
   buildRuleContext,
   canAuthorize,
   contextFieldProblem,
+  contextRiskSignals,
+  contextValueAt,
+  contextValueMatch,
   documentEnforcesJurisdiction,
   effectiveRiskFloor,
   evaluate,
@@ -881,6 +1033,7 @@ export {
   moleculeFires,
   moleculeUnverifiable,
   moreRestrictive,
+  normalizeContextToken,
   normalizeRiskLevel,
   operatingModeGate,
   perTxnCapFor,

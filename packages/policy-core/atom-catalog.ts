@@ -216,6 +216,46 @@ export const ATOM_SPECS: AtomSpec[] = [
     config: [{ key: 'min', type: 'number', required: true, description: 'Minimum evidence confidence (0–1) required' }],
     requiredContext: ['evidenceConfidence'],
   },
+  // Owner-keyed context values (pre-beta rerun 6, NF-RISK-SELF). requiredContext is EMPTY on purpose: the field these
+  // read is chosen per atom instance (`field`), which a per-predicate list cannot express — the same reason amount-over's
+  // optional `currency` is not listed. sop-compiler.input-semantics.ts reads the configured field instead, so the
+  // review screen still says what an absent one does.
+  {
+    predicate: 'context-value-in',
+    label: 'Context value is on a list (owner-marked operation)',
+    description:
+      'Fires when a field of the request context (e.g. `op`, or `params.op`) has one of the listed values — key a rule on ' +
+      'WHAT the agent is doing, not on the risk level it declares about itself. Author with ESCALATE ("deleting records ' +
+      'needs approval") or BLOCK. Case, width, whitespace, hyphens/underscores, invisible characters and common ' +
+      'Cyrillic/Greek look-alike letters are ignored when comparing. A deny-list cannot foresee every spelling: when the ' +
+      'safe values are known, prefer context-value-not-in. When it fires, the verdict and the escalation carry a ' +
+      '`context-value` risk signal naming the field and value.',
+    config: [
+      { key: 'field', type: 'string', required: true, description: 'Dot path of the context field to read, e.g. op or params.op' },
+      { key: 'values', type: 'string[]', required: true, description: 'Values that make the rule fire, e.g. delete, delete-all, purge' },
+      { key: 'match', type: 'enum', required: false, options: ['exact', 'contains'], description: "exact (default), or contains: the value contains a listed entry ('bulk_delete' contains 'delete')" },
+      { key: 'missing', type: 'enum', required: false, options: ['pass', 'fire'], description: "What an absent field means: pass (default) or fire — set fire so an agent cannot skip the rule by not sending the field" },
+      { key: 'actions', type: 'string[]', required: false, description: 'Optional: judge only these actions (mandate targets); other actions are out of scope' },
+    ],
+    requiredContext: [],
+  },
+  {
+    predicate: 'context-value-not-in',
+    label: 'Context value is not on an allow-list',
+    description:
+      'Fires when a field of the request context has a value that is NOT on the owner\'s allow-list ("anything other than ' +
+      'read or list needs approval"). The sound form of an operation rule: a spelling or look-alike the owner did not ' +
+      'foresee fires instead of passing. Same comparison rules, `missing` and `actions` options as context-value-in, and ' +
+      'the same `context-value` risk signal when it fires.',
+    config: [
+      { key: 'field', type: 'string', required: true, description: 'Dot path of the context field to read, e.g. op or params.op' },
+      { key: 'values', type: 'string[]', required: true, description: 'The allowed values, e.g. read, list' },
+      { key: 'match', type: 'enum', required: false, options: ['exact', 'contains'], description: 'exact (default), or contains: the value contains an allowed entry' },
+      { key: 'missing', type: 'enum', required: false, options: ['pass', 'fire'], description: 'What an absent field means: pass (default) or fire (fail closed)' },
+      { key: 'actions', type: 'string[]', required: false, description: 'Optional: judge only these actions (mandate targets); other actions are out of scope' },
+    ],
+    requiredContext: [],
+  },
 ];
 
 /** All atom predicates that have both an executable implementation AND a spec (the publishable set). */

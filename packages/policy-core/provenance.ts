@@ -125,7 +125,9 @@ export const DEFAULT_AMOUNT_SHARE_HIGH = 0.7;
 
 /** One reason the effective risk is what it is — recorded with the decision so it explains itself. */
 export interface RiskSignal {
-  signal: 'owner-tier' | 'amount-share' | 'new-merchant';
+  // `context-value`: an owner-keyed operation rule fired on what the request does (standards-rules contextRiskSignals,
+  // pre-beta rerun 6 NF-RISK-SELF) — derived from the rule result, not from riskSignalsFor.
+  signal: 'owner-tier' | 'amount-share' | 'new-merchant' | 'context-value';
   level: RiskLevel;
   /** Human-readable, e.g. "82% of the 500 per-transaction cap". Never an amount the agent did not sign. */
   detail?: string;
