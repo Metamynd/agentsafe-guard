@@ -173,7 +173,8 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.27.0: a claim of a person-approved hold states the digest of the context it executes (MAGP §9a.5), and a grant naming
 // another (or none) is released and refused. Required: the issuer refuses AUTHORIZATION_CONTEXT_REQUIRED to a claimer that
 // states none, so an older gateway could no longer run an approved escalation.
-const MCP_GUARD_VERSION = '^0.27.0';
+// 0.27.1: reportOutcome() reports an authorization a request only NAMED as presented, never as the one it ran under (FW6-3).
+const MCP_GUARD_VERSION = '^0.27.1';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -207,7 +208,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.24.0: depends on agentsafe-mcp-guard ^0.25.0 (one guard in the tree with MCP_GUARD_VERSION above). No template change.
 // 0.25.0: depends on agentsafe-mcp-guard ^0.26.0 (one guard in the tree). No template change.
 // 0.26.0: depends on agentsafe-mcp-guard ^0.27.0 (the approved-context binding). Required with MCP_GUARD_VERSION above.
-const GATEWAY_VERSION = '^0.26.0';
+// 0.26.1: a report names an authorization as claimed only when this gateway claimed it (FW6-3); depends on agentsafe-mcp-guard ^0.27.1.
+const GATEWAY_VERSION = '^0.26.1';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `

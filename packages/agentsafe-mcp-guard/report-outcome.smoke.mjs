@@ -118,6 +118,25 @@ test('a report carries a reportId and its count; a retry with the same reportId 
   assert.equal(fresh[0].body.occurrences, 1);
 });
 
+// Pre-beta rerun 6 FW6-3: a non-financial gateway ran a low-risk request on its own merits that NAMED an approved
+// escalation's authorization (never claimed), and the report filed it under that authorization.
+test('an authorization the request only NAMED is reported as presented, never as the one it ran under', async () => {
+  const signed = { ...mine.sign('records-update'), authorizationId: 'auth-approved-1' };
+  const { calls } = await capturing(() => pinned().reportOutcome({ signed, outcome: 'executed', reasonCode: 'EXECUTED', httpStatus: 200 }));
+  assert.equal(calls[0].body.request.presentedAuthorizationId, 'auth-approved-1');
+  assert.equal(calls[0].body.request.authorizationId, undefined, 'not attributed');
+  assert.ok(verifiesAsIssuer(calls[0]));
+  const { calls: other } = await capturing(() => pinned().reportOutcome({ signed, outcome: 'executed', reasonCode: 'EXECUTED', httpStatus: 200, claimedAuthorizationId: 'auth-something-else' }));
+  assert.equal(other[0].body.request.authorizationId, undefined, 'a claim of ANOTHER id does not attribute this one');
+});
+
+test('an authorization this Service claimed is reported as the one the request ran under', async () => {
+  const signed = { ...mine.sign('records-update'), authorizationId: 'auth-claimed-1' };
+  const { calls } = await capturing(() => pinned().reportOutcome({ signed, outcome: 'refused', reasonCode: 'CREDENTIAL_UNAVAILABLE', httpStatus: 502, claimedAuthorizationId: 'auth-claimed-1' }));
+  assert.equal(calls[0].body.request.authorizationId, 'auth-claimed-1');
+  assert.equal(calls[0].body.request.presentedAuthorizationId, 'auth-claimed-1');
+});
+
 test('a refusal from the issuer is reported back, never thrown', async () => {
   const { value } = await capturing(
     () => pinned().reportOutcome({ signed: mine.sign('records-update'), outcome: 'executed', reasonCode: 'EXECUTED', httpStatus: 200 }),

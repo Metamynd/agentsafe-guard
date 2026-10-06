@@ -511,8 +511,15 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * `servedAgentDid` defaults to the caller when this Service serves it, else to the one agent `allowedAgents` pins — so a
    * refused foreign agent is filed under the agent the Service works for, never under the caller's owner. Visibility only:
    * never throws, never changes a decision. Resolves `{ ok, reasonCode, status? }`.
+   *
+   * An authorization the request NAMES is reported as `presentedAuthorizationId` — evidence of what was asked, never an
+   * attribution. It is reported as the request's `authorizationId` only when the caller passes `claimedAuthorizationId`
+   * (the id on a decision this Service CLAIMED) and it is the same id (0.27.1, pre-beta rerun 6 FW6-3): a non-financial
+   * gateway that ran a low-risk request on its own merits, naming an approved escalation's authorization it never claimed,
+   * filed the row under that authorization, and the audit then showed it twice, under two contexts, once the approved call
+   * ran. The issuer links a row only to an authorization the effect chain shows this Service claimed in any case.
    */
-  async function reportOutcome({ signed, outcome, reasonCode, httpStatus, servedAgentDid, reportId, occurrences } = {}) {
+  async function reportOutcome({ signed, outcome, reasonCode, httpStatus, servedAgentDid, reportId, occurrences, claimedAuthorizationId } = {}) {
     if (!base) return { ok: false, reasonCode: 'NO_ISSUER' };
     if (outcome !== 'executed' && outcome !== 'refused') return { ok: false, reasonCode: 'REPORT_OUTCOME_INVALID' };
     const s = signed ?? {};
@@ -537,7 +544,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       return signingFailed(err);
     }
     if (!auth['x-magp-service-did']) return { ok: false, reasonCode: 'SERVICE_IDENTITY_REQUIRED' };
-    const request = { agentDid: s.agentDid, action: s.action, amount: Number(s.amount ?? 0), currency: s.currency ?? 'USD', merchant: s.merchant ?? '', resource: s.resource ?? null, nonce: s.nonce, issuedAt: s.issuedAt, signature: s.signature, ...(s.jurisdiction ? { jurisdiction: s.jurisdiction } : {}), ...(typeof s.payloadDigest === 'string' ? { payloadDigest: s.payloadDigest } : {}), ...(typeof s.authorizationId === 'string' ? { authorizationId: s.authorizationId } : {}) };
+    const presented = typeof s.authorizationId === 'string' ? s.authorizationId : undefined;
+    const claimed = presented !== undefined && claimedAuthorizationId === presented ? presented : undefined;
+    const request = { agentDid: s.agentDid, action: s.action, amount: Number(s.amount ?? 0), currency: s.currency ?? 'USD', merchant: s.merchant ?? '', resource: s.resource ?? null, nonce: s.nonce, issuedAt: s.issuedAt, signature: s.signature, ...(s.jurisdiction ? { jurisdiction: s.jurisdiction } : {}), ...(typeof s.payloadDigest === 'string' ? { payloadDigest: s.payloadDigest } : {}), ...(presented !== undefined ? { presentedAuthorizationId: presented } : {}), ...(claimed !== undefined ? { authorizationId: claimed } : {}) };
     const body = JSON.stringify({ servedAgentDid: served, outcome, reasonCode: code, httpStatus: status, request, reportId: id, occurrences: count });
     // One retry, with the SAME signed headers, on a lost answer: a report that did land is answered ALREADY_RECORDED.
     for (let attempt = 1; attempt <= 2; attempt++) {
