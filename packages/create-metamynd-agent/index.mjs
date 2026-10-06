@@ -986,6 +986,10 @@ async function apiPost(base, path, body, token) {
   } catch (e) {
     fail(`Cannot reach ${base}${path} — is the API up? (${e.message})`);
   }
+  return readApiJson(res, path);
+}
+
+async function readApiJson(res, path) {
   const text = await res.text();
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON */ }
@@ -994,6 +998,70 @@ async function apiPost(base, path, body, token) {
     fail(`${path} → HTTP ${res.status}${detail ? `: ${detail}` : ''}`);
   }
   return json;
+}
+
+// ---------- owner session ----------
+// An owner access token lives 15 minutes (pre-beta rerun 6, OBS session TTL, #926); the refresh token from the same
+// sign-in renews it (POST /auth/refresh-token, which rotates both). Every owner-authenticated call this CLI makes goes
+// through ownerFetch: on a 401 it renews the session ONCE — the refresh token first, else a fresh sign-in with the
+// credentials already given to this run — and retries the call once. The password stays in this process's memory
+// for that purpose only; it is never written anywhere (pre-beta rerun 6, CLI login expiry).
+async function ownerLogin(base, email, password) {
+  const login = await apiPost(base, '/auth/login', { username: email, password }, null);
+  const token = login?.data?.accessToken;
+  if (!token) fail('Login succeeded but no access token was returned.');
+  return { base, email, password, token, refreshToken: login?.data?.refreshToken ?? null };
+}
+
+/** Renew an expired owner session in place; true when a new access token was obtained. Never fatal. */
+async function renewOwnerSession(session) {
+  const post = (path, body) => fetch(`${session.base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (session.refreshToken) {
+    try {
+      const res = await post('/auth/refresh-token', { refreshToken: session.refreshToken });
+      const json = res.ok ? await res.json().catch(() => null) : null;
+      // The refresh endpoint answers at the top level ({ accessToken, refreshToken }); accept a `data` envelope too.
+      const token = json?.accessToken ?? json?.data?.accessToken;
+      if (token) {
+        session.token = token;
+        session.refreshToken = json?.refreshToken ?? json?.data?.refreshToken ?? session.refreshToken;
+        return true;
+      }
+    } catch { /* fall through to a fresh sign-in */ }
+  }
+  if (typeof session.password === 'string') {
+    try {
+      const res = await post('/auth/login', { username: session.email, password: session.password });
+      const json = res.ok ? await res.json().catch(() => null) : null;
+      if (json?.data?.accessToken) {
+        session.token = json.data.accessToken;
+        session.refreshToken = json.data.refreshToken ?? null;
+        return true;
+      }
+    } catch { /* reported by the caller's retry */ }
+  }
+  return false;
+}
+
+/** fetch() with the owner's bearer token; a 401 renews the session once and retries once. */
+async function ownerFetch(session, path, init = {}) {
+  const send = () => fetch(`${session.base}${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...(init.headers ?? {}), Authorization: `Bearer ${session.token}` } });
+  const res = await send();
+  if (res.status !== 401) return res;
+  if (!(await renewOwnerSession(session))) return res;
+  console.log(c.dim('  → your owner session had expired; renewed it and retried'));
+  return send();
+}
+
+/** apiPost for an owner-authenticated call: fatal on failure, renewed once on an expired token. */
+async function ownerPost(session, path, body) {
+  let res;
+  try {
+    res = await ownerFetch(session, path, { method: 'POST', body: JSON.stringify(body) });
+  } catch (e) {
+    fail(`Cannot reach ${session.base}${path} — is the API up? (${e.message})`);
+  }
+  return readApiJson(res, path);
 }
 
 /** GET a public, read-only endpoint; null on ANY failure (unreachable, non-2xx, non-JSON) — never fatal. */
@@ -1064,24 +1132,22 @@ async function resolveHostedRulePack(base, key, { financial, perTxnMax, maxAmoun
  * dashboard registration shows its own dialog before setting the flag); see the printed message
  * either way.
  */
-async function registerGatewayCounterparty(base, token, did, label, purpose = 'claim', privateKeyHex = null, agents = null) {
+async function registerGatewayCounterparty(session, did, label, purpose = 'claim', privateKeyHex = null, agents = null) {
   try {
     // The gateway accepts its own registration (MAGP §8.7.6): ask for a challenge naming this owner, sign it with the gateway's
     // key (generated here, so this process holds it), and register with that proof. A DID is never registered on its text.
     let proof;
     if (privateKeyHex) {
-      const ch = await fetch(`${base}/policy/counterparties/challenge`, {
+      const ch = await ownerFetch(session, '/policy/counterparties/challenge', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ did, purpose }),
       });
       const chJson = await ch.json().catch(() => null);
       if (!ch.ok || !chJson?.data?.message) return { ok: false, message: chJson?.message ?? `challenge HTTP ${ch.status}` };
       proof = { challengeToken: chJson.data.challengeToken, signature: signChallengeHex(privateKeyHex, chJson.data.message) };
     }
-    const res = await fetch(`${base}/policy/counterparties`, {
+    const res = await ownerFetch(session, '/policy/counterparties', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       // `report` (a non-financial gateway, which never claims): it may only report to this owner, and it changes nothing about
       // who may claim their holds, so it needs no enforcement confirmation (MAGP §8.7.6, §16.4).
       // `agents` (report only): the agents this gateway serves — the issuer lets it claim an approved value-less hold of THOSE
@@ -2529,7 +2595,11 @@ re-register this gateway yourself — after removing it from the registry, say.
 Registration needs **proof of control** (MAGP §8.7.6): you ask for a challenge naming you, this
 gateway signs it with its own key from \`service.metamynd.json\`, and you register with that
 signature. A DID is never registered on its text alone, so nobody can register a gateway they do
-not hold the key for. Run this from this directory (bash; \`TOKEN\` is your owner access token):
+not hold the key for. Run this from this directory (bash; \`TOKEN\` is your owner access token).
+An owner access token lasts **15 minutes**, so get a fresh one just before you run this:
+\`POST /auth/login\` with \`{ "username": "<your email>", "password": "<your password>" }\` returns it
+as \`data.accessToken\` (that sign-in also signs your account out of the dashboard — one session at a
+time). A \`401\` from the snippet means the token expired: sign in again and re-run it.
 
 \`\`\`bash
 MAGP_API=https://metamynd.ai/api/v1 TOKEN=<owner access token> node --input-type=module -e "
@@ -4071,11 +4141,9 @@ async function authFlow(args) {
     rl?.resume();
   }
   rl?.close();
-  const login = await apiPost(base, '/auth/login', { username: email, password }, null);
-  const token = login?.data?.accessToken;
-  if (!token) fail('Login succeeded but no access token was returned.');
+  const session = await ownerLogin(base, email, password);
   console.log(c.dim(`  ${SESSION_REPLACED_NOTE}`));
-  return { base, token, email };
+  return { base, session, email };
 }
 
 // One session per account: a CLI login replaces the account's dashboard session (the dashboard then answers
@@ -4091,7 +4159,7 @@ const REQUEST_STATE_FILE = 'metamynd-request.json';
 async function runRequest(args) {
   const owner = (typeof args.owner === 'string' ? args.owner : undefined) ?? process.env.METAMYND_OWNER;
   if (!owner) fail('--owner <ownerEmail> is required for a delegated request.');
-  const { base, token } = await authFlow(args);
+  const { base, session } = await authFlow(args);
 
   // The same decision --harness and the hosted flow make (see announceFinancial): a non-financial request asks the
   // OWNER to approve no spending authority at all, and says so explicitly - an omitted amount means "use the
@@ -4119,7 +4187,7 @@ async function runRequest(args) {
   }
 
   console.log(c.dim(`  → requesting "${name}" for ${owner} …`));
-  const res = await apiPost(base, '/onboarding/requests', { ownerEmail: owner, name, scope, ...(financial ? { perTxnMax, ...(maxAmountReq !== undefined && Number.isFinite(maxAmountReq) ? { maxAmount: maxAmountReq } : {}), ...(currencyReq ? { currency: currencyReq } : {}) } : { financial: false }), ...(merchantsReq.length ? { merchants: merchantsReq } : {}), ...(publicKey ? { publicKey } : {}) }, token);
+  const res = await ownerPost(session, '/onboarding/requests', { ownerEmail: owner, name, scope, ...(financial ? { perTxnMax, ...(maxAmountReq !== undefined && Number.isFinite(maxAmountReq) ? { maxAmount: maxAmountReq } : {}), ...(currencyReq ? { currency: currencyReq } : {}) } : { financial: false }), ...(merchantsReq.length ? { merchants: merchantsReq } : {}), ...(publicKey ? { publicKey } : {}) });
   const d = res.data;
   // A server that predates non-financial requests ignores the field and files the request WITH default spend
   // limits. The developer cannot withdraw it, so say exactly what now exists and who can deny it; do not save a
@@ -4269,7 +4337,9 @@ async function main() {
     return ask(rl, prompt, def);
   };
 
-  // 1. Connection + login
+  // 1. Connection + credentials. The sign-in itself waits until every prompt is answered (step 3): an owner access
+  // token lives 15 minutes, and an owner who took longer over the prompts used to reach provisioning with an expired
+  // one (pre-beta rerun 6, CLI login expiry follow-up to #926).
   const apiRaw = await pick('api', 'METAMYND_API', 'API base URL', DEFAULT_API);
   const base = String(apiRaw).replace(/\/+$/, '');
   const email = await pick('email', 'METAMYND_EMAIL', 'Owner email', '');
@@ -4282,13 +4352,6 @@ async function main() {
     password = await askHidden('Owner password');
     rl?.resume();
   }
-
-  console.log(c.dim(`\n  → logging in to ${base} …`));
-  const login = await apiPost(base, '/auth/login', { username: email, password }, null);
-  const token = login?.data?.accessToken;
-  if (!token) { rl?.close(); fail('Login succeeded but no access token was returned.'); }
-  console.log(`  ${c.green('✓')} authenticated as ${email}`);
-  console.log(c.dim(`    ${SESSION_REPLACED_NOTE}`));
 
   // 2. Agent details — a --config file's fields are the default at every prompt/flag below.
   const name = await pick('name', null, 'Agent name', fileConfig?.name ?? 'Support Bot');
@@ -4334,19 +4397,6 @@ async function main() {
     rl?.close();
     fail('--daemon-socket generates its own key — pass --byok alone, not --public-key.');
   }
-  let generatedKey = null;
-  let daemonPublicKeyHex = null;
-  if (args.byok && !publicKey && daemonSocket) {
-    console.log(c.dim('  → asking the agentsafe-signer daemon to generate a key …'));
-    const { publicKeyHex } = await daemonRequest(daemonAdminSocket, 'generate-key', { allowRekey: false });
-    daemonPublicKeyHex = publicKeyHex;
-    publicKey = publicKeyHex;
-    console.log(`  ${c.green('✓')} generated an Ed25519 keypair via the signer daemon ${c.dim('(the private key never left it)')}`);
-  } else if (args.byok && !publicKey) {
-    generatedKey = generateAgentKeypair();
-    publicKey = generatedKey.publicKeyHex;
-    console.log(`  ${c.green('✓')} generated an Ed25519 keypair locally ${c.dim('(private key stays on this machine)')}`);
-  }
 
   const slug = slugify(name);
   const outDir = resolve(String(args.out || (interactive ? await ask(rl, 'Output directory', `./${slug}`) : `./${slug}`)));
@@ -4369,6 +4419,30 @@ async function main() {
       if (pack.reviewedMoleculeIds) sopFields.reviewedMoleculeIds = pack.reviewedMoleculeIds;
     }
   }
+
+  // Sign in only now, with every answer in hand (see step 1). Should the token still expire before the last
+  // owner call, ownerFetch renews it once and retries.
+  console.log(c.dim(`\n  → logging in to ${base} …`));
+  const session = await ownerLogin(base, email, password);
+  console.log(`  ${c.green('✓')} authenticated as ${email}`);
+  console.log(c.dim(`    ${SESSION_REPLACED_NOTE}`));
+
+  // The key is generated after the sign-in succeeds, as it always was: a daemon refuses to re-key (allowRekey: false),
+  // so a key minted for a run that then failed to sign in would block the next attempt.
+  let generatedKey = null;
+  let daemonPublicKeyHex = null;
+  if (args.byok && !publicKey && daemonSocket) {
+    console.log(c.dim('  → asking the agentsafe-signer daemon to generate a key …'));
+    const { publicKeyHex } = await daemonRequest(daemonAdminSocket, 'generate-key', { allowRekey: false });
+    daemonPublicKeyHex = publicKeyHex;
+    publicKey = publicKeyHex;
+    console.log(`  ${c.green('✓')} generated an Ed25519 keypair via the signer daemon ${c.dim('(the private key never left it)')}`);
+  } else if (args.byok && !publicKey) {
+    generatedKey = generateAgentKeypair();
+    publicKey = generatedKey.publicKeyHex;
+    console.log(`  ${c.green('✓')} generated an Ed25519 keypair locally ${c.dim('(private key stays on this machine)')}`);
+  }
+
   console.log(c.dim(`\n  → provisioning "${name}" (identity + mandate + SOP + Standards) …`));
   const body = {
     name, scope,
@@ -4387,7 +4461,7 @@ async function main() {
     ...(publicKey ? { publicKey } : {}),
     ...sopFields,
   };
-  const provisioned = await apiPost(base, '/onboarding/agent', body, token);
+  const provisioned = await ownerPost(session, '/onboarding/agent', body);
   const config = provisioned?.data;
   if (!config?.agentDid) fail('Provisioning did not return a config with an agentDid.');
   console.log(`  ${c.green('✓')} agent DID ${c.b(config.agentDid)}`);
@@ -4408,7 +4482,7 @@ async function main() {
     if (config.challenge) {
       console.log(c.dim('  → proving key control via the daemon (verify-key) …'));
       const { signature } = await daemonRequest(daemonSocket, 'sign-key-control-challenge', { challenge: config.challenge });
-      await apiPost(base, `/agent-identity/${encodeURIComponent(config.identityId)}/verify-key`, { signature }, token);
+      await ownerPost(session, `/agent-identity/${encodeURIComponent(config.identityId)}/verify-key`, { signature });
       config.keyVerified = true;
       delete config.challenge; // one-time; consumed
       console.log(`  ${c.green('✓')} key verified — MetaMynd never saw your private key, and neither did this CLI`);
@@ -4420,7 +4494,7 @@ async function main() {
     if (config.challenge) {
       console.log(c.dim('  → proving key control (verify-key) …'));
       const signature = signChallengeHex(generatedKey.privateKeyHex, config.challenge);
-      await apiPost(base, `/agent-identity/${encodeURIComponent(config.identityId)}/verify-key`, { signature }, token);
+      await ownerPost(session, `/agent-identity/${encodeURIComponent(config.identityId)}/verify-key`, { signature });
       config.keyVerified = true;
       delete config.challenge; // one-time; consumed
       console.log(`  ${c.green('✓')} key verified — MetaMynd never saw your private key`);
@@ -4431,6 +4505,7 @@ async function main() {
     console.log(c.dim(`      sign this challenge with your private key (Ed25519 over its UTF-8 bytes, hex):`));
     console.log(c.dim(`      challenge: ${config.challenge ?? '(none returned)'}`));
     console.log(c.dim(`      POST ${base}/agent-identity/${config.identityId}/verify-key  { "signature": "<hex>" }  (owner token)`));
+    console.log(c.dim(`      (an owner access token lasts 15 minutes — sign in again with POST ${base}/auth/login for a fresh one)`));
   }
 
   // 3c. The gateway's OWN identity — a real did:key, separate from the agent's own (an agent must
@@ -4443,7 +4518,7 @@ async function main() {
     const gatewayDid = buildDidKey(rawPublicKeyFromSpkiHex(gwKeypair.publicKeyHex));
     gatewayIdentity = { did: gatewayDid, keyHex: gwKeypair.privateKeyHex };
     console.log(c.dim(`\n  → registering the gateway's identity as a trusted counterparty (${financial ? "so it can claim this agent's holds and report to you" : 'so its reports reach your Activity Log'}) …`));
-    const reg = await registerGatewayCounterparty(base, token, gatewayDid, `${scope}-gateway`, financial ? 'claim' : 'report', gwKeypair.privateKeyHex, financial ? null : [config.agentDid]);
+    const reg = await registerGatewayCounterparty(session, gatewayDid, `${scope}-gateway`, financial ? 'claim' : 'report', gwKeypair.privateKeyHex, financial ? null : [config.agentDid]);
     if (reg.ok) {
       console.log(`  ${c.green('✓')} gateway DID ${c.b(gatewayDid)} — ${reg.message}`);
     } else {
@@ -4478,6 +4553,7 @@ export {
   generateAgentKeypair, harnessAgentDid, harnessMandate, harnessRulesFile, harnessDefaultSopNeutral,
   scaffoldProject, defaultNeutralDemo, exampleIndexNeutral, exampleReadmeNeutral, gatewayServerFileNeutral, gatewayReadmeNeutral,
   ensurePolicyKey,
+  ownerLogin, ownerFetch, ownerPost,
 };
 if (!process.env.CREATE_METAMYND_AGENT_NO_MAIN) {
   // fail() can also be reached from a callback outside main()'s promise chain (readline, child process).
