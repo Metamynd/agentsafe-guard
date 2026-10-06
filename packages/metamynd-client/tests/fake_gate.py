@@ -88,6 +88,7 @@ class FakeGate:
         self.resume_binding = True  # a gate that predates MAGP 9a.5 returns no requestDigest; False plays that gate
         self.context_binding = True  # a gate that predates the approved-context binding returns no contextDigest; False plays it
         self.resume_claims = True  # a gate that predates MAGP 9a.6 has no /resume-claim route (404); False plays that gate
+        self.resume_claim_version: Optional[int] = 2  # MAGP-RESUME-CLAIM-v2 required (F-1-NF-R); None plays a gate that knows only v1
         self._lock = threading.Lock()
         self.echo_payload_digest = True  # a gate that predates binding (or a proxy that strips it) does not acknowledge the digest
         self.holds: Dict[str, Dict[str, Any]] = {}
@@ -184,14 +185,26 @@ class FakeGate:
         e = self.escalations.get(esc_id)
         if not e:
             return 404, {"success": False, "message": "NOT_FOUND", "data": {"reasonCode": "NOT_FOUND"}}
+        refuse = lambda code, status=403: (status, {"success": False, "message": code, "data": {"reasonCode": code}})  # noqa: E731
+        v2 = "requestDigest" in body and "contextDigest" in body
         try:
             esc = lambda v: v.replace("\\", "\\\\").replace("|", "\\|")  # noqa: E731
-            message = "|".join(esc(f) for f in ["MAGP-RESUME-CLAIM-v1", esc_id, e["authorizationId"], body["agentDid"], body["nonce"], body["issuedAt"]])
+            fields = (["MAGP-RESUME-CLAIM-v2", esc_id, e["authorizationId"], body["agentDid"], body["requestDigest"], body["contextDigest"], body["nonce"], body["issuedAt"]]
+                      if v2 else ["MAGP-RESUME-CLAIM-v1", esc_id, e["authorizationId"], body["agentDid"], body["nonce"], body["issuedAt"]])
+            message = "|".join(esc(f) for f in fields)
             self.public_key.verify(bytes.fromhex(body["signature"]), message.encode("utf-8"))
         except Exception:
-            return 401, {"success": False, "message": "SIGNATURE_INVALID", "data": {"reasonCode": "SIGNATURE_INVALID"}}
+            return refuse("SIGNATURE_INVALID", 401)
         if e["status"] != "approved":
-            return 409, {"success": False, "message": "ESCALATION_NOT_APPROVED", "data": {"reasonCode": "ESCALATION_NOT_APPROVED"}}
+            return refuse("ESCALATION_NOT_APPROVED", 409)
+        # A v2 gate (F-1-NF-R) refuses a v1 claim, and a v2 claim for another request or context — before taking the resume.
+        if self.resume_claim_version is not None and self.resume_claim_version >= 2:
+            if not v2:
+                return refuse("AUTHORIZATION_CONTEXT_REQUIRED")
+            if body["requestDigest"] != self._request_digest(e):
+                return refuse("ESCALATION_REQUEST_MISMATCH")
+            if body["contextDigest"] != self._context_digest(e.get("itinerary")):
+                return refuse("AUTHORIZATION_CONTEXT_MISMATCH")
         with self._lock:
             if e.get("resumeClaimed"):
                 return 409, {"success": False, "message": "AUTHORIZATION_IN_USE", "data": {"reasonCode": "AUTHORIZATION_IN_USE"}}
@@ -242,6 +255,8 @@ class FakeGate:
                     data["requestDigest"] = self._request_digest(e)
                 if self.context_binding:
                     data["contextDigest"] = self._context_digest(e.get("itinerary"))
+                if self.resume_claim_version is not None:
+                    data["resumeClaimVersion"] = self.resume_claim_version
             if e["status"] == "modified":
                 data["reasonCode"] = "MODIFIED"
                 data["nextEscalationId"] = "esc-next"

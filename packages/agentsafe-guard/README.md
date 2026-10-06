@@ -719,7 +719,7 @@ timeout, or the gate was unreachable), with the status in `err.governance`. It r
 authorization is still unused: a second resume of the same escalation is refused `AUTHORIZATION_ALREADY_USED` without
 touching the tool, and one started while another resume of it is still running in this process is refused
 `AUTHORIZATION_IN_USE` (0.22.0). Since 0.28.0 that holds across *processes* too: before running, `.resume()` takes the
-approval's one resume at the issuer (`POST /policy/escalations/:id/resume-claim`, signed `MAGP-RESUME-CLAIM-v1`), a single
+approval's one resume at the issuer (`POST /policy/escalations/:id/resume-claim`, signed `MAGP-RESUME-CLAIM-v1`, `-v2` since 0.32.0), a single
 atomic update — a second process gets `AUTHORIZATION_IN_USE` and never runs the tool. It is at most once: a resume that
 crashed after taking it does not hand the approval to another run (the owner approves again). A key provider that cannot
 sign the claim (the signer daemon), or an issuer that predates it, resumes as before.
@@ -735,6 +735,13 @@ carries a `contextDigest` of the context (itinerary) the owner reviewed, and `.r
 reproduce it — its `riskLevel` included, so resume with exactly the args the escalation was raised with. A gateway checks the
 same digest when it claims the hold (agentsafe-mcp-guard 0.27.0+, MAGP §8.7.20); the in-process check matters for a tool that
 runs in this process, where nothing else stands between the args and the tool.
+
+**And the issuer checks it too** (0.32.0, MAGP §9a.6). The checks above run inside this SDK, so an outdated one cannot apply
+them. Since 0.32.0 the resume claim is signed as `MAGP-RESUME-CLAIM-v2`, which also carries the `requestDigest` and
+`contextDigest` of the args about to run; the issuer compares them with the approval's and refuses a difference
+(`ESCALATION_REQUEST_MISMATCH` / `AUTHORIZATION_CONTEXT_MISMATCH`) with the one resume left untaken. An issuer that requires it
+says so on the status (`resumeClaimVersion: 2`) and refuses a v1 claim — which guard 0.28–0.31 sign — with
+`AUTHORIZATION_CONTEXT_REQUIRED`: upgrade to 0.32.0 to resume approvals there.
 
 **An authorize whose answer never arrived** (a timeout, a dropped connection, a proxy's 5xx) may still have minted a hold:
 the gate commits it whether or not anyone is waiting, and nothing could use or settle it until its TTL. Since 0.22.0 the
