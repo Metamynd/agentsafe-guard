@@ -910,7 +910,10 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
 
     // allow + observe both PERMIT the upstream call (observe = permit-but-flag, SAFR §11).
     if (decision?.decision !== 'allow' && decision?.decision !== 'observe') {
-      return { status: 403, body: { decision: decision?.decision ?? 'block', reasonCode: decision?.reasonCode ?? 'BLOCKED' }, governance: decision };
+      // The issuer's sentence for a refused claim rides along (0.28.0, pre-beta rerun 6 FW6-1): the bare code was all the agent
+      // saw of, say, AUTHORIZATION_CONTEXT_REQUIRED. Only the issuer's own `detail` — never a stack or an internal error.
+      const detail = typeof decision?.detail === 'string' && decision.detail ? decision.detail : undefined;
+      return { status: 403, body: { decision: decision?.decision ?? 'block', reasonCode: decision?.reasonCode ?? 'BLOCKED', ...(detail ? { detail } : {}) }, governance: decision };
     }
 
     // The authorization is the effect's natural idempotency key: one authorization is one execution. Hand it

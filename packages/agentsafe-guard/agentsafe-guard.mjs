@@ -72,6 +72,39 @@ const UNSIGNED_JURISDICTION_KEYS = ['jurisdiction', 'mm:jurisdiction'];
 /** Effect outcomes (GET …/effect) after which a hold is final: there is nothing left for an agent to capture. */
 const SETTLED_OUTCOMES = new Set(['settled', 'not_executed', 'expired', 'reversing', 'reversed', 'reversal_failed']);
 
+/**
+ * What a gateway older than the approved-context binding (MAGP §9a.5) answers when asked to run an approval: its claim states
+ * no context, and the issuer refuses it AUTHORIZATION_CONTEXT_REQUIRED with the hold untouched (pre-beta rerun 6 FW6-1).
+ */
+const OUTDATED_GATEWAY_CODE = 'AUTHORIZATION_CONTEXT_REQUIRED';
+const OUTDATED_GATEWAY_HINT =
+  'the gateway this tool called predates the approved-context binding (MAGP §9a.5), so it could not claim the approval and ran nothing. ' +
+  'Upgrade it (@metamynd/agentsafe-mcp-guard >= 0.27.0, @metamynd/agentsafe-http-gateway >= 0.26.0, @metamynd/agentsafe-a2a-guard >= 0.18.0) ' +
+  'and resume() again: the approval is kept, not voided';
+
+/** The reason code a tool's error carries, however the tool attached it (a relayed GovernanceBlocked, or a code field). */
+function errorReasonCode(err) {
+  const code = err?.governance?.reasonCode ?? err?.reasonCode ?? err?.code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function isOutdatedGatewayRefusal(err) {
+  return errorReasonCode(err) === OUTDATED_GATEWAY_CODE;
+}
+
+/** Say on the error (and once in the log) which gateway to upgrade: the bare code said nothing a developer could act on. */
+function explainOutdatedGateway(err) {
+  const relayed = typeof err?.governance?.detail === 'string' ? err.governance.detail : typeof err?.detail === 'string' ? err.detail : '';
+  const detail = relayed && relayed !== OUTDATED_GATEWAY_CODE ? relayed : OUTDATED_GATEWAY_HINT;
+  try {
+    err.upgradeRequired = true;
+    err.holdKept = true;
+    err.detail = detail;
+    if (typeof err.message === 'string' && !err.message.includes(OUTDATED_GATEWAY_HINT)) err.message = `${err.message} — ${OUTDATED_GATEWAY_HINT}`;
+  } catch { /* a frozen error: the log line below still says it */ }
+  console.warn(`[agentsafe] ${OUTDATED_GATEWAY_CODE}: ${detail}`);
+}
+
 /** At most `max` UTF-16 units (the issuer's column limit), never ending in half of a surrogate pair. */
 function cutUtf16(s, max) {
   if (s.length <= max) return s;
@@ -1111,7 +1144,8 @@ export function createGuard(opts = {}) {
     const settle = toolOpts.settle ?? 'capture';
     const releaseOnError = toolOpts.releaseOnError ?? false;
     const refusal = (decision) => {
-      const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}${derivedRiskNote(decision)}`);
+      const hint = typeof decision.hint === 'string' && decision.hint ? ` — ${decision.hint}` : '';
+      const err = new Error(`AgentSafe ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}${derivedRiskNote(decision)}${hint}`);
       err.name = 'GovernanceBlocked';
       err.governance = decision;
       err.raisedByGuard = true; // this wrapper's own refusal — never evidence that an enclosing tool did nothing
@@ -1154,6 +1188,14 @@ export function createGuard(opts = {}) {
         // ExecutionAdapter seam (§19): the adapter runs the real handler (proceed) or substitutes it.
         result = await adapter({ action, args, decision, proceed: () => handler(args, decision) });
       } catch (err) {
+        // A gateway that predates the approved-context binding refused to claim the approval (0.34.0, pre-beta rerun 6 FW6-1).
+        // Nothing ran there and the hold is unclaimed, so it is KEPT: voiding it left the owner to approve the same request
+        // again, and the next resume misreported the voided hold as AUTHORIZATION_ALREADY_USED. The issuer re-opens the one
+        // resume for it, so resume() works again once the gateway is upgraded. The error says which gateway to upgrade.
+        if (decision.authorizationId && isOutdatedGatewayRefusal(err)) {
+          explainOutdatedGateway(err);
+          throw err;
+        }
         if (decision.authorizationId && nothingRan(err)) {
           const reason = 'tool did not run: ' + (err?.governance?.reasonCode ?? err?.code ?? err?.name ?? 'error');
           await voidHold(decision.authorizationId, reason.slice(0, 200));
@@ -1256,8 +1298,12 @@ export function createGuard(opts = {}) {
         return 'unsupported';
       }
       const code = body?.data?.reasonCode;
+      // The issuer's sentence rides along (0.34.0): a v1 claim's refusal names the SDK upgrade, and a bare code did not.
+      const detail = body?.data?.detail;
+      if (typeof detail === 'string' && detail) resumeRefusalDetail.set(escalationId, detail);
       return typeof code === 'string' && code ? code : `GATE_HTTP_${res.status}`;
     };
+    const resumeRefusalDetail = new Map();
     gated.resume = async (escalationId, args, opts = {}) => {
       if (resumesInFlight.has(escalationId)) {
         throw refusal({ decision: 'block', reasonCode: 'AUTHORIZATION_IN_USE', escalationId, status: 'approved' });
@@ -1277,6 +1323,12 @@ export function createGuard(opts = {}) {
       const fx = await effectStatus(st.authorizationId);
       if (fx?.outcome !== 'not_started') {
         const unreachable = fx?.effectState === 'unreachable';
+        // A VOIDED hold was never used: it was released (by this agent after a failed run, its owner, a revoke…), and nothing
+        // can run under it now. Saying AUTHORIZATION_ALREADY_USED sent the developer looking for a run that never happened
+        // (0.34.0, pre-beta rerun 6 FW6-1): say what became of it, and that the owner must approve again.
+        if (!unreachable && fx?.spendStatus === 'voided') {
+          throw refusal({ decision: 'block', reasonCode: 'AUTHORIZATION_VOIDED', escalationId, authorizationId: st.authorizationId, status: 'approved', outcome: fx.outcome ?? null, hint: "the approval's hold was voided, so nothing can run under it — its owner must approve the request again" });
+        }
         throw refusal({ decision: 'block', reasonCode: unreachable ? 'GATE_UNREACHABLE' : 'AUTHORIZATION_ALREADY_USED', escalationId, authorizationId: st.authorizationId, status: 'approved', outcome: fx?.outcome ?? null });
       }
       const mapped = mapArgs(args);
@@ -1303,9 +1355,12 @@ export function createGuard(opts = {}) {
       // is refused AUTHORIZATION_IN_USE instead of running an in-process tool twice (the in-process lock above covers one
       // process only). At most once — a crash after this does not hand the approval to another run.
       const digests = Number(st.resumeClaimVersion) >= 2 ? { requestDigest: resumeDigestFor(st, mapped), contextDigest: resumeContextDigestFor(mapped) } : undefined;
+      resumeRefusalDetail.delete(escalationId);
       const claimed = await claimResume(escalationId, st.authorizationId, digests);
       if (claimed !== 'claimed' && claimed !== 'unsupported') {
-        throw refusal({ decision: 'block', reasonCode: claimed, escalationId, authorizationId: st.authorizationId, status: 'approved' });
+        const hint = resumeRefusalDetail.get(escalationId);
+        resumeRefusalDetail.delete(escalationId);
+        throw refusal({ decision: 'block', reasonCode: claimed, escalationId, authorizationId: st.authorizationId, status: 'approved', ...(hint ? { hint } : {}) });
       }
       return run(args, { decision: 'allow', reasonCode: st.reasonCode ?? 'ESCALATION_APPROVED', authorizationId: st.authorizationId, escalationId }, mapped);
     };

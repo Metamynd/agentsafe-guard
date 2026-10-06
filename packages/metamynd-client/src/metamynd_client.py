@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.19.2"
+__version__ = "0.20.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1493,6 +1493,7 @@ class MetaMyndClient:
         With `request_digest` and `context_digest` (0.19.0, pre-beta rerun 6 F-1-NF-R) — the digests of the call about to run —
         the claim is signed as MAGP-RESUME-CLAIM-v2 and the gate refuses it unless they are the approved request and context.
         """
+        self._resume_refusal_detail = None
         if not hasattr(self._signer, "sign_resume_claim"):
             return "unsupported"
         nonce = secrets.token_hex(16)
@@ -1523,6 +1524,9 @@ class MetaMyndClient:
                 return "unsupported"
             data = body.get("data") if isinstance(body, dict) else None
             code = data.get("reasonCode") if isinstance(data, dict) else None
+            # The gate's sentence for the refusal (0.20.0): resume() puts it on the GovernanceBlocked's hint.
+            detail = data.get("detail") if isinstance(data, dict) else None
+            self._resume_refusal_detail = detail if isinstance(detail, str) and detail else None
             return code if isinstance(code, str) and code else f"GATE_HTTP_{exc.code}"
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise GateUnreachable(f"gate unreachable ({getattr(exc, 'reason', exc)}) — the resume was not claimed, so it did not run") from exc
@@ -1682,6 +1686,44 @@ class ToolNotExecuted(Exception):
     can say the same with an attribute: `nothing_executed = True`."""
 
     nothing_executed = True
+
+
+# What a gateway older than the approved-context binding (MAGP 9a.5) answers when asked to run an approval: its claim states
+# no context, and the gate refuses it AUTHORIZATION_CONTEXT_REQUIRED with the hold untouched (pre-beta rerun 6 FW6-1).
+OUTDATED_GATEWAY_CODE = "AUTHORIZATION_CONTEXT_REQUIRED"
+OUTDATED_GATEWAY_HINT = (
+    "the gateway this tool called predates the approved-context binding (MAGP 9a.5), so it could not claim the approval and ran "
+    "nothing. Upgrade it (@metamynd/agentsafe-mcp-guard >= 0.27.0, @metamynd/agentsafe-http-gateway >= 0.26.0, "
+    "@metamynd/agentsafe-a2a-guard >= 0.18.0) and resume() again: the approval is kept, not voided"
+)
+
+
+def _error_reason_code(exc: BaseException) -> Optional[str]:
+    """The reason code a tool's exception carries, however the tool attached it (a relayed GovernanceBlocked, or a field)."""
+    verdict = getattr(exc, "verdict", None)
+    code = getattr(verdict, "reason_code", None) or getattr(exc, "reason_code", None) or getattr(exc, "code", None)
+    return code if isinstance(code, str) else None
+
+
+def _is_outdated_gateway_refusal(exc: BaseException) -> bool:
+    return _error_reason_code(exc) == OUTDATED_GATEWAY_CODE
+
+
+def _explain_outdated_gateway(exc: BaseException) -> None:
+    """Say on the exception (and in one warning) which gateway to upgrade: the bare code said nothing a developer could act on."""
+    verdict = getattr(exc, "verdict", None)
+    raw = getattr(verdict, "raw", None)
+    relayed = (raw.get("detail") if isinstance(raw, Mapping) else None) or getattr(verdict, "hint", None) or getattr(exc, "detail", None)
+    detail = relayed if isinstance(relayed, str) and relayed and relayed != OUTDATED_GATEWAY_CODE else OUTDATED_GATEWAY_HINT
+    try:
+        exc.upgrade_required = True  # type: ignore[attr-defined]
+        exc.hold_kept = True  # type: ignore[attr-defined]
+        exc.detail = detail  # type: ignore[attr-defined]
+        if hasattr(exc, "add_note"):
+            exc.add_note(OUTDATED_GATEWAY_HINT)
+    except Exception:  # noqa: BLE001 — an exception that takes no attributes: the warning below still says it
+        pass
+    warnings.warn(f"{OUTDATED_GATEWAY_CODE}: {detail}", stacklevel=4)
 
 
 # Reason codes that mean "the gate gave no decision" (a rate-limit or server error with a JSON body is read as a block
@@ -1921,6 +1963,13 @@ def guard_tool(
         except GateUnreachable as exc:
             raise _guard_refusal(Verdict(decision="block", reason_code=GateUnreachable.reason_code, escalation_id=escalation_id, hint=str(exc))) from exc
         if used.outcome != "not_started":
+            # A VOIDED hold was never used: it was released (by this agent after a failed run, its owner, a revoke…) and nothing
+            # can run under it. AUTHORIZATION_ALREADY_USED sent the developer looking for a run that never happened (0.20.0,
+            # pre-beta rerun 6 FW6-1): say what became of it, and that the owner must approve again.
+            if used.spend_status == "voided":
+                raise _guard_refusal(Verdict(decision="block", reason_code="AUTHORIZATION_VOIDED", authorization_id=state.authorization_id,
+                                             escalation_id=escalation_id,
+                                             hint="the approval's hold was voided, so nothing can run under it — its owner must approve the request again"))
             raise _guard_refusal(Verdict(decision="block", reason_code="AUTHORIZATION_ALREADY_USED", authorization_id=state.authorization_id,
                                          escalation_id=escalation_id, hint=f"outcome: {used.outcome}"))
         # Only what was approved (0.14.0, MAGP 9a.5): the approval's hold is for ONE request. A gateway re-verifies it, but an
@@ -1978,8 +2027,10 @@ def guard_tool(
         except GateUnreachable as exc:
             raise _guard_refusal(Verdict(decision="block", reason_code=GateUnreachable.reason_code, escalation_id=escalation_id, hint=str(exc))) from exc
         if claim not in ("claimed", "unsupported"):
+            refusal_detail = getattr(client, "_resume_refusal_detail", None)
             raise _guard_refusal(Verdict(decision="block", reason_code=claim, authorization_id=state.authorization_id, escalation_id=escalation_id,
-                                         hint="another process took this approval's one resume" if claim == "AUTHORIZATION_IN_USE" else None))
+                                         hint=refusal_detail if isinstance(refusal_detail, str) and refusal_detail
+                                         else "another process took this approval's one resume" if claim == "AUTHORIZATION_IN_USE" else None))
         verdict = Verdict(decision="allow", reason_code=state.reason_code or "ESCALATION_APPROVED", authorization_id=state.authorization_id,
                           escalation_id=escalation_id, raw=state.raw, signed=signed)
         return verdict, payload
@@ -2012,6 +2063,13 @@ def guard_tool(
 
     def _after_failure(verdict: "Verdict", exc: BaseException) -> None:
         """Release the hold of a call that cannot have run; keep it otherwise. Best effort: the TTL is the backstop."""
+        # A gateway that predates the approved-context binding refused to claim the approval (0.20.0, pre-beta rerun 6 FW6-1):
+        # nothing ran there and the hold is unclaimed, so it is KEPT. Voiding it left the owner to approve the same request
+        # again, and the next resume misreported it as AUTHORIZATION_ALREADY_USED. The gate re-opens the one resume for it, so
+        # resume() works again once the gateway is upgraded. The exception says which gateway to upgrade.
+        if verdict.authorization_id and isinstance(exc, Exception) and _is_outdated_gateway_refusal(exc):
+            _explain_outdated_gateway(exc)
+            return
         if not verdict.authorization_id or not _nothing_ran(exc):
             return
         code = exc.verdict.reason_code if isinstance(exc, GovernanceBlocked) else str(getattr(exc, "code", "") or type(exc).__name__)

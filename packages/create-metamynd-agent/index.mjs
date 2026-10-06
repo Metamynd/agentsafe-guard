@@ -93,7 +93,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // issuer (pre-beta rerun 6 F-1-NF-R); an issuer that requires it refuses the v1 claim older guards sign.
 // 0.33.0: the bundled policy-core judges owner-keyed operation rules (context-value-in / -not-in, NF-RISK-SELF) like the
 // gate, so a local check escalates an owner-marked op (e.g. delete-all) whatever riskLevel the agent declares.
-const GUARD_VERSION = '^0.33.0';
+// 0.34.0: a tool whose gateway predates the approved-context binding (AUTHORIZATION_CONTEXT_REQUIRED) no longer voids the approval;
+// resume() works again once the gateway is upgraded, and a voided approval is reported AUTHORIZATION_VOIDED (pre-beta rerun 6 FW6-1).
+const GUARD_VERSION = '^0.34.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -180,7 +182,8 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.27.1: reportOutcome() reports an authorization a request only NAMED as presented, never as the one it ran under (FW6-3).
 // 0.28.0: a gateway judges owner-keyed operation rules (context-value-in / -not-in) from its bundle like the gate
 // (NF-RISK-SELF). Required: a gateway on an older guard would read an operation rule's atom as unknown and let it run.
-const MCP_GUARD_VERSION = '^0.28.0';
+// 0.29.0: a claim the issuer refuses is logged in one line and its block carries the issuer's detail (FW6-1).
+const MCP_GUARD_VERSION = '^0.29.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -216,7 +219,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.26.0: depends on agentsafe-mcp-guard ^0.27.0 (the approved-context binding). Required with MCP_GUARD_VERSION above.
 // 0.26.1: a report names an authorization as claimed only when this gateway claimed it (FW6-3); depends on agentsafe-mcp-guard ^0.27.1.
 // 0.27.0: depends on agentsafe-mcp-guard ^0.28.0 (operation rules). Required with MCP_GUARD_VERSION above.
-const GATEWAY_VERSION = '^0.27.0';
+// 0.28.0: a 403 for a refused claim carries the issuer's detail (FW6-1); depends on agentsafe-mcp-guard ^0.29.0.
+const GATEWAY_VERSION = '^0.28.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `
@@ -1545,7 +1549,7 @@ async function bookFlightViaGateway(args, decision) {
   if (!res.ok) {
     const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
     err.name = 'GovernanceBlocked';
-    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR' };
+    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR', ...(typeof body?.detail === 'string' ? { detail: body.detail } : {}) };
     throw err;
   }
   return body;
@@ -1775,7 +1779,7 @@ async function performViaGateway(args, decision) {
   if (!res.ok) {
     const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
     err.name = 'GovernanceBlocked';
-    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR' };
+    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR', ...(typeof body?.detail === 'string' ? { detail: body.detail } : {}) };
     throw err;
   }
   return body;
@@ -3538,7 +3542,7 @@ async function callGateway(path, action, args) {
   if (!res.ok) {
     const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
     err.name = 'GovernanceBlocked';
-    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR' };
+    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR', ...(typeof body?.detail === 'string' ? { detail: body.detail } : {}) };
     throw err;
   }
   return body;
@@ -3750,7 +3754,7 @@ async function callGateway(path, action, args) {
   if (!res.ok) {
     const err = new Error('gateway ' + res.status + ': ' + (body?.reasonCode ?? 'refused'));
     err.name = 'GovernanceBlocked';
-    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR' };
+    err.governance = { decision: body?.decision ?? 'block', reasonCode: body?.reasonCode ?? 'GATEWAY_ERROR', ...(typeof body?.detail === 'string' ? { detail: body.detail } : {}) };
     throw err;
   }
   return body;

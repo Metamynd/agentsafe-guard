@@ -217,6 +217,14 @@ signed = client.sign_request("flight-purchase", 150, merchant="skyward-air",
 requests.post(url, json=body, headers=signed.headers())
 ```
 
+**A gateway too old to run an approval** (0.20.0). A gateway older than agentsafe-mcp-guard 0.27.0 /
+agentsafe-http-gateway 0.26.0 / agentsafe-a2a-guard 0.18.0 cannot claim a person-approved hold (the gate refuses it
+`AUTHORIZATION_CONTEXT_REQUIRED`; it runs nothing). When a guarded tool's exception carries that code, `resume()` keeps
+the approval's hold instead of voiding it, sets `upgrade_required`, `hold_kept` and `detail` (which gateway to upgrade)
+on the exception, and warns once. The gate re-opens the approval's one resume, so `resume()` runs it after the upgrade —
+no second approval. An approval whose hold was voided is refused `AUTHORIZATION_VOIDED` (the owner must approve again),
+not `AUTHORIZATION_ALREADY_USED`.
+
 ### Bind the WHOLE payload, not just eight fields (0.2.0 / 0.3.0, MAGP §8.3.9, §8.3.11)
 
 The signature covers the agent, action, amount, currency, merchant and resource — not a payee or an account number. Pass
