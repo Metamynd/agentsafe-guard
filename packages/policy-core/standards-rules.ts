@@ -1,4 +1,4 @@
-import { ATOM_REGISTRY } from './atom-registry.js';
+import { ATOM_REGISTRY, contextValueMatch, type ContextValueMatch } from './atom-registry.js';
 import { ownEntry } from './own-entry.js';
 import { ATOM_SPECS, type AtomConfigField } from './atom-catalog.js';
 import type { EvaluationContext, PolicyDecision } from './types.js';
@@ -101,6 +101,63 @@ export interface StandardRuleResult {
    * does not fire on a missing value. Absent otherwise, so every existing result is unchanged.
    */
   jurisdictionRequired?: true;
+  /**
+   * Present when a molecule that refuses or escalates fired on an owner-keyed context value (`context-value-in` /
+   * `context-value-not-in`): which field, which value, and why — so the issuer can say the risk was DERIVED from what
+   * the agent is doing, not taken from the agent's own label (pre-beta rerun 6, NF-RISK-SELF; see contextRiskSignals).
+   * Collected from every such firing molecule, not only the winning one. Absent otherwise.
+   */
+  contextSignals?: ContextSignal[];
+}
+
+/** One owner-keyed context value a refusing or escalating molecule fired on. */
+export interface ContextSignal extends ContextValueMatch {
+  predicate: 'context-value-in' | 'context-value-not-in';
+  moleculeId: string;
+  decision: FireDecision;
+}
+
+const CONTEXT_VALUE_ATOMS = ['context-value-in', 'context-value-not-in'] as const;
+
+/**
+ * The owner-keyed context values a FIRED molecule fired on. Only `all`/`any` molecules: under `none` a molecule fires
+ * because its atoms did NOT, so there is no value to name. An `observe` molecule permits, so it names nothing either.
+ */
+function contextSignalsOf(m: Molecule, ctx: EvaluationContext, decision: FireDecision): ContextSignal[] {
+  if (decision === 'observe' || (m.combinator !== 'all' && m.combinator !== 'any')) return [];
+  const out: ContextSignal[] = [];
+  for (const a of m.atoms ?? []) {
+    const predicate = CONTEXT_VALUE_ATOMS.find((p) => p === a.predicate);
+    if (!predicate) continue;
+    let hit: ContextValueMatch | null = null;
+    try {
+      hit = contextValueMatch(ctx, a.config, predicate === 'context-value-in' ? 'in' : 'not-in');
+    } catch {
+      hit = null; // atomFires already treated a throw as not-firing; nothing to name
+    }
+    if (hit) out.push({ ...hit, predicate, moleculeId: m.id, decision });
+  }
+  return out;
+}
+
+/**
+ * The derived risk signals a rule result carries for owner-keyed context values, in the same shape as the financial
+ * ones (`riskSignalsFor`): `{ signal: 'context-value', level: 'high', detail }`, e.g. "op=delete-all is owner-marked
+ * for review". So a review raised this way says it was derived by MetaMynd from the request, not from the riskLevel
+ * the agent declared (pre-beta rerun 6, NF-RISK-SELF). Deduplicated by detail.
+ */
+export function contextRiskSignals(result: Pick<StandardRuleResult, 'contextSignals'> | null | undefined): { signal: 'context-value'; level: 'high'; detail: string }[] {
+  const out = new Map<string, { signal: 'context-value'; level: 'high'; detail: string }>();
+  for (const s of result?.contextSignals ?? []) {
+    const verb = s.decision === 'escalate' ? 'owner-marked for review' : 'owner-marked as not allowed';
+    const detail =
+      s.reason === 'listed' ? `${s.field}=${s.value} is ${verb}`
+      : s.reason === 'unlisted' ? `${s.field}=${s.value} is not on the owner's list (${s.decision === 'escalate' ? 'review' : 'not allowed'})`
+      : s.reason === 'missing' ? `${s.field} was not sent, and the owner requires it`
+      : `${s.field} is not a plain value, so it cannot be checked against the owner's list`;
+    out.set(detail, { signal: 'context-value', level: 'high', detail });
+  }
+  return [...out.values()];
 }
 
 /** The atom whose field the gate supplies only from the SIGNED jurisdiction (spec §8.3.12). */
@@ -213,10 +270,12 @@ export function evaluateStandardRules(
   standardKey: string | null = null,
 ): StandardRuleResult {
   let best: { decision: FireDecision; reasonCode: string; id: string; unverifiable?: string[] } | null = null;
+  const contextSignals: ContextSignal[] = [];
   for (const m of molecules ?? []) {
     const fired = moleculeFires(m, ctx);
     const unverifiable = moleculeUnverifiable(m, ctx);
     if (!fired && unverifiable.length === 0) continue;
+    if (fired) contextSignals.push(...contextSignalsOf(m, ctx, m.decision));
     let decision: FireDecision = fired ? m.decision : 'escalate';
     if (unverifiable.length > 0 && PRECEDENCE[decision] < PRECEDENCE.escalate) decision = 'escalate';
     const reasonCode = fired ? m.reasonCode : CONTEXT_UNVERIFIABLE;
@@ -231,6 +290,7 @@ export function evaluateStandardRules(
     firedMoleculeId: best.id,
     standardKey,
     ...(best.unverifiable ? { unverifiableContext: best.unverifiable } : {}),
+    ...(contextSignals.length > 0 ? { contextSignals } : {}),
   };
 }
 
@@ -244,11 +304,18 @@ export function evaluateBoundStandards(
   ctx: EvaluationContext,
 ): StandardRuleResult {
   let best: StandardRuleResult = { decision: 'allow', reasonCode: null, firedMoleculeId: null, standardKey: null };
+  // Every bound document's owner-keyed context signals, not only the winner's: a tie on precedence keeps the first
+  // document's reason code, and the review must still say an operation rule in another document fired too.
+  const contextSignals: ContextSignal[] = [];
   for (const s of standards) {
     const r = evaluateStandardRules(s.document?.molecules, ctx, s.standardKey);
+    if (r.contextSignals) contextSignals.push(...r.contextSignals);
     if (PRECEDENCE[r.decision] > PRECEDENCE[best.decision]) best = r;
   }
-  return standards.some((s) => documentEnforcesJurisdiction(s.document)) ? { ...best, jurisdictionRequired: true } : best;
+  const out: StandardRuleResult = { ...best };
+  delete out.contextSignals;
+  if (contextSignals.length > 0) out.contextSignals = contextSignals;
+  return standards.some((s) => documentEnforcesJurisdiction(s.document)) ? { ...out, jurisdictionRequired: true } : out;
 }
 
 // --- Authoring-time validation (also used to validate AI-drafted rules) ---
@@ -292,6 +359,10 @@ function validateAtomConfig(predicate: string, config: Record<string, unknown> |
     }
     if (!configValueValid(field, cfg[field.key])) {
       errors.push(`atom '${predicate}' config '${field.key}' must be a ${field.type}`);
+    } else if (field.required && field.type === 'string' && String(cfg[field.key]).trim() === '') {
+      // A blank required string (a context-value atom's `field`) validates as a string but names nothing: the atom
+      // would never fire, so the rule would look active and restrict nothing (NF-RISK-SELF).
+      errors.push(`atom '${predicate}' config '${field.key}' must not be blank`);
     }
   }
   return errors;

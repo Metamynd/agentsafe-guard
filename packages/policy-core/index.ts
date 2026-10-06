@@ -12,7 +12,7 @@
 export type { PolicyDecision, EvaluationContext, Verdict } from './types.js';
 
 // Atoms
-export { ATOM_REGISTRY } from './atom-registry.js';
+export { ATOM_REGISTRY, contextValueMatch, contextValueAt, normalizeContextToken, type ContextValueMatch } from './atom-registry.js';
 export {
   ATOM_SPECS,
   CATALOGUED_ATOMS,
@@ -40,6 +40,8 @@ export {
   type ValidationIssue,
   documentEnforcesJurisdiction,
   JURISDICTION_ATOM,
+  contextRiskSignals,
+  type ContextSignal,
 } from './standards-rules.js';
 
 // Mandate (ODRL) evaluator + budget helpers

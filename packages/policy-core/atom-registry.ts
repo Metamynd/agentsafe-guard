@@ -125,7 +125,118 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
   // is present (e.g. no counterparty resolved) the atom simply does not fire — no guidance.
   'hol-trust-below-review': (c, cfg) =>
     typeof c.holTrustScore === 'number' && c.holTrustScore < Number(cfg?.reviewBelow ?? 60),
+  // --- Owner-keyed context atoms (pre-beta rerun 6, NF-RISK-SELF). For a non-financial action the only risk input
+  //     used to be the riskLevel the agent declares about itself: {riskLevel:'low', op:'delete-all'} ran unreviewed.
+  //     These let the owner key a rule on WHAT is being done — a field of the context the executor acts on — so the
+  //     agent's label no longer decides. See contextValueMatch below for the matching and fail-closed rules. ---
+  // Deny-list: fires when the field's value IS one of the owner's values ("deleting needs approval").
+  'context-value-in': (c, cfg) => contextValueMatch(c, cfg, 'in') !== null,
+  // Allow-list: fires when the field's value is NOT one of them ("anything but read/list needs approval"). The sound
+  // choice when the set of safe operations is known: a spelling the owner did not foresee fires instead of passing.
+  'context-value-not-in': (c, cfg) => contextValueMatch(c, cfg, 'not-in') !== null,
 };
+
+// ─── owner-keyed context values (NF-RISK-SELF) ──────────────────────────────────────────────────────────
+
+/** Why a context-value atom fired: the value is listed / not listed, or the field could not be judged. */
+export interface ContextValueMatch {
+  field: string;
+  /** The value that decided it, as the agent sent it (trimmed, at most 80 characters). Absent for `missing`. */
+  value?: string;
+  reason: 'listed' | 'unlisted' | 'missing' | 'malformed';
+}
+
+/**
+ * Common look-alikes of Latin letters from Cyrillic and Greek. NFKC folds width and compatibility forms
+ * ("ｄｅｌｅｔｅ" -> "delete") but NOT a Cyrillic "е" in "dеlete": that is a different letter, not a variant. A
+ * deny-list that an agent can dodge with one look-alike letter is not a control, so both sides are folded through
+ * this table before comparing. It is deliberately small (the letters that are visually identical in common fonts),
+ * not the full Unicode confusables skeleton — which is why the allow-list atom (`context-value-not-in`) is the
+ * recommended form when the safe values are known: there an unforeseen spelling fires instead of passing.
+ */
+const LOOKALIKE_FOLD: Readonly<Record<string, string>> = {
+  // Cyrillic (lower case; upper case is lower-cased before folding)
+  'а': 'a', 'в': 'b', 'е': 'e', 'ё': 'e', 'к': 'k', 'м': 'm', 'н': 'h', 'о': 'o', 'р': 'p', 'с': 'c', 'т': 't',
+  'у': 'y', 'х': 'x', 'ѕ': 's', 'і': 'i', 'ї': 'i', 'ј': 'j', 'ԁ': 'd', 'ӏ': 'l', 'һ': 'h', 'ԛ': 'q', 'ԝ': 'w',
+  // Greek
+  'α': 'a', 'β': 'b', 'ε': 'e', 'η': 'n', 'ι': 'i', 'κ': 'k', 'ν': 'v', 'ο': 'o', 'ρ': 'p', 'τ': 't', 'υ': 'u',
+  'χ': 'x', 'ϲ': 'c',
+};
+const LOOKALIKE_RE = new RegExp(`[${Object.keys(LOOKALIKE_FOLD).join('')}]`, 'g');
+/** Invisible / format characters (soft hyphen, zero-width, bidi controls, variation selectors, BOM). */
+const INVISIBLE_RE = /[­͏؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮⁠-⁯ㅤ︀-️﻿ﾠ]/g;
+
+/**
+ * The comparison form of a value: Unicode NFKC, invisible characters removed, lower case, Cyrillic/Greek look-alikes
+ * folded to Latin, and whitespace, hyphens and underscores removed — so "Delete-All", " delete_all ", "DELETE ALL",
+ * "ｄｅｌｅｔｅ－ａｌｌ" and "dеlete-all" (Cyrillic е) all compare equal to "deleteall". Pure and locale-free (never
+ * toLocaleLowerCase), so the gate and every guard bundle compute the same string.
+ */
+export function normalizeContextToken(s: string): string {
+  return s
+    .normalize('NFKC')
+    .replace(INVISIBLE_RE, '')
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(LOOKALIKE_RE, (ch) => LOOKALIKE_FOLD[ch] ?? ch)
+    .replace(/[\s\-_‐-―−]+/g, '');
+}
+
+/**
+ * The value at a dot path in the context (`op`, `params.op`), read through OWN properties only — a path segment named
+ * `__proto__` or `constructor` reads nothing rather than something inherited. A key that itself contains a dot is not
+ * addressable: the path is always split, so an agent cannot send `{"params.op": "read", params: {op: "delete-all"}}`
+ * and choose which of the two the rule reads.
+ */
+export function contextValueAt(ctx: Record<string, unknown> | null | undefined, path: string): unknown {
+  let cur: unknown = ctx;
+  for (const seg of path.split('.')) {
+    if (seg === '' || cur === null || typeof cur !== 'object' || Array.isArray(cur)) return undefined;
+    if (!Object.prototype.hasOwnProperty.call(cur, seg)) return undefined;
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  return cur;
+}
+
+const clip = (s: string) => (s.length > 80 ? `${s.slice(0, 77)}...` : s).replace(/[\u0000-\u001F\u007F]/g, '');
+
+/**
+ * Whether an owner-keyed context-value atom fires, and why — null when it does not. Config:
+ *   field     dot path into the context (required)
+ *   values    the owner's list
+ *   match     'exact' (default) or 'contains' (the value contains a listed entry: "bulk_delete" contains "delete")
+ *   missing   'pass' (default) or 'fire': what an absent field means. 'fire' is fail-closed: an agent cannot skip the
+ *             rule by not sending the field
+ *   actions   optional: only judge these actions (the signed `action`); any other action is out of the rule's scope
+ *
+ * Fail-closed shapes, whatever the mode: a value that is not a plain string/number/boolean (or a list of them) —
+ * an object, a nested list — cannot be compared, so it FIRES (`malformed`); a list fires if ANY element would. An
+ * empty string or empty list counts as absent.
+ */
+export function contextValueMatch(ctx: EvaluationContext, cfg: any, mode: 'in' | 'not-in'): ContextValueMatch | null {
+  const field = typeof cfg?.field === 'string' ? cfg.field.trim() : '';
+  if (field === '') return null; // validation rejects this at authoring; an unconfigured atom never fires
+  const actions = Array.isArray(cfg?.actions) ? (cfg.actions as unknown[]).map((a) => String(a).trim()).filter(Boolean) : [];
+  if (actions.length > 0 && !actions.includes(String(ctx.action ?? '').trim())) return null;
+  const listed = (Array.isArray(cfg?.values) ? (cfg.values as unknown[]) : [])
+    .map((v) => normalizeContextToken(String(v)))
+    .filter((v) => v !== '');
+  const contains = cfg?.match === 'contains';
+
+  const raw = contextValueAt(ctx as Record<string, unknown>, field);
+  const elements: unknown[] = Array.isArray(raw) ? raw : raw === undefined || raw === null ? [] : [raw];
+  const present = elements.filter((e) => !(typeof e === 'string' && e.trim() === '') && e !== null && e !== undefined);
+  if (present.length === 0) return cfg?.missing === 'fire' ? { field, reason: 'missing' } : null;
+
+  for (const e of present) {
+    if (typeof e !== 'string' && typeof e !== 'number' && typeof e !== 'boolean') return { field, reason: 'malformed' };
+    const v = normalizeContextToken(String(e));
+    const hit = listed.some((l) => (contains ? v.includes(l) : v === l));
+    if (mode === 'in' && hit) return { field, value: clip(String(e).trim()), reason: 'listed' };
+    if (mode === 'not-in' && !hit) return { field, value: clip(String(e).trim()), reason: 'unlisted' };
+  }
+  return null;
+}
 
 /**
  * True when `value` is a non-empty string that is NOT in the (case-insensitive) allow-list.

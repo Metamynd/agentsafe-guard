@@ -232,6 +232,7 @@ claim, by default, so an agent that says `low` cannot talk its way past review:
 | `amount-share` | a payment at or above **70%** of the action's per-transaction cap (`mm:payAmount`) | `--amount-review <share\|off>`; mandate `riskSignals: { amountShare }` |
 | `new-merchant` | the **first payment** to a merchant that is not on the mandate's merchant list, not a registered payee and never paid before (only where the mandate lists no merchants) | mandate `riskSignals: { newMerchant: false }`. A payment that names **no** merchant is outside this review unless the owner sets `newMerchant: 'strict'` |
 | `owner-tier` | the owner's `riskTier` for the action | `--risk-tier <level>` |
+| `context-value` | a **non-financial** operation the owner marked: an SOP rule `context-value-in` (e.g. `op` contains `delete`) or `context-value-not-in` (`op` not in `read, list`) fired, whatever `riskLevel` the agent declared (0.33.0 judges these locally too) | the SOP rule (dashboard **AgentSafe → SOPs**); see MAGP §6.3.8 |
 
 Each is `high` (the tier is whatever the owner set). Only the owner can change them, per grant; an agent
 putting `riskSignals` or `riskTier` in its own context changes nothing. An escalation caused this way says so:

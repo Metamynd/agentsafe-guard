@@ -91,7 +91,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // performViaGateway, and npm run resume through them) send decision.governanceHeaders() (pre-beta rerun 6, FW6-2).
 // 0.32.0: resume() signs the in-process resume claim as MAGP-RESUME-CLAIM-v2, binding the approved request and context at the
 // issuer (pre-beta rerun 6 F-1-NF-R); an issuer that requires it refuses the v1 claim older guards sign.
-const GUARD_VERSION = '^0.32.0';
+// 0.33.0: the bundled policy-core judges owner-keyed operation rules (context-value-in / -not-in, NF-RISK-SELF) like the
+// gate, so a local check escalates an owner-marked op (e.g. delete-all) whatever riskLevel the agent declares.
+const GUARD_VERSION = '^0.33.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {
@@ -176,7 +178,9 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // another (or none) is released and refused. Required: the issuer refuses AUTHORIZATION_CONTEXT_REQUIRED to a claimer that
 // states none, so an older gateway could no longer run an approved escalation.
 // 0.27.1: reportOutcome() reports an authorization a request only NAMED as presented, never as the one it ran under (FW6-3).
-const MCP_GUARD_VERSION = '^0.27.1';
+// 0.28.0: a gateway judges owner-keyed operation rules (context-value-in / -not-in) from its bundle like the gate
+// (NF-RISK-SELF). Required: a gateway on an older guard would read an operation rule's atom as unknown and let it run.
+const MCP_GUARD_VERSION = '^0.28.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -211,7 +215,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.25.0: depends on agentsafe-mcp-guard ^0.26.0 (one guard in the tree). No template change.
 // 0.26.0: depends on agentsafe-mcp-guard ^0.27.0 (the approved-context binding). Required with MCP_GUARD_VERSION above.
 // 0.26.1: a report names an authorization as claimed only when this gateway claimed it (FW6-3); depends on agentsafe-mcp-guard ^0.27.1.
-const GATEWAY_VERSION = '^0.26.1';
+// 0.27.0: depends on agentsafe-mcp-guard ^0.28.0 (operation rules). Required with MCP_GUARD_VERSION above.
+const GATEWAY_VERSION = '^0.27.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `
