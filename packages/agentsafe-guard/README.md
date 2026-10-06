@@ -756,7 +756,7 @@ until then. Now:
 
 | The tool… | The hold | Opt out / in |
 |---|---|---|
-| returns | **captured** at the authorized amount. Where a gateway **claimed** the hold, the guard leaves it to the gateway (0.27.0): it asks the issuer first and captures only an unclaimed hold, so the gateway's own settlement (what it really charged, attested as its own) is never raced. If the issuer cannot be asked, it captures. | `guardTool(…, { settle: 'none' })` |
+| returns | **captured** at the authorized amount. Where a gateway **claimed** the hold, the guard leaves it to the gateway (0.27.0): it asks the issuer first and captures only an unclaimed hold, so the gateway's own settlement (what it really charged, attested as its own) is never raced. If the issuer cannot be asked, it captures. A call with no amount that the gate decided (remote mode, a resume) is captured at 0 (0.33.1): it ran and spent nothing, rather than a hold left to lapse as `expired`. | `guardTool(…, { settle: 'none' })` |
 | throws a `GovernanceBlocked` (a service that re-verifies the request refused it) | **released** (`guard.void`) — nothing ran. Not a refusal raised by a guard wrapper itself (a guarded call nested inside the tool): the tool may have acted before it, so that keeps the hold. | — |
 | throws an error with `nothingExecuted: true` | **released** | — |
 | throws anything else | **kept**: a tool that threw may still have acted | `{ releaseOnError: true }` or `{ releaseOnError: (err) => boolean }` |

@@ -108,6 +108,23 @@ class HoldSettlement(unittest.TestCase):
             guard_tool(self.client, "flight-purchase", books_then_asks_for_more, FLIGHT)("skyward-air", 30)
         self.assertEqual(self.states(), ["held"], "the outer tool may have acted: its hold is neither released nor captured")
 
+    def test_a_call_with_no_amount_that_ran_is_settled_at_zero(self) -> None:
+        # Pre-beta rerun 6 FW6-4: a non-financial call is authorized at 0 and the gate holds it all the same. Nothing settled
+        # it, so it stayed `held` (and after its TTL read as `expired`: an action that never ran). It ran: captured at 0.
+        self.gate.grants["records.read"] = 0.0
+        read = guard_tool(self.client, "records.read", lambda target: {"target": target},
+                          lambda target: {"context": {"riskLevel": "low", "target": target, "op": "read"}})
+        self.assertEqual(read("record-A"), {"target": "record-A"})
+        self.assertEqual(self.states(), ["captured"])
+        self.assertEqual([h["amount"] for h in self.gate.holds.values()], [0.0])
+        # ...async too, and `settle="none"` still opts out.
+        async def read_async(target: str) -> str:
+            return target
+
+        asyncio.run(guard_agent_tool(self.client, "records.read", read_async, lambda target: {"context": {"riskLevel": "low"}})("record-B"))
+        guard_tool(self.client, "records.read", lambda target: target, lambda target: {"context": {"riskLevel": "low"}}, settle="none")("record-C")
+        self.assertEqual(sorted(self.states()), ["captured", "captured", "held"])
+
     def test_bad_options_are_refused_at_wrap_time(self) -> None:
         with self.assertRaises(ValueError):
             guard_tool(self.client, "flight-purchase", lambda: None, settle="capturee")
@@ -147,6 +164,20 @@ class Resume(unittest.TestCase):
             book.resume(esc, "skyward-air", 90, "high")
         self.assertEqual(again.exception.verdict.reason_code, "AUTHORIZATION_ALREADY_USED")
         self.assertEqual(len(seen), 1)
+
+    def test_a_resumed_call_with_no_amount_is_settled_at_zero(self) -> None:
+        # FW6-4: the approval's hold of a non-financial action is settled once the tool ran, like any other.
+        self.gate.grants["records.delete"] = 0.0
+        ran = []
+        delete = guard_tool(self.client, "records.delete", lambda target: ran.append(target) or "deleted",
+                            lambda target: {"context": {"riskLevel": "high", "target": target, "op": "delete"}}, resume_timeout=5)
+        with self.assertRaises(GovernanceBlocked) as held:
+            delete("record-A")
+        esc = held.exception.verdict.escalation_id
+        self.gate.approve(esc)
+        self.assertEqual(delete.resume(esc, "record-A"), "deleted")
+        self.assertEqual(self.gate.holds[self.gate.escalations[esc]["authorizationId"]]["state"], "captured")
+        self.assertEqual(ran, ["record-A"])
 
     def test_a_modified_or_undecided_escalation_never_runs_the_tool(self) -> None:
         ran = []

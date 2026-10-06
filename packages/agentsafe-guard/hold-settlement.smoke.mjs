@@ -67,6 +67,25 @@ await check('a tool that RAN has its hold captured at the authorized amount, sig
   } finally { f.restore(); }
 });
 
+// FW6-4 (0.33.1): a call with no amount that the gate decided (remote mode) still got a hold. Nothing settled it, so it sat
+// `held` until its TTL and then read as `expired` — an action that never ran. It ran: captured at 0, signed as the agent.
+await check('a call with no amount that RAN has its hold captured at 0', async () => {
+  const f = fakeIssuer();
+  try {
+    const nfArgs = (a) => ({ context: { riskLevel: 'low', target: a.target, op: 'read' } });
+    const out = await guard.guardTool('records.read', async (a) => ({ read: a.target }), nfArgs)({ target: 'record-A' });
+    assert.equal(out.read, 'record-A');
+    const cap = f.calls.find((c) => c.url.endsWith('/capture'));
+    assert.ok(cap, 'captured');
+    assert.equal(cap.body.amountCharged, 0);
+    const p = cap.body.agentProof;
+    const authId = decodeURIComponent(cap.url.split('/authorize/')[1].split('/')[0]);
+    assert.ok(verifies(buildAgentSettleMessage({ verb: 'capture', agentDid, authorizationId: authId, nonce: p.nonce, issuedAt: p.issuedAt, fields: ['0', '', ''] }), p.signature));
+    await guard.guardTool('records.read', async () => 'ok', nfArgs, { settle: 'none' })({ target: 'record-B' });
+    assert.deepEqual(settlements(f.calls), ['capture'], "settle: 'none' still opts out");
+  } finally { f.restore(); }
+});
+
 // F-3 (0.27.0): a hold the tool's gateway CLAIMED is the gateway's to settle. The agent capturing it too raced the gateway's
 // own settlement — the agent's full-amount capture landed first, recorded `unattested`, and the gateway's real charge was refused.
 for (const [label, effect] of [
