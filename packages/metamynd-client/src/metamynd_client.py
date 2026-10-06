@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.19.0"
+__version__ = "0.19.1"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1133,6 +1133,14 @@ class MetaMyndClient:
         connection), the gate may still have committed a hold nobody can use or settle. After each of these delays (seconds)
         the client looks it up by the request's nonce and releases it with this agent's signed void; `()` turns it off.
         """
+        # Pre-beta rerun 6 FW N-4: refuse a missing api or agent DID here, at construction, as the Node
+        # guard's createGuard does (`if (!api || !agentDid) throw`) — the same rule, no stricter, so the two
+        # languages agree. Before this, Python built the client and sent an empty DID to the gate, which
+        # refused it MALFORMED_REQUEST: fail-closed either way, but a different place and a different error.
+        # A non-empty but malformed DID still goes to the gate in both languages (NO_MANDATE).
+        if not api or not agent_did:
+            raise ValueError("MetaMyndClient requires api and agent_did (the agent's DID from provisioning, e.g. "
+                             "AGENT_DID) — or use MetaMyndClient.from_env() — plus exactly one of agent_key or daemon_socket")
         self.orphan_release_delays = tuple(orphan_release_delays)
         self._resumes_in_flight: "set[str]" = set()
         self._resumes_lock = threading.Lock()

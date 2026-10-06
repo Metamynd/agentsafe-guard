@@ -92,5 +92,34 @@ class ReleaseWorkflow(unittest.TestCase):
         self.assertNotIn("§7.3", pyproject, "the signed message is spec §8.3 (§7.3 is 'Reassessment')")
 
 
+class ConstructionRefusal(unittest.TestCase):
+    """Pre-beta rerun 6 FW N-4: the client refuses a missing agent DID or api at construction, as the Node guard's
+    createGuard does, instead of sending the request and letting the gate answer MALFORMED_REQUEST."""
+
+    def test_an_empty_or_missing_agent_did_is_refused_before_any_request(self) -> None:
+        from _support import new_agent_key
+
+        _, seed = new_agent_key()
+        for did in ("", None):
+            with self.subTest(did=did), self.assertRaises(ValueError) as caught:
+                metamynd_client.MetaMyndClient("http://127.0.0.1:9", did, seed)  # type: ignore[arg-type]
+            self.assertIn("agent_did", str(caught.exception))
+
+    def test_an_empty_api_is_refused(self) -> None:
+        from _support import new_agent_key
+
+        _, seed = new_agent_key()
+        with self.assertRaises(ValueError):
+            metamynd_client.MetaMyndClient("", "did:key:z6MkParity", seed)
+
+    def test_a_non_empty_did_still_constructs_so_the_gate_judges_it_as_node_does(self) -> None:
+        # Node's rule is `!agentDid` and nothing stricter; a malformed DID reaches the gate (NO_MANDATE) in both.
+        from _support import new_agent_key
+
+        _, seed = new_agent_key()
+        client = metamynd_client.MetaMyndClient("http://127.0.0.1:9", "not-a-did", seed)
+        self.assertEqual(client.agent_did, "not-a-did")
+
+
 if __name__ == "__main__":
     unittest.main()
