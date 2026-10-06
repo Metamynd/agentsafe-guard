@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { buildAuthMessage } from './policy-core.mjs';
 import { buildHederaDid } from './magp-did.mjs';
-import { createA2aGuard, MAGP_A2A_EXTENSION_URI } from './agentsafe-a2a-guard.mjs';
+import { createA2aGuard, buildTaskStatus, MAGP_A2A_EXTENSION_URI } from './agentsafe-a2a-guard.mjs';
 import { payloadDigestOf } from './payload-binding.mjs';
 
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
@@ -91,6 +91,40 @@ test('an issuer that ignores the flag: never executes, the claim is released', a
     assert.equal(d.decision, 'escalate');
     assert.equal(io.calls.filter((c) => c.path.endsWith('/void')).length, 1);
   } finally { io.restore(); }
+});
+
+// Pre-beta rerun 6 FW6-1 (as agentsafe-mcp-guard 0.29.0): an issuer's refusal of the claim carries a `detail` (for
+// AUTHORIZATION_CONTEXT_REQUIRED, which gateway to upgrade). The receiver logs it in one line, the block carries it, and the
+// refusal TaskStatus relays it in its MAGP metadata.
+const withWarnings = async (fn) => { const warn = console.warn; const lines = []; console.warn = (...a) => lines.push(a.join(' ')); try { await fn(); } finally { console.warn = warn; } return lines; };
+test('a refused claim carries the issuer detail on the block and the TaskStatus, and logs one line', async () => {
+  const detail = 'AUTHORIZATION_CONTEXT_REQUIRED: ... Upgrade the gateway: @metamynd/agentsafe-a2a-guard >= 0.18.0';
+  const io = mockIssuer(() => ({ status: 403, body: { success: false, message: 'AUTHORIZATION_CONTEXT_REQUIRED', data: { reasonCode: 'AUTHORIZATION_CONTEXT_REQUIRED', detail } } }));
+  let d;
+  try {
+    const lines = await withWarnings(async () => { d = await mk().verifyRequest(envelope()); });
+    assert.equal(d.decision, 'block'); assert.equal(d.reasonCode, 'AUTHORIZATION_CONTEXT_REQUIRED'); assert.equal(d.detail, detail);
+    assert.equal(lines.filter((l) => l.includes('refused the claim of authorization auth-1') && l.includes('Upgrade the gateway')).length, 1);
+  } finally { io.restore(); }
+  const status = buildTaskStatus({ ...d, contextId: 'ctx', taskId: 'task' });
+  assert.equal(status.state, 'TASK_STATE_REJECTED');
+  assert.equal(status.message.metadata[MAGP_A2A_EXTENSION_URI].detail, detail);
+});
+
+test('a refusal without a detail logs the bare code and adds no detail; ESCALATION_NOT_APPROVED logs nothing', async () => {
+  const io = mockIssuer(() => ({ status: 409, body: { success: false, message: 'AUTHORIZATION_ALREADY_CLAIMED', data: { reasonCode: 'AUTHORIZATION_ALREADY_CLAIMED' } } }));
+  let d;
+  try {
+    const lines = await withWarnings(async () => { d = await mk().verifyRequest(envelope()); });
+    assert.equal(d.reasonCode, 'AUTHORIZATION_ALREADY_CLAIMED'); assert.equal(d.detail, undefined);
+    assert.ok(lines.some((l) => l.endsWith('auth-1: AUTHORIZATION_ALREADY_CLAIMED')));
+    assert.equal('detail' in buildTaskStatus(d).message.metadata[MAGP_A2A_EXTENSION_URI], false);
+  } finally { io.restore(); }
+  const io2 = mockIssuer(() => ({ status: 409, body: { success: false, message: 'ESCALATION_NOT_APPROVED', data: { detail: 'not yet approved' } } }));
+  try {
+    const lines = await withWarnings(async () => { d = await mk().verifyRequest(envelope()); });
+    assert.equal(d.decision, 'escalate'); assert.equal(lines.some((l) => l.includes('refused the claim')), false);
+  } finally { io2.restore(); }
 });
 
 let failed = 0;

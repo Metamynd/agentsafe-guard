@@ -244,7 +244,7 @@ export function mapDecisionToTaskState(decision, reasonCode) {
  * exact same `escalation_status()`/`escalationStatus()` every existing client already implements,
  * unmodified.
  */
-export function buildTaskStatus({ decision, reasonCode, escalationId, contextId, taskId }) {
+export function buildTaskStatus({ decision, reasonCode, escalationId, contextId, taskId, detail }) {
   const { taskState } = mapDecisionToTaskState(decision, reasonCode);
   const summary =
     taskState === TASK_STATE.WORKING
@@ -262,7 +262,9 @@ export function buildTaskStatus({ decision, reasonCode, escalationId, contextId,
       taskId: taskId ?? null,
       role: 'agent',
       parts: [{ text: summary }],
-      metadata: { [MAGP_A2A_EXTENSION_URI]: { decision, reasonCode, escalationId: escalationId ?? null } },
+      // `detail` (0.19.1, pre-beta rerun 6 FW6-1): the issuer's sentence for a refused claim, e.g. which gateway to upgrade for
+      // AUTHORIZATION_CONTEXT_REQUIRED. Present only when there is one; branch on `reasonCode`, never on it.
+      metadata: { [MAGP_A2A_EXTENSION_URI]: { decision, reasonCode, escalationId: escalationId ?? null, ...(typeof detail === 'string' && detail ? { detail } : {}) } },
     },
     timestamp: new Date().toISOString(),
   };
@@ -442,7 +444,16 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         // attempt of yours is mid-claim — not a refusal).
         const ambiguous = res.status >= 500 || (res.status === 409 && body?.message === 'EFFECT_TRANSITION_CONTENDED');
         if (ambiguous && attempt < attempts) { lastError = `HTTP ${res.status}`; await new Promise((r) => setTimeout(r, 150)); continue; }
-        if (!res.ok) return { claimed: false, reasonCode: refusalCode(body, `AUTHORIZATION_CLAIM_HTTP_${res.status}`) };
+        if (!res.ok) {
+          const reasonCode = refusalCode(body, `AUTHORIZATION_CLAIM_HTTP_${res.status}`);
+          // The issuer's sentence for the refusal (0.19.1, pre-beta rerun 6 FW6-1, as agentsafe-mcp-guard 0.29.0): this guard
+          // relayed only the code and logged nothing, so "AUTHORIZATION_CONTEXT_REQUIRED" was all a developer saw. One line in this
+          // Service's log, and the detail travels with the refusal. ESCALATION_NOT_APPROVED is routine here (the request still
+          // needs a person): no line.
+          const detail = typeof body?.data?.detail === 'string' && body.data.detail ? body.data.detail.slice(0, 600) : undefined;
+          if (reasonCode !== 'ESCALATION_NOT_APPROVED') console.warn(`[a2a-guard] the issuer refused the claim of authorization ${authorizationId}: ${detail && detail !== reasonCode ? detail : reasonCode}`);
+          return { claimed: false, reasonCode, ...(detail ? { detail } : {}) };
+        }
         return {
           claimed: true,
           agentDid: body?.data?.agentDid,
@@ -754,7 +765,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
           return { decision: 'block', reasonCode };
         };
         if (reviewed && claim.reasonCode === 'ESCALATION_NOT_APPROVED') return final;
-        if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode };
+        if (!claim.claimed) return { decision: 'block', reasonCode: claim.reasonCode, ...(claim.detail ? { detail: claim.detail } : {}) };
         if (reviewed) {
           if (!claim.approvedByHuman) {
             const released = await releaseAuthorization({ authorizationId: signed.authorizationId, claimToken, reason: 'ESCALATION_NOT_APPROVED' }).catch((err) => ({ ok: false, reasonCode: String(err?.message ?? err) }));
@@ -873,6 +884,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
           decision: decision.decision,
           reasonCode: decision.reasonCode,
           escalationId: decision.escalationId,
+          detail: decision.detail,
           contextId: message?.contextId,
           taskId: message?.taskId ?? task?.id,
         });
