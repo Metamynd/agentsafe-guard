@@ -38,6 +38,26 @@ await check('an unclaimed execution is reported as executed, with the agent\'s s
   assert.deepEqual([reports[0].outcome, reports[0].reasonCode, reports[0].httpStatus, reports[0].signed.agentDid], ['executed', 'EXECUTED', 200, 'did:key:zMine']);
 });
 
+// Pre-beta rerun 6 FW6-3: a low-risk request allowed on its own merits, naming an approved escalation's authorization it
+// never claimed, must not be reported as having run under that authorization.
+await check('an unclaimed execution that NAMES an authorization is reported without claiming it ran under it', async () => {
+  const gw = gatewayWith({ reportOutcomes: true });
+  const res = await call(gw, signedBy('did:key:zMine', { authorizationId: 'auth-approved' }));
+  await settled(gw);
+  assert.equal(res.status, 200);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].signed.authorizationId, 'auth-approved', 'the request is passed on as received (the guard reports it as presented)');
+  assert.equal(reports[0].claimedAuthorizationId, undefined, 'never reported as claimed');
+});
+
+await check('a refusal after a CLAIM names the claimed authorization', async () => {
+  const gw = gatewayWith({ reportOutcomes: true, resolveCredential: async () => null });
+  const res = await call(gw, signedBy('did:key:zClaimed', { authorizationId: 'auth-1' }));
+  await settled(gw);
+  assert.equal(res.body.reasonCode, 'CREDENTIAL_UNAVAILABLE');
+  assert.deepEqual([reports[0].outcome, reports[0].claimedAuthorizationId], ['refused', 'auth-1']);
+});
+
 await check('a refusal the gateway decided (another agent: AGENT_NOT_ADMITTED) is reported as refused', async () => {
   const gw = gatewayWith({ reportOutcomes: true });
   const res = await call(gw, signedBy('did:key:zTheirs'));

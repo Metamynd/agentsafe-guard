@@ -760,11 +760,15 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     if (!reportOutcomes || typeof guard?.reportOutcome !== 'function' || !trace.route || !trace.request) return;
     const executed = trace.forwarded === true;
     // A claimed authorization is on the effect chain already (claim → capture); reporting it again would only duplicate.
-    if (executed && trace.decision?.authorizationId && (trace.decision.claimToken || trace.decision.counterpartyAuthenticated)) return;
+    const claimed = trace.decision?.authorizationId && (trace.decision.claimToken || trace.decision.counterpartyAuthenticated) ? trace.decision.authorizationId : undefined;
+    if (executed && claimed) return;
     const status = Number(result?.status);
     const httpStatus = Number.isInteger(status) ? status : null;
     const reasonCode = executed ? (thrown ? 'UPSTREAM_ERROR' : 'EXECUTED') : (result?.body?.reasonCode ?? trace.decision?.reasonCode ?? 'BLOCKED');
-    const params = { signed: trace.request, outcome: executed ? 'executed' : 'refused', reasonCode, httpStatus };
+    // Only an authorization this gateway CLAIMED is reported as the one the request ran under; one the request merely named
+    // (a low-risk call allowed on its own merits, carrying an approved escalation's id) is reported as presented, never
+    // attributed (0.26.1, pre-beta rerun 6 FW6-3).
+    const params = { signed: trace.request, outcome: executed ? 'executed' : 'refused', reasonCode, httpStatus, ...(claimed ? { claimedAuthorizationId: claimed } : {}) };
     if (!executed) {
       const key = `${trace.request.agentDid}|${reasonCode}`;
       const open = refusalWindows.get(key);
