@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.18.2"
+__version__ = "0.19.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -500,11 +500,29 @@ def _resume_amount(amount: Any) -> str:
 
 
 RESUME_CLAIM_PREFIX = "MAGP-RESUME-CLAIM-v1"
+# v2 (0.19.0, pre-beta rerun 6 F-1-NF-R): the claim also signs the digests of the request and context about to run, so the gate
+# itself refuses a resume of anything but what the person approved — not only this SDK, which an outdated copy cannot apply.
+RESUME_CLAIM_V2_PREFIX = "MAGP-RESUME-CLAIM-v2"
 
 
-def resume_claim_message(escalation_id: str, authorization_id: str, agent_did: str, nonce: str, issued_at: str) -> str:
-    """The agent's claim of the ONE resume of an approved escalation (MAGP 9a.6) — byte-for-byte the gate's builder."""
-    return "|".join(_escape_field(str(f)) for f in [RESUME_CLAIM_PREFIX, escalation_id, authorization_id, agent_did, nonce, issued_at])
+def resume_claim_message(escalation_id: str, authorization_id: str, agent_did: str, nonce: str, issued_at: str,
+                         request_digest: Optional[str] = None, context_digest: Optional[str] = None) -> str:
+    """The agent's claim of the ONE resume of an approved escalation (MAGP 9a.6) — byte-for-byte the gate's builder.
+
+    v2 with both digests, v1 with neither; one without the other is refused (the gate could not reproduce it)."""
+    if (request_digest is None) != (context_digest is None):
+        raise ValueError("a resume claim carries both request_digest and context_digest (v2), or neither (v1)")
+    fields = ([RESUME_CLAIM_V2_PREFIX, escalation_id, authorization_id, agent_did, request_digest, context_digest, nonce, issued_at]
+              if request_digest is not None else [RESUME_CLAIM_PREFIX, escalation_id, authorization_id, agent_did, nonce, issued_at])
+    return "|".join(_escape_field(str(f)) for f in fields)
+
+
+def _int_or_zero(value: Any) -> int:
+    """A status field read as an int, 0 when it is absent or not a number (an older gate, or a malformed answer)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def resume_request_digest(authorization_id: str, action: str, amount: Any = None, currency: Optional[str] = None,
@@ -1024,7 +1042,8 @@ class _LocalKeySigner:
         return self._key.sign(message.encode("utf-8"))
 
     def sign_resume_claim(self, fields: Mapping[str, Any]) -> bytes:
-        message = resume_claim_message(fields["escalationId"], fields["authorizationId"], fields["agentDid"], fields["nonce"], fields["issuedAt"])
+        message = resume_claim_message(fields["escalationId"], fields["authorizationId"], fields["agentDid"], fields["nonce"], fields["issuedAt"],
+                                       fields.get("requestDigest"), fields.get("contextDigest"))
         return self._key.sign(message.encode("utf-8"))
 
 
@@ -1456,21 +1475,25 @@ class MetaMyndClient:
             raw=data,
         )
 
-    def claim_resume(self, escalation_id: str, authorization_id: str) -> str:
+    def claim_resume(self, escalation_id: str, authorization_id: str, request_digest: Optional[str] = None, context_digest: Optional[str] = None) -> str:
         """Take the ONE resume of an approved escalation at the gate (0.17.0, MAGP 9a.6) before running a tool under it.
 
         Returns "claimed"; "unsupported" when this signer cannot sign the claim (a daemon) or the gate predates it (the
         resume then runs unclaimed, as before); or the refusal code, e.g. AUTHORIZATION_IN_USE when another process took
         it first. Raises GateUnreachable when the gate cannot be reached — never run a resume the gate was not told about.
+
+        With `request_digest` and `context_digest` (0.19.0, pre-beta rerun 6 F-1-NF-R) — the digests of the call about to run —
+        the claim is signed as MAGP-RESUME-CLAIM-v2 and the gate refuses it unless they are the approved request and context.
         """
         if not hasattr(self._signer, "sign_resume_claim"):
             return "unsupported"
         nonce = secrets.token_hex(16)
         issued_at = utc_now_rfc3339()
-        signature = self._signer.sign_resume_claim({"escalationId": escalation_id, "authorizationId": authorization_id, "agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at})
+        bound = {"requestDigest": request_digest, "contextDigest": context_digest} if request_digest is not None or context_digest is not None else {}
+        signature = self._signer.sign_resume_claim({"escalationId": escalation_id, "authorizationId": authorization_id, "agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at, **bound})
         request = urllib.request.Request(
             f"{self.api}/policy/escalations/{urllib.parse.quote(escalation_id, safe='')}/resume-claim",
-            data=json.dumps({"agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at, "signature": signature.hex()}).encode("utf-8"),
+            data=json.dumps({"agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at, "signature": signature.hex(), **bound}).encode("utf-8"),
             headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
             method="POST",
         )
@@ -1934,7 +1957,16 @@ def guard_tool(
         # is refused AUTHORIZATION_IN_USE instead of running an in-process tool twice (the in-process lock covers one process
         # only). Taken last, right before the tool runs: it is at most once, so nothing that could still fail locally comes after.
         try:
-            claim = client.claim_resume(escalation_id, state.authorization_id or "")
+            # v2 (0.19.0, F-1-NF-R): a gate that asks for it gets the digests of THIS call, computed from its args (never echoed
+            # from the status), so the gate itself refuses anything but the approved request and context. An older gate gets v1.
+            digests: "dict[str, str]" = {}
+            if _int_or_zero(state.raw.get("resumeClaimVersion")) >= 2:
+                try:
+                    claim_context = approved_context_digest(payload.get("context", {}))
+                except PayloadNotCanonicalizable:
+                    claim_context = "unbindable"
+                digests = {"request_digest": _resume_digest_for(state, payload), "context_digest": claim_context}
+            claim = client.claim_resume(escalation_id, state.authorization_id or "", **digests)
         except GateUnreachable as exc:
             raise _guard_refusal(Verdict(decision="block", reason_code=GateUnreachable.reason_code, escalation_id=escalation_id, hint=str(exc))) from exc
         if claim not in ("claimed", "unsupported"):

@@ -89,7 +89,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.31.0: a guarded tool's decision carries governanceHeaders() — the signed request and its authorization, ready for a
 // gateway — so a tool no longer rebuilds and re-signs it. Required: the scaffold's gateway calls (bookFlightViaGateway,
 // performViaGateway, and npm run resume through them) send decision.governanceHeaders() (pre-beta rerun 6, FW6-2).
-const GUARD_VERSION = '^0.31.0';
+// 0.32.0: resume() signs the in-process resume claim as MAGP-RESUME-CLAIM-v2, binding the approved request and context at the
+// issuer (pre-beta rerun 6 F-1-NF-R); an issuer that requires it refuses the v1 claim older guards sign.
+const GUARD_VERSION = '^0.32.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {

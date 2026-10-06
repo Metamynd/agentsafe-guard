@@ -95,8 +95,13 @@ function buildResumeBindingMessage(f) {
   ].map((v) => escapeField(String(v))).join("|");
 }
 var RESUME_CLAIM_PREFIX = "MAGP-RESUME-CLAIM-v1";
+var RESUME_CLAIM_V2_PREFIX = "MAGP-RESUME-CLAIM-v2";
 function buildResumeClaimMessage(f) {
-  return [RESUME_CLAIM_PREFIX, f.escalationId, f.authorizationId, f.agentDid, f.nonce, f.issuedAt].map((v) => escapeField(String(v))).join("|");
+  const hasRequest = f.requestDigest !== void 0 && f.requestDigest !== null;
+  const hasContext = f.contextDigest !== void 0 && f.contextDigest !== null;
+  if (hasRequest !== hasContext) throw new Error("a resume claim carries both requestDigest and contextDigest (v2), or neither (v1)");
+  const fields = hasRequest ? [RESUME_CLAIM_V2_PREFIX, f.escalationId, f.authorizationId, f.agentDid, f.requestDigest, f.contextDigest, f.nonce, f.issuedAt] : [RESUME_CLAIM_PREFIX, f.escalationId, f.authorizationId, f.agentDid, f.nonce, f.issuedAt];
+  return fields.map((v) => escapeField(String(v))).join("|");
 }
 function resumeRequestDigest(f) {
   return "sha256:" + createHash2("sha256").update(buildResumeBindingMessage(f), "utf8").digest("hex");
@@ -109,6 +114,7 @@ export {
   APPROVED_CONTEXT_DOMAIN,
   RESUME_BINDING_PREFIX,
   RESUME_CLAIM_PREFIX,
+  RESUME_CLAIM_V2_PREFIX,
   approvedContextDigest,
   buildResumeBindingMessage,
   buildResumeClaimMessage,

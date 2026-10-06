@@ -205,6 +205,77 @@ await check('a JSON 404 (a proxy, not an old issuer) is ambiguous, so the resume
   assert.equal(r.ran.length, 0);
 });
 
+// F-1-NF-R (0.32.0, pre-beta rerun 6): the checks above live in THIS SDK, so an outdated one (0.28.4) resumed an approval of
+// "read record-A" as "delete-all record-B" and it ran. An issuer that asks for it (resumeClaimVersion: 2) now gets a
+// MAGP-RESUME-CLAIM-v2 carrying the digests of the args about to run — computed from them, never echoed from the status — and
+// refuses a difference itself. This fake issuer compares them as the real one does (escalation.service.ts claimResume).
+async function resumeAgainstV2Issuer(status, approved, args) {
+  const real = globalThis.fetch;
+  const claims = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const reply = (data, code = 200) => ({ ok: code < 400, status: code, json: async () => ({ success: code < 400, data, message: data?.reasonCode }) });
+    if (u.endsWith('/resume-claim')) {
+      const body = JSON.parse(init.body);
+      claims.push(body);
+      if (body.requestDigest === undefined) return reply({ reasonCode: 'AUTHORIZATION_CONTEXT_REQUIRED' }, 403);
+      if (body.requestDigest !== approved.requestDigest) return reply({ reasonCode: 'ESCALATION_REQUEST_MISMATCH' }, 403);
+      if (body.contextDigest !== approved.contextDigest) return reply({ reasonCode: 'AUTHORIZATION_CONTEXT_MISMATCH' }, 403);
+      return reply({ claimed: true });
+    }
+    if (u.includes('/escalations/')) return reply({ escalationId: 'esc-1', status: 'approved', reasonCode: 'ESCALATION_APPROVED', authorizationId: HOLD, resumeClaimVersion: 2, ...status });
+    if (u.endsWith('/effect')) return reply({ outcome: 'not_started', effectState: 'authorized' });
+    if (u.endsWith('/capture')) return reply({ captured: true });
+    return reply({}, 404);
+  };
+  const ran = [];
+  try {
+    const tool = guard.guardTool('perform-action', async (a) => { ran.push(a); return { done: true }; }, recordArgs);
+    try { return { out: await tool.resume('esc-1', args, { timeoutMs: 1000 }), ran, claims }; }
+    catch (e) { return { err: e, ran, claims }; }
+  } finally { globalThis.fetch = real; }
+}
+
+await check('F-1-NF-R: against a v2 issuer the approved context runs once, under a v2 claim the agent signed over both digests', async () => {
+  const r = await resumeAgainstV2Issuer(approvedRead, approvedRead, { riskLevel: 'high', target: 'record-A', op: 'read' });
+  assert.equal(r.err, undefined, r.err?.message);
+  assert.equal(r.ran.length, 1);
+  const c = r.claims[0];
+  assert.equal(c.requestDigest, approvedRead.requestDigest);
+  assert.equal(c.contextDigest, approvedRead.contextDigest);
+  const msg = buildResumeClaimMessage({ escalationId: 'esc-1', authorizationId: HOLD, agentDid, nonce: c.nonce, issuedAt: c.issuedAt, requestDigest: c.requestDigest, contextDigest: c.contextDigest });
+  assert.ok(msg.startsWith('MAGP-RESUME-CLAIM-v2|'));
+  assert.ok(crypto.verify(null, Buffer.from(msg, 'utf8'), publicKey, Buffer.from(c.signature, 'hex')), 'the v2 claim is signed by the agent');
+});
+
+await check('F-1-NF-R: the claim digests come from the args, so the issuer refuses an altered context even when the SDK could not check it', async () => {
+  // A status without contextDigest leaves the SDK nothing to compare locally; the claim still states the altered context.
+  const r = await resumeAgainstV2Issuer(valueless, approvedRead, { riskLevel: 'high', target: 'record-B', op: 'delete-all' });
+  assert.equal(r.err?.governance?.reasonCode, 'AUTHORIZATION_CONTEXT_MISMATCH');
+  assert.equal(r.ran.length, 0);
+  assert.equal(r.claims[0].contextDigest, approvedContextDigest({ riskLevel: 'high', target: 'record-B', op: 'delete-all' }));
+});
+
+await check('an issuer without resumeClaimVersion gets the v1 claim it knows', async () => {
+  const real = globalThis.fetch;
+  const claims = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    const reply = (data, code = 200) => ({ ok: code < 400, status: code, json: async () => ({ success: code < 400, data }) });
+    if (u.endsWith('/resume-claim')) { claims.push(JSON.parse(init.body)); return reply({ claimed: true }); }
+    if (u.includes('/escalations/')) return reply({ escalationId: 'esc-1', status: 'approved', reasonCode: 'ESCALATION_APPROVED', authorizationId: HOLD, ...approvedRead });
+    if (u.endsWith('/effect')) return reply({ outcome: 'not_started', effectState: 'authorized' });
+    if (u.endsWith('/capture')) return reply({ captured: true });
+    return reply({}, 404);
+  };
+  try {
+    const tool = guard.guardTool('perform-action', async () => ({ done: true }), recordArgs);
+    await tool.resume('esc-1', { riskLevel: 'high', target: 'record-A', op: 'read' }, { timeoutMs: 1000 });
+    assert.equal(claims[0].requestDigest, undefined);
+    const msg = buildResumeClaimMessage({ escalationId: 'esc-1', authorizationId: HOLD, agentDid, nonce: claims[0].nonce, issuedAt: claims[0].issuedAt });
+    assert.ok(crypto.verify(null, Buffer.from(msg, 'utf8'), publicKey, Buffer.from(claims[0].signature, 'hex')));
+  } finally { globalThis.fetch = real; }
+});
 await check('the bundled resume-binding reproduces docs/protocol/resume-binding-vectors.json', async () => {
   const v = JSON.parse(readFileSync(new URL('../../docs/protocol/resume-binding-vectors.json', import.meta.url), 'utf8'));
   for (const c of v.vectors) {
@@ -212,6 +283,7 @@ await check('the bundled resume-binding reproduces docs/protocol/resume-binding-
     assert.equal(resumeRequestDigest(c.fields), c.digest, c.name);
   }
   for (const c of v.contextVectors) assert.equal(approvedContextDigest(c.context), c.digest, c.name);
+  for (const c of v.claimVectors) assert.equal(buildResumeClaimMessage(c.fields), c.message, c.name);
 });
 
 if (failed) { console.log(`\n${failed} FAILED`); process.exit(1); }

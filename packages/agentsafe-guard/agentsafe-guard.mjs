@@ -1221,17 +1221,21 @@ export function createGuard(opts = {}) {
       }
     };
     // 'claimed' | 'unsupported' (no signer for it, or an issuer that predates it: run as before) | a refusal code.
-    const claimResume = async (escalationId, authorizationId) => {
+    // `digests` (0.32.0, pre-beta rerun 6 F-1-NF-R): { requestDigest, contextDigest } of the request THESE args map to. Signed as
+    // MAGP-RESUME-CLAIM-v2 when the issuer asks for it (`resumeClaimVersion` >= 2 on the status), so the issuer itself refuses
+    // a resume of anything but the approved request and context; an older issuer only knows v1 and gets v1.
+    const claimResume = async (escalationId, authorizationId, digests) => {
       if (typeof keyProvider.signResumeClaim !== 'function') return 'unsupported';
       const nonce = crypto.randomUUID();
       const issuedAt = new Date().toISOString();
-      const signature = await keyProvider.signResumeClaim({ escalationId, authorizationId, agentDid, nonce, issuedAt });
+      const bound = digests ? { requestDigest: digests.requestDigest, contextDigest: digests.contextDigest } : {};
+      const signature = await keyProvider.signResumeClaim({ escalationId, authorizationId, agentDid, nonce, issuedAt, ...bound });
       let res;
       try {
         res = await fetch(`${base}/policy/escalations/${encodeURIComponent(escalationId)}/resume-claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agentDid, nonce, issuedAt, signature }),
+          body: JSON.stringify({ agentDid, nonce, issuedAt, signature, ...bound }),
         });
       } catch {
         return 'GATE_UNREACHABLE'; // never run a resume the issuer could not be told about
@@ -1294,7 +1298,8 @@ export function createGuard(opts = {}) {
       // The ONE resume (0.28.0, §9a.6): taken at the issuer, atomically, so a second PROCESS resuming the same escalation
       // is refused AUTHORIZATION_IN_USE instead of running an in-process tool twice (the in-process lock above covers one
       // process only). At most once — a crash after this does not hand the approval to another run.
-      const claimed = await claimResume(escalationId, st.authorizationId);
+      const digests = Number(st.resumeClaimVersion) >= 2 ? { requestDigest: resumeDigestFor(st, mapped), contextDigest: resumeContextDigestFor(mapped) } : undefined;
+      const claimed = await claimResume(escalationId, st.authorizationId, digests);
       if (claimed !== 'claimed' && claimed !== 'unsupported') {
         throw refusal({ decision: 'block', reasonCode: claimed, escalationId, authorizationId: st.authorizationId, status: 'approved' });
       }

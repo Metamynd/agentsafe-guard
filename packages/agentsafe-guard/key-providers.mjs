@@ -56,8 +56,9 @@ export function createStaticKeyProvider(agentKeyHex) {
     async signLocalReceipt(fields) {
       return rawSign(buildLocalReceiptMessage(fields));
     },
-    // The resume claim (0.28.0, MAGP-RESUME-CLAIM-v1): takes the one resume of an approved escalation. OPTIONAL: without it
-    // (the signer daemon) a resume runs unclaimed, as before.
+    // The resume claim (0.28.0, MAGP-RESUME-CLAIM-v1; v2 since 0.32.0 when `fields` carry requestDigest and contextDigest, which
+    // binds the approved request and context — pre-beta rerun 6 F-1-NF-R): takes the one resume of an approved escalation.
+    // OPTIONAL: without it (the signer daemon) a resume runs unclaimed, as before.
     async signResumeClaim(fields) {
       return rawSign(buildResumeClaimMessage(fields));
     },

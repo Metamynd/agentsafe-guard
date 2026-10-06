@@ -13,7 +13,7 @@ import unittest
 
 from _support import new_agent_key
 from fake_gate import FakeGate
-from metamynd_client import GovernanceBlocked, MetaMyndClient, approved_context_digest, guard_agent_tool, guard_tool, resume_request_digest
+from metamynd_client import GovernanceBlocked, MetaMyndClient, approved_context_digest, guard_agent_tool, guard_tool, resume_claim_message, resume_request_digest
 
 VECTORS = pathlib.Path(__file__).resolve().parents[3] / "docs" / "protocol" / "resume-binding-vectors.json"
 FLIGHT = lambda airline, amount, risk="high": {"amount": amount, "merchant": airline, "context": {"riskLevel": risk},  # noqa: E731
@@ -32,6 +32,14 @@ class Vectors(unittest.TestCase):
         for v in json.loads(VECTORS.read_text(encoding="utf-8"))["contextVectors"]:
             with self.subTest(v["name"]):
                 self.assertEqual(approved_context_digest(v["context"]), v["digest"])
+
+    def test_reproduces_every_resume_claim_vector(self) -> None:
+        # MAGP-RESUME-CLAIM-v2 (0.19.0, pre-beta rerun 6 F-1-NF-R) binds the request and context digests; v1 binds neither.
+        for v in json.loads(VECTORS.read_text(encoding="utf-8"))["claimVectors"]:
+            f = v["fields"]
+            with self.subTest(v["name"]):
+                self.assertEqual(resume_claim_message(f["escalationId"], f["authorizationId"], f["agentDid"], f["nonce"], f["issuedAt"],
+                                                      f.get("requestDigest"), f.get("contextDigest")), v["message"])
 
 
 class ResumeBinding(unittest.TestCase):
@@ -81,6 +89,7 @@ class ResumeBinding(unittest.TestCase):
 
     def test_a_gate_that_predates_the_context_binding_checks_what_it_can(self) -> None:
         self.gate.context_binding = False
+        self.gate.resume_claim_version = None  # a gate that predates the binding knows only the v1 claim
         esc = self.approved_escalation()
         self.assertEqual(self.book.resume(esc, "skyward-air", 5, "low"), "booked")
 
@@ -93,6 +102,7 @@ class ResumeBinding(unittest.TestCase):
 
     def test_a_gate_that_predates_request_digest_resumes_as_before(self) -> None:
         self.gate.resume_binding = False
+        self.gate.resume_claim_version = None  # a gate that predates the binding knows only the v1 claim
         esc = self.approved_escalation()
         self.assertEqual(self.book.resume(esc, "skyward-air", 5000), "booked")
 
