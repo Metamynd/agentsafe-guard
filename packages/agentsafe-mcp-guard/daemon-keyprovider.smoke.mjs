@@ -9,7 +9,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { createMcpGuard } from './agentsafe-mcp-guard.mjs';
+import { createDaemonKeyProvider } from './key-providers.mjs';
 import { verifyDidSignature, buildHederaDid } from './magp-did.mjs';
 import { SignerDaemon } from '../agentsafe-signer/daemon.mjs';
 
@@ -99,6 +101,38 @@ async function main() {
       "a serviceDid that is not the daemon's own identity is refused by the daemon, not sent with a signature the issuer would reject");
   } finally {
     globalThis.fetch = realFetch;
+  }
+
+  // --- A refused connect is retried, not fatal (Linux/macOS only: Windows pipes have no socket
+  //     files). A daemon's Unix socket path exists from bind(), a moment before listen(), and a
+  //     stale file left by a killed daemon refuses until a restarted one replaces it. Both answer
+  //     ECONNREFUSED, which daemonRequest used to give up on at once (agentsafe-signer's own
+  //     migrate.smoke.mjs flaked on exactly this in CI). Here a stale socket file refuses until a
+  //     REAL daemon takes its path over 300ms later; the signing call must ride that out. ---
+  if (process.platform !== 'win32') {
+    const staleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentsafe-mcp-guard-daemon-stale-'));
+    const stalePath = path.join(staleDir, 'signer.sock');
+    const stale = spawn(process.execPath, ['-e', `require('net').createServer().listen(${JSON.stringify(stalePath)}, () => process.kill(process.pid, 'SIGKILL'))`]);
+    await new Promise((resolve) => stale.once('exit', resolve));
+    check(fs.existsSync(stalePath), 'a stale socket file (no listener) is left behind for the refusal case');
+
+    const late = new SignerDaemon({ stateDir: staleDir, role: 'service', kek: crypto.randomBytes(32) });
+    await late.waitUntilUnlocked();
+    const lateRaw = Buffer.from(late.handleAdminRequest({ op: 'generate-key' }).publicKeyHex, 'hex').subarray(-32);
+    const lateDid = buildHederaDid('testnet', lateRaw, '0.0.300');
+    late.setIdentity(lateDid);
+    const listenLater = setTimeout(() => late.startSigningServer(stalePath), 300);
+
+    const nonce = crypto.randomUUID();
+    let sig = null;
+    let threw = null;
+    try {
+      sig = await createDaemonKeyProvider({ socketPath: stalePath }).signHandshakeNonce(nonce);
+    } catch (err) {
+      threw = err;
+    }
+    clearTimeout(listenLater);
+    check(threw === null && verifyDidSignature(lateDid, nonce, sig), `a refused connect is retried until the daemon is listening, then signs${threw ? ` (got: ${threw.message})` : ''}`);
   }
 
   if (failed) {

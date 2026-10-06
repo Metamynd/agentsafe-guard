@@ -46,9 +46,10 @@ function daemonRequest(socketPath, op, params, { connectTimeoutMs = 3000 } = {})
         // See agentsafe-guard/key-providers.mjs's own copy of this function for why: on Windows
         // the signing socket is a pool of independent named-pipe instances, each consumed by one
         // connection and replaced asynchronously, so a request can transiently race that
-        // replacement window (ENOENT) even though the daemon is healthy. Only ENOENT retries — a
-        // genuinely down daemon still fails fast.
-        if (err.code === 'ENOENT' && Date.now() < deadline) {
+        // replacement window (ENOENT) even though the daemon is healthy. ECONNREFUSED retries too
+        // (a Unix socket between bind() and listen(), or a stale file from a killed daemon): a
+        // refused connect never delivered the request. A daemon that stays down fails at the deadline.
+        if ((err.code === 'ENOENT' || err.code === 'ECONNREFUSED') && Date.now() < deadline) {
           setTimeout(attempt, 20);
           return;
         }

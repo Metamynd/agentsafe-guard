@@ -955,7 +955,9 @@ function daemonRequest(socketPath, op, params, { connectTimeoutMs = 5000 } = {})
       sock.once('error', (err) => {
         cleanup();
         if (settled) return;
-        if (err.code === 'ENOENT' && Date.now() < deadline) { setTimeout(attempt, 20); return; }
+        // ECONNREFUSED too: the one-shot admin socket is called right as `start --admin` builds it,
+        // and a Unix socket refuses between bind() and listen(). A refused connect sent nothing.
+        if ((err.code === 'ENOENT' || err.code === 'ECONNREFUSED') && Date.now() < deadline) { setTimeout(attempt, 20); return; }
         settled = true;
         clearTimeout(overallTimer);
         reject(Object.assign(new Error(`agentsafe-signer daemon unreachable at ${socketPath}: ${err.message}`), { code: 'DAEMON_UNREACHABLE' }));

@@ -107,8 +107,12 @@ function daemonRequest(socketPath, op, params, { connectTimeoutMs = 3000 } = {})
         // can race that replacement window and transiently find zero live instances (ENOENT) even
         // though the daemon itself is up and healthy. Retrying briefly is the same tolerance any
         // client of a local, independently-started daemon needs — not a workaround for a broken
-        // invariant — and matches only ENOENT so a daemon that is genuinely down still fails fast.
-        if (err.code === 'ENOENT' && Date.now() < deadline) {
+        // invariant. ECONNREFUSED retries too: on Linux/macOS a Unix socket's path exists from
+        // bind(), a moment before listen(), and a stale file from a killed daemon refuses until a
+        // restarted one replaces it (agentsafe-signer's daemon-client.mjs hit the former in CI). A
+        // refused connect never delivered the request, so retrying cannot run it twice. Any other
+        // error fails at once; a daemon that stays down fails once the deadline passes.
+        if ((err.code === 'ENOENT' || err.code === 'ECONNREFUSED') && Date.now() < deadline) {
           setTimeout(attempt, 20);
           return;
         }
