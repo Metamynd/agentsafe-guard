@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.19.1"
+__version__ = "0.19.2"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -2022,7 +2022,10 @@ def guard_tool(
 
     def _after_success(verdict: "Verdict", payload: "Mapping[str, Any]") -> None:
         """Commit the hold of a call that ran, at the authorized amount. Best effort; a gateway may already have."""
-        amount = payload.get("amount")
+        # A call that names no amount was authorized at 0 (_gate sends `payload.get("amount", 0)`), and the gate holds it all
+        # the same: settled here at 0 — "it ran, it spent nothing" — or it sat `held` until its TTL and then read as `expired`,
+        # an action that never ran (0.19.2, pre-beta rerun 6 FW6-4). A zero capture of an unclaimed hold commits no spend.
+        amount = payload.get("amount", 0)
         if settle != "capture" or not verdict.authorization_id or isinstance(amount, bool) or not isinstance(amount, (int, float)):
             return
         # A hold a counterparty CLAIMED is not this agent's to settle (0.16.0, pre-beta rerun 4 F-3): the gateway that ran the

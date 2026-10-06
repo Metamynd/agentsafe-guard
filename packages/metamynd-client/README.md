@@ -123,7 +123,8 @@ the unguarded function. If the awaiting task is cancelled (a timeout) while the 
 the gate permits, the hold that call created is voided rather than left reserving the budget.
 Async generator tools are refused when you wrap them: one authorization covers one action.
 
-**A tool that raises keeps its hold.** When a permitted tool returns, `guard_tool` captures the hold; when it raises,
+**A tool that raises keeps its hold.** When a permitted tool returns, `guard_tool` captures the hold (a call with no
+amount at 0, since 0.19.2: it ran and spent nothing, rather than a hold left to lapse as `expired`); when it raises,
 the hold is kept, because a tool that raised may already have acted (charged the card, then failed). A kept hold counts
 against the mandate's cumulative cap until it lapses with the hold TTL (15 minutes unless the issuer sets
 `MANDATE_HOLD_TTL_MS`), so a burst of failures can use up the budget for that window with nothing bought. Once you

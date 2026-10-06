@@ -1160,8 +1160,12 @@ export function createGuard(opts = {}) {
         }
         throw err;
       }
-      if (decision.authorizationId && settle === 'capture' && typeof mapped?.amount === 'number') {
-        await captureRan(decision.authorizationId, mapped.amount);
+      // A call that names no amount was authorized at 0 and, decided by the remote gate (remote mode, a stale bundle, an
+      // approved resume), still got a hold: it is settled at 0 — "it ran, it spent nothing" — or it sat `held` until its TTL
+      // and then read as `expired`, an action that never ran (0.33.1, pre-beta rerun 6 FW6-4). A local permit has no hold.
+      const ranAmount = mapped?.amount ?? 0;
+      if (decision.authorizationId && settle === 'capture' && typeof ranAmount === 'number') {
+        await captureRan(decision.authorizationId, ranAmount);
       }
       return result;
     }
