@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/agentsafe-a2a-guard",
-  "version": "0.19.1",
+  "version": "0.19.2",
   "description": "Zero-dependency trustless governance for the A2A (Agent2Agent) protocol. The RECEIVING agent independently re-verifies a calling agent's signed MAGP envelope against the caller's own published policy — so a caller that ignores its own guard still cannot make your agent act.",
   "type": "module",
   "main": "./agentsafe-a2a-guard.mjs",

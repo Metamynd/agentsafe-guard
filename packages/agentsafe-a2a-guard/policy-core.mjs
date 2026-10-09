@@ -184,6 +184,48 @@ function buildRuleContext(src) {
   return ctx;
 }
 
+// src/policy-core/jurisdiction-groups.ts
+var EU_MEMBER_STATES = Object.freeze([
+  "AT",
+  "BE",
+  "BG",
+  "CY",
+  "CZ",
+  "DE",
+  "DK",
+  "EE",
+  "ES",
+  "FI",
+  "FR",
+  "GR",
+  "HR",
+  "HU",
+  "IE",
+  "IT",
+  "LT",
+  "LU",
+  "LV",
+  "MT",
+  "NL",
+  "PL",
+  "PT",
+  "RO",
+  "SE",
+  "SI",
+  "SK"
+]);
+var JURISDICTION_GROUPS = Object.freeze({ EU: EU_MEMBER_STATES });
+function expandJurisdictionGroups(list) {
+  const out = /* @__PURE__ */ new Set();
+  for (const raw of list) {
+    const code = String(raw).trim().toUpperCase();
+    out.add(code);
+    const group = Object.prototype.hasOwnProperty.call(JURISDICTION_GROUPS, code) ? JURISDICTION_GROUPS[code] : void 0;
+    group?.forEach((c) => out.add(c));
+  }
+  return [...out];
+}
+
 // src/policy-core/atom-registry.ts
 var RISK_RANK = { low: 0, medium: 1, high: 2, critical: 3 };
 function currencyOutOfScope(ctx, cfgCurrency) {
@@ -245,7 +287,8 @@ ${c.output ?? ""}`.toLowerCase();
   // --- Compliance atoms. Allow-list atoms fire when the context field is PRESENT
   //     and NOT allowed (consistent with data-source-not-approved: a missing field
   //     does not fire — the atom's requiredContext documents what to supply). ---
-  "jurisdiction-not-allowed": (c, cfg) => notInAllowList(c.jurisdiction, cfg?.allowed),
+  // A group code in the list ("EU") stands for its members, as on the mandate (jurisdiction-groups.ts).
+  "jurisdiction-not-allowed": (c, cfg) => notInAllowList(c.jurisdiction, Array.isArray(cfg?.allowed) ? expandJurisdictionGroups(cfg.allowed) : cfg?.allowed),
   "data-residency-violation": (c, cfg) => notInAllowList(c.dataResidency, cfg?.allowedRegions),
   "model-not-allowed": (c, cfg) => notInAllowList(c.model, cfg?.allowed),
   "tool-not-allowed": (c, cfg) => notInAllowList(c.tool, cfg?.allowed),
@@ -994,7 +1037,9 @@ export {
   CATALOGUED_ATOMS,
   CONTEXT_UNVERIFIABLE,
   DEFAULT_AMOUNT_SHARE_HIGH,
+  EU_MEMBER_STATES,
   JURISDICTION_ATOM,
+  JURISDICTION_GROUPS,
   MODES_BY_RANK,
   MODE_RANK,
   PROVENANCE_KEY,
@@ -1024,6 +1069,7 @@ export {
   evaluateBoundStandards,
   evaluateMandate,
   evaluateStandardRules,
+  expandJurisdictionGroups,
   hasMerchantAllowList,
   isAuthorityFailure,
   isOperatingMode,

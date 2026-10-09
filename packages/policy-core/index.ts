@@ -13,6 +13,7 @@ export type { PolicyDecision, EvaluationContext, Verdict } from './types.js';
 
 // Atoms
 export { ATOM_REGISTRY, contextValueMatch, contextValueAt, normalizeContextToken, type ContextValueMatch } from './atom-registry.js';
+export { EU_MEMBER_STATES, JURISDICTION_GROUPS, expandJurisdictionGroups } from './jurisdiction-groups.js';
 export {
   ATOM_SPECS,
   CATALOGUED_ATOMS,
