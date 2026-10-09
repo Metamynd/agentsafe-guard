@@ -338,8 +338,10 @@ write failed.
 ## Examples
 
 Six runnable examples, each a single file you can download from
-[metamynd.ai/developers/python](https://metamynd.ai/developers/python). Each runs offline against a
-test gate, and CI runs them:
+[metamynd.ai/developers/python](https://metamynd.ai/developers/python). Each one governs a real call, so it needs an agent to act as:
+create a free sandbox agent first (`npx create-metamynd-agent --sandbox`, no account needed) and export its DID and
+key as the example's header describes. Run without them, an example exits with an error. (This repository's CI runs
+them against a local test gate.) The examples:
 [`langgraph_agent.py`](https://metamynd.ai/examples/langgraph_agent.py),
 [`openai_agents_agent.py`](https://metamynd.ai/examples/openai_agents_agent.py),
 [`crewai_agent.py`](https://metamynd.ai/examples/crewai_agent.py),
