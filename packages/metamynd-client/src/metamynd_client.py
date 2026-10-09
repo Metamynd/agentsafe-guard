@@ -176,7 +176,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.21.0"
+__version__ = "0.21.1"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
