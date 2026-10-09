@@ -1,0 +1,214 @@
+{
+  "_comment": [
+    "MAGP payload-binding conformance vectors (spec section 8.3.9).",
+    "Generated from backend/src/features/magp/payload-binding.ts (backend/scripts/generate-payload-vectors.ts), which is the source of truth.",
+    "Every implementation MUST reproduce `canonical` and `digest` from `jsonText` (RFC 8785 canonical JSON, SHA-256 of its UTF-8 bytes, prefixed \"sha256:\"), MUST refuse every `reject` case, and for `binding` MUST reproduce `message` and the Ed25519 `signature` under `seed`.",
+    "The seed is the public RFC 8032 section 7.1 test vector 1 key. It is a test key, never a secret, and must never be used for a real agent.",
+    "The suites that read this file: backend/src/features/magp/payload-binding.test.ts and integrations/metamynd-client/tests/test_payload_vectors.py."
+  ],
+  "algorithm": "Ed25519",
+  "canonicalization": "RFC 8785 (JCS)",
+  "digestFormat": "sha256:<64 lower-case hex>",
+  "messageFormat": "MAGP-PAYLOAD-v1|agentDid|action|nonce|issuedAt|payloadDigest  (each field: \"\\\" then \"|\" backslash-escaped)",
+  "seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "canonical": [
+    {
+      "name": "empty object",
+      "note": "the smallest payload",
+      "jsonText": "{}",
+      "canonical": "{}",
+      "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "key order",
+      "note": "keys are sorted, whatever order they arrive in",
+      "jsonText": "{\"b\":1,\"a\":2,\"c\":{\"z\":1,\"y\":2}}",
+      "canonical": "{\"a\":2,\"b\":1,\"c\":{\"y\":2,\"z\":1}}",
+      "digest": "sha256:c0f8bd0ab5119fda84f6a24ed2eff88949e145d20f0a1eddbb51e14ef1eae3cb"
+    },
+    {
+      "name": "nested and arrays",
+      "note": "arrays keep their order; objects inside them are sorted",
+      "jsonText": "{\"z\":[3,1,{\"y\":true,\"x\":null}],\"a\":\"s\"}",
+      "canonical": "{\"a\":\"s\",\"z\":[3,1,{\"x\":null,\"y\":true}]}",
+      "digest": "sha256:aa08acf41a1590999373e6ddd57be3aeb313b4b9d9c96a6b3f56e58bc0d70eb0"
+    },
+    {
+      "name": "whitespace and formatting",
+      "note": "insignificant whitespace is dropped",
+      "jsonText": "{ \"a\" : 1 ,\n \"b\" : [ 1 , 2 ] }",
+      "canonical": "{\"a\":1,\"b\":[1,2]}",
+      "digest": "sha256:8baa73198470c7bb4c3ce142a8fd651affc0310d878bb9bd159e37a573fb4874"
+    },
+    {
+      "name": "numbers",
+      "note": "ECMAScript number serialisation: 1.0 is \"1\", -0 is \"0\", 1e21 is \"1e+21\", 1e-7 is \"1e-7\", 0.00005 is \"0.00005\"",
+      "jsonText": "[0,-0,1,1.0,1.5,1e21,1e-7,0.00005,100,123456789012345680000,1E2,0.1]",
+      "canonical": "[0,0,1,1,1.5,1e+21,1e-7,0.00005,100,123456789012345680000,100,0.1]",
+      "digest": "sha256:cb10d3294169fe26d07130d63b32a52a575cbb2532a30e7c0a78e89af53cac32"
+    },
+    {
+      "name": "numbers beyond 2**53",
+      "note": "JSON.parse holds a double, so these are signed as the double, not their exact digits",
+      "jsonText": "[9007199254740993,1152921504606846977]",
+      "canonical": "[9007199254740992,1152921504606847000]",
+      "digest": "sha256:ece0382d91a410f4c8d0d80f53f536fdf43c866403c0cb32870c78855cb5d5ff"
+    },
+    {
+      "name": "string escapes",
+      "note": "only \\\" \\\\ and the C0 controls are escaped (as \\b \\f \\n \\r \\t or \\u00xx lower-case); \"/\" and non-ASCII are not",
+      "jsonText": "\"a\\\"b\\\\c\\n\\t\\u0001\\u001f\\u007f\\/ é ✓ 😀\"",
+      "canonical": "\"a\\\"b\\\\c\\n\\t\\u0001\\u001f/ é ✓ 😀\"",
+      "digest": "sha256:4ac44504f3edd7aef38a5eea51c187264ebfc6d1a4ce1d1a892951c883241596"
+    },
+    {
+      "name": "unicode passthrough",
+      "note": "non-ASCII text is written raw (UTF-8), never as \\u escapes",
+      "jsonText": "{\"name\":\"Zoë\",\"city\":\"München\",\"emoji\":\"😀\"}",
+      "canonical": "{\"city\":\"München\",\"emoji\":\"😀\",\"name\":\"Zoë\"}",
+      "digest": "sha256:d5dcd72f66251da96363ac078df770d8014f588b7e99f6ed98847d305fda694e"
+    },
+    {
+      "name": "utf-16 key order",
+      "note": "keys sort by UTF-16 code unit: U+1F600 (surrogates D83D DE00) sorts BEFORE U+FFFF, the reverse of code-point order",
+      "jsonText": "{\"\\uffff\":1,\"\\ud83d\\ude00\":2,\"a\":3}",
+      "canonical": "{\"a\":3,\"😀\":2,\"￿\":1}",
+      "digest": "sha256:ebf795fac6c6f147f5c5267b4c3716b79e232b10810c39bf697846d06bb6e2db"
+    },
+    {
+      "name": "empty string key",
+      "note": "the empty key is a key",
+      "jsonText": "{\"\":1,\"a\":2}",
+      "canonical": "{\"\":1,\"a\":2}",
+      "digest": "sha256:9cf535828d5dbc2d87d9c4c0b99d9e7308b5fdbd22aac02bac1d60f6ac9aa127"
+    },
+    {
+      "name": "scalar payloads",
+      "note": "a payload may be any JSON value",
+      "jsonText": "\"x\"",
+      "canonical": "\"x\"",
+      "digest": "sha256:ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b"
+    },
+    {
+      "name": "null payload",
+      "note": "null is a value",
+      "jsonText": "null",
+      "canonical": "null",
+      "digest": "sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+    },
+    {
+      "name": "booleans",
+      "note": "true and false",
+      "jsonText": "[true,false]",
+      "canonical": "[true,false]",
+      "digest": "sha256:153c9dbcc7025ecd7e50ce6d83f1995233dfc636bc869098e3a8d84288fd938a"
+    },
+    {
+      "name": "payee and amount",
+      "note": "the case this exists for: a field the eight signed fields never covered",
+      "jsonText": "{\"amount\":250,\"merchant\":\"skyward-air\",\"payee\":\"NL91ABNA0417164300\",\"reference\":\"INV-1042\"}",
+      "canonical": "{\"amount\":250,\"merchant\":\"skyward-air\",\"payee\":\"NL91ABNA0417164300\",\"reference\":\"INV-1042\"}",
+      "digest": "sha256:573da2453dc995881d11ee6159991af3a5aceccd7668b2a122bea70a3e1ae1a9"
+    }
+  ],
+  "reject": [
+    {
+      "name": "lone high surrogate",
+      "note": "an unpaired surrogate is not text",
+      "jsonText": "\"\\ud800\""
+    },
+    {
+      "name": "lone low surrogate in a key",
+      "note": "nor is one in a key",
+      "jsonText": "{\"\\udc00\":1}"
+    },
+    {
+      "name": "number too large for a double",
+      "note": "1e999 is Infinity once parsed",
+      "jsonText": "1e999"
+    },
+    {
+      "name": "nested too deep",
+      "note": "deeper than 32 levels",
+      "jsonText": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+    }
+  ],
+  "binding": [
+    {
+      "name": "payee payload",
+      "note": "a plain binding",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "payloadJsonText": "{\"amount\":250,\"merchant\":\"skyward-air\",\"payee\":\"NL91ABNA0417164300\"}",
+      "payloadDigest": "sha256:91dd634ecf898a64fbf53049c6a60a0e13f04010b6f86daf0708aef9e8734423",
+      "message": "MAGP-PAYLOAD-v1|did:key:z6MkTestVectorAgent|flight-purchase|0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z|sha256:91dd634ecf898a64fbf53049c6a60a0e13f04010b6f86daf0708aef9e8734423",
+      "signature": "66a232f7d174cfb7ceb46cd177761146cae05cc0c247746a5198efad85c6c2f32cd6528f434710b32058a70159a64d89bf808a9f030da1247abf3a00eb64d00e"
+    },
+    {
+      "name": "delimiter in a field",
+      "note": "a literal \"|\" and \"\\\" in the action are escaped exactly as in the authorize message (§8.3.1)",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "a|b\\c",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "payloadJsonText": "{\"x\":1}",
+      "payloadDigest": "sha256:5041bf1f713df204784353e82f6a4a535931cb64f1f4b4a5aeaffcb720918b22",
+      "message": "MAGP-PAYLOAD-v1|did:key:z6MkTestVectorAgent|a\\|b\\\\c|0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z|sha256:5041bf1f713df204784353e82f6a4a535931cb64f1f4b4a5aeaffcb720918b22",
+      "signature": "9ea9c1048c797e4b3c648e9542fa5a03fb76c6152a0ad271c65155500760f011968de163629a3c687b7c9ad0868af068c0b69ba73506a89af373676a064dfe0e"
+    },
+    {
+      "name": "unicode agent and action",
+      "note": "non-ASCII fields sign as UTF-8",
+      "fields": {
+        "agentDid": "did:key:zMünchen",
+        "action": "réservation",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "payloadJsonText": "{\"x\":\"é\"}",
+      "payloadDigest": "sha256:97f06f396a709c3a29824e1cc794eeb98e2d1a262d7d455439d286d42803f0fe",
+      "message": "MAGP-PAYLOAD-v1|did:key:zMünchen|réservation|0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z|sha256:97f06f396a709c3a29824e1cc794eeb98e2d1a262d7d455439d286d42803f0fe",
+      "signature": "16cc0b6da57d9d97bde3994fd6a6c6815e83552a773e0423e9e40003b9a7fd18ef40b1494e0565600a8638c3d2589a2472b74a1a4e439e5b9c387bd9bf460a08"
+    }
+  ],
+  "rebindMessageFormat": "MAGP-PAYLOAD-REBIND-v1|agentDid|action|authorizationId|nonce|issuedAt|payloadDigest  (same escaping; binds a digest to a hold that already exists, spec 8.3.11)",
+  "rebind": [
+    {
+      "name": "rebind a modified hold",
+      "note": "a digest bound to a hold that already exists: the message also names the authorization id",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z",
+        "authorizationId": "7f3c1d2e-9a4b-4c5d-8e6f-0a1b2c3d4e5f"
+      },
+      "payloadJsonText": "{\"amount\":100,\"merchant\":\"skyward-air\",\"payee\":\"NL91ABNA0417164300\"}",
+      "payloadDigest": "sha256:2e7f29d4ea229586a86cadc2b2f726e83aacdd0b9e3bd4c941cbd6cb863a68e2",
+      "message": "MAGP-PAYLOAD-REBIND-v1|did:key:z6MkTestVectorAgent|flight-purchase|7f3c1d2e-9a4b-4c5d-8e6f-0a1b2c3d4e5f|0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z|sha256:2e7f29d4ea229586a86cadc2b2f726e83aacdd0b9e3bd4c941cbd6cb863a68e2",
+      "signature": "92eada3f778ff96f37307357227aa83753c372850e607b52b745ba53853b07e1ecf4a20ced3db42d9575b2e6a2e517f74655ee2d74658a8f96f576f93935db03"
+    },
+    {
+      "name": "rebind with delimiters",
+      "note": "the authorization id and the other fields are escaped like every other field",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "a|b\\c",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z",
+        "authorizationId": "id|with\\delims"
+      },
+      "payloadJsonText": "{\"x\":1}",
+      "payloadDigest": "sha256:5041bf1f713df204784353e82f6a4a535931cb64f1f4b4a5aeaffcb720918b22",
+      "message": "MAGP-PAYLOAD-REBIND-v1|did:key:z6MkTestVectorAgent|a\\|b\\\\c|id\\|with\\\\delims|0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z|sha256:5041bf1f713df204784353e82f6a4a535931cb64f1f4b4a5aeaffcb720918b22",
+      "signature": "554d350647eecb08e1911337de672d7a7db8ba0c48aadfe61d8c1e4b770106ffc08cdccdb07e604a4b8440308eef549846281898b0c6ee2ffc15917908ff550b"
+    }
+  ]
+}

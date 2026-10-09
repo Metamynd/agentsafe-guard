@@ -1,0 +1,112 @@
+{
+  "_comment": [
+    "MAGP context-signature conformance vectors (context-claim binding, docs/design/context-claim-binding.md Tier 1).",
+    "Generated from backend/src/features/policy/mandate/governance-envelope.ts (backend/scripts/generate-context-signature-vectors.ts), which is the source of truth.",
+    "`envelopeSignature` is an Ed25519 signature by the agent key over the UTF-8 bytes of `envelopeHash`, the lower-case hex SHA-256 of `canonicalEnvelope`: the GovernanceEnvelope built from the WIRE request (no defaults), minus its integrity block, with object keys sorted recursively and undefined values dropped.",
+    "Every verifier (the gate, agentsafe-mcp-guard, agentsafe-a2a-guard) MUST reproduce `canonicalEnvelope` and `envelopeHash` from `request`, and MUST refuse CONTEXT_SIGNATURE_INVALID if any of itinerary, trace, materiality, amount, currency, merchant, action, nonce or issuedAt differs. A signer MUST reproduce `envelopeSignature` under `seed`.",
+    "The seed is the public RFC 8032 section 7.1 test vector 1 key. It is a test key, never a secret, and must never be used for a real agent. The requests are fixed in time, so a live verifier answers REQUEST_EXPIRED once both signatures verify."
+  ],
+  "algorithm": "Ed25519",
+  "hash": "sha256 (lower-case hex) of the canonical envelope; the signature is over the hex string",
+  "seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "agentDid": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+  "vectors": [
+    {
+      "name": "itinerary, trace and materiality",
+      "note": "the envelope hash commits to all three; `resource` and `jurisdiction` are signed by the request signature, not the envelope",
+      "request": {
+        "agentDid": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+        "nonce": "ctx-vector-nonce-0001",
+        "issuedAt": "2026-09-27T00:00:00.000Z",
+        "action": "flight-purchase",
+        "amount": 250,
+        "currency": "USD",
+        "merchant": "skyward-air",
+        "resource": "flights/LHR-SIN",
+        "jurisdiction": "SG",
+        "itinerary": {
+          "riskLevel": "low",
+          "tool": "book-flight",
+          "passengers": 1
+        },
+        "trace": {
+          "workflowId": "wf-1",
+          "workflowStep": 2,
+          "toolCalls": [
+            "search",
+            "hold"
+          ]
+        },
+        "materiality": {
+          "reversible": false
+        },
+        "signature": "cbe8c893043ee058db504f4166f64db0a173126370ce883c5ef02569f5ae0d58fa90278e9b2e61e0e6cbe168e6f406b66b90dc75d41fa8f84b8f5f726d2d880d",
+        "envelopeSignature": "b702b59e5260447431315b00a549d74fa071bac3ad4fbd03fa658a3a7c621a33dbb520e152b2a8a269826ebcdbf791eada3905fa1264e306810a680b918abc07"
+      },
+      "canonicalEnvelope": "{\"action\":{\"actionId\":\"act:ctx-vector-nonce-0001\",\"actionType\":\"flight-purchase\",\"amount\":250,\"currency\":\"USD\",\"materiality\":{\"reversible\":false},\"merchant\":\"skyward-air\"},\"agent\":{\"did\":\"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\"},\"context\":{\"passengers\":1,\"riskLevel\":\"low\",\"tool\":\"book-flight\"},\"createdAt\":\"2026-09-27T00:00:00.000Z\",\"envelopeId\":\"env:ctx-vector-nonce-0001\",\"trace\":{\"toolCalls\":[\"search\",\"hold\"],\"workflowId\":\"wf-1\",\"workflowStep\":2},\"version\":\"1.0\"}",
+      "envelopeHash": "bc2944b82494a257cc088139789b2939ed6c62f23952bbc33b57ed145c98603d"
+    },
+    {
+      "name": "no itinerary",
+      "note": "no context at all: the envelope carries no `context` key",
+      "request": {
+        "agentDid": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+        "nonce": "ctx-vector-nonce-0001",
+        "issuedAt": "2026-09-27T00:00:00.000Z",
+        "action": "read-report",
+        "amount": 0,
+        "currency": "USD",
+        "merchant": "",
+        "signature": "ba79910a45f24faff3ac501ebc1a631bc718969ae1fcbf1f9997aaac51b48306a7333558f865e6d35b63d8c85e60af867de225c82300fdc803356d34d04f5609",
+        "envelopeSignature": "9fea9f0aa1907cb9177addf2120753042cee15f0c53fcca6b417e5f99814fda64f858aabc648f6c78e0d5d62b84ad7114cb740b3233c5ae59b76bff183ca2808"
+      },
+      "canonicalEnvelope": "{\"action\":{\"actionId\":\"act:ctx-vector-nonce-0001\",\"actionType\":\"read-report\",\"amount\":0,\"currency\":\"USD\",\"merchant\":\"\"},\"agent\":{\"did\":\"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\"},\"createdAt\":\"2026-09-27T00:00:00.000Z\",\"envelopeId\":\"env:ctx-vector-nonce-0001\",\"version\":\"1.0\"}",
+      "envelopeHash": "980a2546ce34777c94180193df6d1f38ca0fac12bfc4a8f2c7e45dff8011a42d"
+    },
+    {
+      "name": "empty itinerary",
+      "note": "an empty object IS a context: the envelope carries `context: {}`, a different hash from no itinerary",
+      "request": {
+        "agentDid": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+        "nonce": "ctx-vector-nonce-0001",
+        "issuedAt": "2026-09-27T00:00:00.000Z",
+        "action": "read-report",
+        "amount": 0,
+        "currency": "USD",
+        "merchant": "",
+        "itinerary": {},
+        "signature": "ba79910a45f24faff3ac501ebc1a631bc718969ae1fcbf1f9997aaac51b48306a7333558f865e6d35b63d8c85e60af867de225c82300fdc803356d34d04f5609",
+        "envelopeSignature": "ac2d7949c6d7e9551013b5af31ce1582d6a7220f7243c732db34799c934666fe7694de030a3d02710e17ca804f6cff7ab6e13205e37ac9a08c0571e3cd100304"
+      },
+      "canonicalEnvelope": "{\"action\":{\"actionId\":\"act:ctx-vector-nonce-0001\",\"actionType\":\"read-report\",\"amount\":0,\"currency\":\"USD\",\"merchant\":\"\"},\"agent\":{\"did\":\"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\"},\"context\":{},\"createdAt\":\"2026-09-27T00:00:00.000Z\",\"envelopeId\":\"env:ctx-vector-nonce-0001\",\"version\":\"1.0\"}",
+      "envelopeHash": "c81eacfa0692cedbc0d0d47399d20388cbd82cc3dbe8c79331487692f39b8303"
+    },
+    {
+      "name": "amount and currency omitted",
+      "note": "the envelope hashes the WIRE fields (amount/currency absent), while the request signature uses the 0 / \"USD\" defaults",
+      "request": {
+        "agentDid": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+        "nonce": "ctx-vector-nonce-0001",
+        "issuedAt": "2026-09-27T00:00:00.000Z",
+        "action": "lookup",
+        "merchant": "registry",
+        "itinerary": {
+          "purpose": "kyc",
+          "nested keys": {
+            "z": 1,
+            "a": [
+              true,
+              null,
+              "x"
+            ]
+          }
+        },
+        "signature": "6d3f6364eb183dde3abb330c35d335b2c72fa099264a7e90de0728abc68b6c817d476f51a8ae38c0d0bd83f425e72eec8649b4112095e8a421ee30889d232f0e",
+        "envelopeSignature": "be5f65f6ce85501e505c6faea6e2e9b6e2197dee306ff28ddc1d81e3eff83e94ac3bc1d3650588a27a11435c3f2d311ac2f585f929aca78c63ad674ce114cb06"
+      },
+      "canonicalEnvelope": "{\"action\":{\"actionId\":\"act:ctx-vector-nonce-0001\",\"actionType\":\"lookup\",\"merchant\":\"registry\"},\"agent\":{\"did\":\"did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\"},\"context\":{\"nested keys\":{\"a\":[true,null,\"x\"],\"z\":1},\"purpose\":\"kyc\"},\"createdAt\":\"2026-09-27T00:00:00.000Z\",\"envelopeId\":\"env:ctx-vector-nonce-0001\",\"version\":\"1.0\"}",
+      "envelopeHash": "326d759487c7a525aa0784490a9405910622ad0fc656c935c455a40e003e9034"
+    }
+  ]
+}

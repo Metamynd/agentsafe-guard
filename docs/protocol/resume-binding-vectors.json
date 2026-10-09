@@ -1,0 +1,235 @@
+{
+  "_comment": [
+    "MAGP resume-binding conformance vectors (spec section 9a.5).",
+    "Generated from backend/src/features/magp/resume-binding.ts (backend/scripts/generate-resume-vectors.ts), which is the source of truth.",
+    "Every implementation MUST reproduce `message` and `digest` from `fields`.",
+    "The suites that read this file: backend/src/features/magp/resume-binding.test.ts and integrations/metamynd-client/tests/test_resume_binding.py."
+  ],
+  "messageFormat": "MAGP-RESUME-BIND-v1|authorizationId|action|amount|currency|merchant|resource|payloadDigest  (amount: ECMAScript number text, empty for none or 0; currency empty when amount is; each field \"\\\" then \"|\" backslash-escaped)",
+  "digestFormat": "sha256:<64 lower-case hex> of the UTF-8 message",
+  "vectors": [
+    {
+      "name": "financial, payload-bound",
+      "note": "the common case",
+      "fields": {
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "action": "flight-purchase",
+        "amount": 75,
+        "currency": "USD",
+        "merchant": "skyward-air",
+        "resource": null,
+        "payloadDigest": "sha256:5eec797ececd9b7c513e87a195d2843a652b18d850673e2f603d1992f2b54f41"
+      },
+      "message": "MAGP-RESUME-BIND-v1|1e7506c4-cdc6-40e0-a513-23a314535fb0|flight-purchase|75|USD|skyward-air||sha256:5eec797ececd9b7c513e87a195d2843a652b18d850673e2f603d1992f2b54f41",
+      "digest": "sha256:cf8824696c38d2049d58402c5a916f88b45ee7931935940e6a12c805874b0ef8"
+    },
+    {
+      "name": "amount as decimal text",
+      "note": "\"75.00\" is the number 75",
+      "fields": {
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "action": "flight-purchase",
+        "amount": "75.00",
+        "currency": "USD",
+        "merchant": "skyward-air",
+        "resource": null,
+        "payloadDigest": "sha256:5eec797ececd9b7c513e87a195d2843a652b18d850673e2f603d1992f2b54f41"
+      },
+      "message": "MAGP-RESUME-BIND-v1|1e7506c4-cdc6-40e0-a513-23a314535fb0|flight-purchase|75|USD|skyward-air||sha256:5eec797ececd9b7c513e87a195d2843a652b18d850673e2f603d1992f2b54f41",
+      "digest": "sha256:cf8824696c38d2049d58402c5a916f88b45ee7931935940e6a12c805874b0ef8"
+    },
+    {
+      "name": "fractional amount",
+      "note": "ECMAScript number text",
+      "fields": {
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "action": "flight-purchase",
+        "amount": 0.5,
+        "currency": "EUR",
+        "merchant": "skyward-air",
+        "resource": null,
+        "payloadDigest": null
+      },
+      "message": "MAGP-RESUME-BIND-v1|1e7506c4-cdc6-40e0-a513-23a314535fb0|flight-purchase|0.5|EUR|skyward-air||",
+      "digest": "sha256:a5a01b392ee4fb5ed0d05db68a5273c5f0ef76b8ef61a4dbdbfdc6e203e2186f"
+    },
+    {
+      "name": "different amount",
+      "note": "must differ from the first case",
+      "fields": {
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "action": "flight-purchase",
+        "amount": 5000,
+        "currency": "USD",
+        "merchant": "skyward-air",
+        "resource": null,
+        "payloadDigest": "sha256:5eec797ececd9b7c513e87a195d2843a652b18d850673e2f603d1992f2b54f41"
+      },
+      "message": "MAGP-RESUME-BIND-v1|1e7506c4-cdc6-40e0-a513-23a314535fb0|flight-purchase|5000|USD|skyward-air||sha256:5eec797ececd9b7c513e87a195d2843a652b18d850673e2f603d1992f2b54f41",
+      "digest": "sha256:0449f93611782da4f2a4061b0d1ae4039655cb1e7cb5164d0ccfedd320f522f4"
+    },
+    {
+      "name": "different merchant",
+      "note": "must differ from the first case",
+      "fields": {
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "action": "flight-purchase",
+        "amount": 75,
+        "currency": "USD",
+        "merchant": "shadow-broker",
+        "resource": null,
+        "payloadDigest": "sha256:5eec797ececd9b7c513e87a195d2843a652b18d850673e2f603d1992f2b54f41"
+      },
+      "message": "MAGP-RESUME-BIND-v1|1e7506c4-cdc6-40e0-a513-23a314535fb0|flight-purchase|75|USD|shadow-broker||sha256:5eec797ececd9b7c513e87a195d2843a652b18d850673e2f603d1992f2b54f41",
+      "digest": "sha256:1514d3c150ef9405f28eded7e1abc7f12af78bd70162b7022da8d2f2aa42812a"
+    },
+    {
+      "name": "value-less, absent amount",
+      "note": "no amount: currency is not bound",
+      "fields": {
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "action": "perform-action",
+        "amount": null,
+        "currency": null,
+        "merchant": null,
+        "resource": "records/42",
+        "payloadDigest": null
+      },
+      "message": "MAGP-RESUME-BIND-v1|1e7506c4-cdc6-40e0-a513-23a314535fb0|perform-action||||records/42|",
+      "digest": "sha256:7c23b96a7e6e960f0e2b4704ed9d6be12e9deb15a211a0fa3e0cd355a7a9fc4a"
+    },
+    {
+      "name": "value-less, zero amount",
+      "note": "same digest as the absent amount",
+      "fields": {
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "action": "perform-action",
+        "amount": 0,
+        "currency": "USD",
+        "merchant": "",
+        "resource": "records/42",
+        "payloadDigest": null
+      },
+      "message": "MAGP-RESUME-BIND-v1|1e7506c4-cdc6-40e0-a513-23a314535fb0|perform-action||||records/42|",
+      "digest": "sha256:7c23b96a7e6e960f0e2b4704ed9d6be12e9deb15a211a0fa3e0cd355a7a9fc4a"
+    },
+    {
+      "name": "escaped fields",
+      "note": "\"\\\" and \"|\" are backslash-escaped",
+      "fields": {
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "action": "flight-purchase",
+        "amount": 10,
+        "currency": "USD",
+        "merchant": "a|b\\c",
+        "resource": null,
+        "payloadDigest": null
+      },
+      "message": "MAGP-RESUME-BIND-v1|1e7506c4-cdc6-40e0-a513-23a314535fb0|flight-purchase|10|USD|a\\|b\\\\c||",
+      "digest": "sha256:841122ccd1e63ac8eaf924f3c704027bf1c133589590f12799ba3a3c4dd75ade"
+    }
+  ],
+  "contextDigestFormat": "sha256:<64 lower-case hex> of the RFC 8785 canonical JSON of {\"MAGP-APPROVED-CONTEXT-v1\": context} (an absent context is {})",
+  "contextVectors": [
+    {
+      "name": "approved read",
+      "note": "the context a person approved",
+      "context": {
+        "riskLevel": "high",
+        "target": "record-A",
+        "op": "read"
+      },
+      "digest": "sha256:ab2ad0b1c7043f4f2f0b69c7f4623f81021d20fd0255e936254174ac5f8f5d58"
+    },
+    {
+      "name": "same, keys reordered",
+      "note": "canonical JSON: same digest as \"approved read\"",
+      "context": {
+        "op": "read",
+        "target": "record-A",
+        "riskLevel": "high"
+      },
+      "digest": "sha256:ab2ad0b1c7043f4f2f0b69c7f4623f81021d20fd0255e936254174ac5f8f5d58"
+    },
+    {
+      "name": "altered operation",
+      "note": "must differ from \"approved read\"",
+      "context": {
+        "riskLevel": "high",
+        "target": "record-B",
+        "op": "delete-all"
+      },
+      "digest": "sha256:32f968575e2cefba9359f7147ef266707593c0b5cdf87186ee5627ce9a62496a"
+    },
+    {
+      "name": "empty context",
+      "note": "an absent context is {}",
+      "context": {},
+      "digest": "sha256:1ffdac20ec3c7b68a2ba4275427f78ca2466e52f33a1bca09085b0abacc7ad74"
+    },
+    {
+      "name": "absent context",
+      "note": "same digest as \"empty context\"",
+      "context": null,
+      "digest": "sha256:1ffdac20ec3c7b68a2ba4275427f78ca2466e52f33a1bca09085b0abacc7ad74"
+    },
+    {
+      "name": "nested values",
+      "note": "arrays and objects are canonicalised too",
+      "context": {
+        "riskLevel": "low",
+        "passengers": [
+          {
+            "name": "A",
+            "seat": "1A"
+          }
+        ],
+        "total": 12.5
+      },
+      "digest": "sha256:417a7c9d2e42940e0479aab852ff2879e8ed45ae676c6280f6e358418957154a"
+    }
+  ],
+  "claimMessageFormat": "MAGP-RESUME-CLAIM-v2|escalationId|authorizationId|agentDid|requestDigest|contextDigest|nonce|issuedAt  (v1, legacy and refused for an approval: MAGP-RESUME-CLAIM-v1|escalationId|authorizationId|agentDid|nonce|issuedAt; each field escaped as above). The agent signs the UTF-8 message with its DID key (Ed25519).",
+  "claimVectors": [
+    {
+      "name": "v2, approved read",
+      "note": "the claim a current SDK signs",
+      "fields": {
+        "escalationId": "b3f0c1d2-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "agentDid": "did:key:z6MkResumeClaimVector",
+        "nonce": "nonce-0001",
+        "issuedAt": "2026-10-06T00:00:00.000Z",
+        "requestDigest": "sha256:7c23b96a7e6e960f0e2b4704ed9d6be12e9deb15a211a0fa3e0cd355a7a9fc4a",
+        "contextDigest": "sha256:ab2ad0b1c7043f4f2f0b69c7f4623f81021d20fd0255e936254174ac5f8f5d58"
+      },
+      "message": "MAGP-RESUME-CLAIM-v2|b3f0c1d2-5e6f-4a7b-8c9d-0e1f2a3b4c5d|1e7506c4-cdc6-40e0-a513-23a314535fb0|did:key:z6MkResumeClaimVector|sha256:7c23b96a7e6e960f0e2b4704ed9d6be12e9deb15a211a0fa3e0cd355a7a9fc4a|sha256:ab2ad0b1c7043f4f2f0b69c7f4623f81021d20fd0255e936254174ac5f8f5d58|nonce-0001|2026-10-06T00:00:00.000Z"
+    },
+    {
+      "name": "v2, altered operation",
+      "note": "must differ from \"v2, approved read\"; the issuer refuses it AUTHORIZATION_CONTEXT_MISMATCH",
+      "fields": {
+        "escalationId": "b3f0c1d2-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "agentDid": "did:key:z6MkResumeClaimVector",
+        "nonce": "nonce-0001",
+        "issuedAt": "2026-10-06T00:00:00.000Z",
+        "requestDigest": "sha256:7c23b96a7e6e960f0e2b4704ed9d6be12e9deb15a211a0fa3e0cd355a7a9fc4a",
+        "contextDigest": "sha256:32f968575e2cefba9359f7147ef266707593c0b5cdf87186ee5627ce9a62496a"
+      },
+      "message": "MAGP-RESUME-CLAIM-v2|b3f0c1d2-5e6f-4a7b-8c9d-0e1f2a3b4c5d|1e7506c4-cdc6-40e0-a513-23a314535fb0|did:key:z6MkResumeClaimVector|sha256:7c23b96a7e6e960f0e2b4704ed9d6be12e9deb15a211a0fa3e0cd355a7a9fc4a|sha256:32f968575e2cefba9359f7147ef266707593c0b5cdf87186ee5627ce9a62496a|nonce-0001|2026-10-06T00:00:00.000Z"
+    },
+    {
+      "name": "v1 (legacy)",
+      "note": "no digests: the issuer refuses it AUTHORIZATION_CONTEXT_REQUIRED",
+      "fields": {
+        "escalationId": "b3f0c1d2-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "authorizationId": "1e7506c4-cdc6-40e0-a513-23a314535fb0",
+        "agentDid": "did:key:z6MkResumeClaimVector",
+        "nonce": "nonce-0001",
+        "issuedAt": "2026-10-06T00:00:00.000Z"
+      },
+      "message": "MAGP-RESUME-CLAIM-v1|b3f0c1d2-5e6f-4a7b-8c9d-0e1f2a3b4c5d|1e7506c4-cdc6-40e0-a513-23a314535fb0|did:key:z6MkResumeClaimVector|nonce-0001|2026-10-06T00:00:00.000Z"
+    }
+  ]
+}
