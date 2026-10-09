@@ -1,5 +1,6 @@
 import type { EvaluationContext } from './types.js';
 import { normalizeRiskLevel } from './provenance.js';
+import { expandJurisdictionGroups } from './jurisdiction-groups.js';
 
 /**
  * Atom library — the code-defined predicates that DB policies compose by id.
@@ -94,7 +95,9 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
   // --- Compliance atoms. Allow-list atoms fire when the context field is PRESENT
   //     and NOT allowed (consistent with data-source-not-approved: a missing field
   //     does not fire — the atom's requiredContext documents what to supply). ---
-  'jurisdiction-not-allowed': (c, cfg) => notInAllowList(c.jurisdiction, cfg?.allowed),
+  // A group code in the list ("EU") stands for its members, as on the mandate (jurisdiction-groups.ts).
+  'jurisdiction-not-allowed': (c, cfg) =>
+    notInAllowList(c.jurisdiction, Array.isArray(cfg?.allowed) ? expandJurisdictionGroups(cfg.allowed) : cfg?.allowed),
   'data-residency-violation': (c, cfg) => notInAllowList(c.dataResidency, cfg?.allowedRegions),
   'model-not-allowed': (c, cfg) => notInAllowList(c.model, cfg?.allowed),
   'tool-not-allowed': (c, cfg) => notInAllowList(c.tool, cfg?.allowed),

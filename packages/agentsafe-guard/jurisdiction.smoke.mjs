@@ -113,6 +113,13 @@ check(withSop({ jurisdiction: 'RU' }).reasonCode === 'SOP_JURISDICTION', 'SOP at
 check(withSop({}).reasonCode === 'JURISDICTION_REQUIRED', 'SOP atom enforced, nothing signed → JURISDICTION_REQUIRED');
 check(withSop({ context: { riskLevel: 'low', jurisdiction: 'RU' } }).reasonCode === 'JURISDICTION_REQUIRED', 'SOP atom: an unsigned context RU is never judged (and never satisfies the requirement)');
 
+// "EU" in an SOP allow-list stands for the member states, as on the mandate (0.34.2): it was compared literally, so FR was
+// refused by a rule allowing EU.
+const euSops = [{ standardKey: 'sop:eu', document: { molecules: [{ id: 'eu', combinator: 'all', atoms: [{ id: 'a', predicate: 'jurisdiction-not-allowed', config: { allowed: ['GB', 'EU'] } }], decision: 'block', reasonCode: 'SOP_EU' }] } }];
+const withEu = (request) => guard.evaluateLocally({ mandate: open, sops: euSops, request: { action: 'flight-purchase', amount: 10, context: { riskLevel: 'low' }, ...request } });
+check(withEu({ jurisdiction: 'FR' }).decision === 'allow', 'SOP atom: EU on the list → signed FR (a member state) is allowed');
+check(withEu({ jurisdiction: 'CH' }).reasonCode === 'SOP_EU', 'SOP atom: EU on the list → signed CH (not a member) still fires');
+
 // --- 5. daemon key provider against a fake daemon ---------------------------------------------------------------------
 // Same pipe-name derivation as key-providers.mjs / the signer daemon, so the fake is reachable on every platform.
 function platformSocketPath(logical) {
