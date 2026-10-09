@@ -1,5 +1,5 @@
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import * as source from './index.js';
 
@@ -9,13 +9,29 @@ import * as source from './index.js';
  * gateway judging from its bundle would let it run. Each committed bundle must reach the same verdict, the same signal
  * and the same normalisation as the source on every vector below.
  */
-const BUNDLES = [
+const ALL_BUNDLES = [
   'integrations/agentsafe-guard/policy-core.mjs',
   'integrations/agentsafe-mcp-guard/policy-core.mjs',
   'integrations/agentsafe-a2a-guard/policy-core.mjs',
   'integrations/agentsafe-signer/policy-core.mjs',
   'frontend/src/lib/policy-core.mjs',
 ];
+
+/**
+ * This file runs in two layouts: backend/src/policy-core here, packages/policy-core in the public mirror
+ * (scripts/oss/publish-guard-repo.mjs), where each mirrored integrations/<pkg> lives at packages/<pkg> and the signer
+ * and frontend bundles are not published. Here every bundle is required; the mirror checks the ones it carries.
+ */
+const HERE = dirname(fileURLToPath(import.meta.url));
+const MIRROR = basename(dirname(HERE)) === 'packages';
+const REPO = MIRROR ? join(HERE, '..', '..') : join(HERE, '..', '..', '..');
+const MIRRORED = ['agentsafe-guard', 'agentsafe-mcp-guard', 'agentsafe-a2a-guard'];
+const BUNDLES = MIRROR
+  ? ALL_BUNDLES.flatMap((rel) => {
+      const pkg = rel.split('/')[1];
+      return rel.startsWith('integrations/') && MIRRORED.includes(pkg) ? [`packages/${pkg}/policy-core.mjs`] : [];
+    })
+  : ALL_BUNDLES;
 
 const RULES = [
   { id: 'deny', combinator: 'any', atoms: [{ id: 'a', predicate: 'context-value-in', config: { field: 'params.op', values: ['delete'], match: 'contains', missing: 'fire', actions: ['records'] } }], decision: 'escalate', reasonCode: 'OPERATION_NEEDS_APPROVAL' },
@@ -55,6 +71,10 @@ function verdicts(core: typeof source) {
 describe('the committed policy-core bundles agree with the source on owner-keyed context values', () => {
   const expected = verdicts(source);
 
+  it('finds a bundle to check in this layout', () => {
+    expect(BUNDLES.length).toBe(MIRROR ? MIRRORED.length : ALL_BUNDLES.length);
+  });
+
   it('the source vectors are not trivial (some escalate, some block, some allow)', () => {
     const decisions = new Set((expected as { decision: string }[]).map((e) => e.decision));
     expect([...decisions].sort()).toEqual(['allow', 'block', 'escalate']);
@@ -62,7 +82,7 @@ describe('the committed policy-core bundles agree with the source on owner-keyed
 
   for (const rel of BUNDLES) {
     it(rel, async () => {
-      const core = (await import(pathToFileURL(join(process.cwd(), '..', rel)).href)) as typeof source;
+      const core = (await import(pathToFileURL(join(REPO, rel)).href)) as typeof source;
       expect(Object.keys(core.ATOM_REGISTRY).sort()).toEqual(Object.keys(source.ATOM_REGISTRY).sort());
       expect(core.ATOM_SPECS.map((s) => s.predicate)).toEqual(source.ATOM_SPECS.map((s) => s.predicate));
       expect(verdicts(core)).toEqual(expected);

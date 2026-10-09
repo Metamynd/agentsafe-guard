@@ -1,0 +1,283 @@
+{
+  "_comment": [
+    "MAGP signed-authorize-message conformance vectors (spec section 8.3).",
+    "Generated from backend/src/policy-core/canonical.ts buildAuthMessage, which is the source of truth.",
+    "Every implementation (backend TypeScript, the Python client, any third-party client) MUST reproduce `message` from `fields`, and Ed25519 over the UTF-8 bytes of `message` with `seed` MUST equal `signature`.",
+    "The seed is the public RFC 8032 section 7.1 test vector 1 key. It is a test key, never a secret, and must never be used for a real agent.",
+    "The suite that reads this file: backend/src/policy-core/authorize-vectors.test.ts and integrations/metamynd-client/tests/test_protocol_vectors.py. Change the message format and both fail until this file is regenerated."
+  ],
+  "algorithm": "Ed25519",
+  "fieldOrder": [
+    "agentDid",
+    "action",
+    "amount",
+    "currency",
+    "merchant",
+    "resource",
+    "nonce",
+    "issuedAt"
+  ],
+  "delimiter": "|",
+  "escaping": "backslash-escape \"\\\" then \"|\" in each field",
+  "amountEncoding": "the JavaScript String() form of the number; a null merchant or resource is the empty string",
+  "seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "vectors": [
+    {
+      "name": "minimal",
+      "note": "no merchant and no resource: both are the empty string, and the field count is still eight",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 150,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|150|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "0f12d437acde30dce074ffa440eaff2a0431cfb59c4193499544b913d26729174c89ccfeb794bddfa2acb8e46339ed55585df8e4fc8e159b534c549b177cea06"
+    },
+    {
+      "name": "integral float",
+      "note": "JSON cannot tell 150.0 from 150, and JavaScript String(150.0) is \"150\": an implementation that writes \"150.0\" fails here",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 150,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|150|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "0f12d437acde30dce074ffa440eaff2a0431cfb59c4193499544b913d26729174c89ccfeb794bddfa2acb8e46339ed55585df8e4fc8e159b534c549b177cea06"
+    },
+    {
+      "name": "decimal",
+      "note": "a fractional amount uses the shortest round-trip form",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 142.3,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|142.3|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "7026538b6386492d48717477dbc218ead24e24d450476d422e2dcd42d8f2657ea5cea58566f394283e85326a359ee8a12bf267aca7d5ccb05feb86a58966ea0d"
+    },
+    {
+      "name": "small decimal",
+      "note": "no exponent form for ordinary decimals",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 0.1,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|0.1|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "6e475a24d13f57d2b22154ca53374951562ba0cc2b05bc2eff1f5ed715046283932b680a6f1694bde02f15cfbc1d4c2484f75221f023f1cc891581a36d186307"
+    },
+    {
+      "name": "large integral",
+      "note": "the largest amount whose String() is still plain digits (below 1e21)",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 100000000000000000000,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|100000000000000000000|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "d67962f740331d6dfadd59b2db44fc91abc7a16000849e3371dadf7141a0a878fc79da0ab59ed0b4ca8e283398e8853d094edb8228b69a0ba3f9a088d791b201"
+    },
+    {
+      "name": "zero",
+      "note": "a genuine zero is signed as \"0\", not omitted",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 0,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|0|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "acf6ab37f778ade1adb2d59cf12c5413bc8a5979ab1ccf1713c32f7ebdb3d00cc659fb93fee967a1427f0cda89062ce4e487c38ed524125857c8be74d9b68d08"
+    },
+    {
+      "name": "merchant and resource",
+      "note": "resource sits between merchant and nonce",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 250,
+        "currency": "USD",
+        "merchant": "skyward-air",
+        "resource": "inspection-db",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|250|USD|skyward-air|inspection-db|0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "8e655a7845239c45b6c2734417d0405469e5dbf8e2937ccad66565308e48c8dbd8313da299bdcd739332a5f745428e8a4c57ed170b868862354deedee1bb9403"
+    },
+    {
+      "name": "resource only",
+      "note": "an absent merchant is still an empty field ahead of resource",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 5,
+        "currency": "USD",
+        "merchant": null,
+        "resource": "crm.contacts",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|5|USD||crm.contacts|0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "24a4de49ab43d8fae9d6817b71c8ce9679895546b0efd8aaed12efd57c9d1c6c4896a3d41217e5a92a199dc68e1d35083624b35755479a3d4ad764e38b6fb609"
+    },
+    {
+      "name": "delimiter in a field",
+      "note": "a literal | and  inside a field are escaped, never mistaken for the delimiter",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 100,
+        "currency": "USD",
+        "merchant": "a|bc",
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|100|USD|a\\|bc||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "0040052c360f17674e154ef0a16460b7cbcafb4281461186fea45d305fade840a7e63bc6a9df1611b36443e5c0942be71d71eec4bf6d884e2708889fd0b94005"
+    },
+    {
+      "name": "unicode",
+      "note": "the message is UTF-8 encoded before signing",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 100,
+        "currency": "USD",
+        "merchant": "Café Zürich ✓",
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|100|USD|Café Zürich ✓||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "d58c850791b576996746c8b38a225d4ce4260995ce10e6966b6107c5427075b3ff0a516927ea3099bb5b71f48e4e0a6f9f16b9755e41e90ccc9c33000657c405"
+    },
+    {
+      "name": "other currency",
+      "note": "the currency is part of what is signed",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 100,
+        "currency": "GBP",
+        "merchant": "acme",
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|100|GBP|acme||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "7e8f9449344212ba4c2bf5a294436acfafda7139379efaa40a4000ddebee627bc54cc442e80702cb9161ba0d7a7407a1c768318c53d6171e1fa23e326a483804"
+    },
+    {
+      "name": "sub-cent amount",
+      "note": "below 1e-4 Python repr() writes \"5e-05\"; JavaScript writes \"0.00005\" (micropayments)",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 0.00005,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|0.00005|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "0b8428a54dc68679fe7747989e297b79245fd2bc6517189ec57c62cf9561c2e6cd82a5e27318907d744c69037111c1e5ce2a7b05c4cc52a42f5769800a7b760a"
+    },
+    {
+      "name": "one millionth",
+      "note": "the smallest amount JavaScript still writes as a plain decimal",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 0.000001,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|0.000001|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "88429f84f1c641655a3e9cd831bc7399b82cce7a3cbc3244bc6853d7e265e178aaaa4ad374b0f717b569d819c8e837bfd8baccaae5870ca41f0bae8ca5a61e0d"
+    },
+    {
+      "name": "exponent form small",
+      "note": "below 1e-6 JavaScript switches to exponent form, spelled \"1.5e-7\" (no zero padding)",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 1.5e-7,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|1.5e-7|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "41d3e93c088e8e51f6843ff8bdd19808a56d19d4d413eeb34fa2f7e154464fbe8e2e53b42b9ef3b583bc6afe60ddc9e4ddd34a1d6bfa31dfb2e9648a85bb3e0a"
+    },
+    {
+      "name": "exponent form large",
+      "note": "from 1e21 JavaScript switches to exponent form with an explicit sign",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 1e+21,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|1e+21|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "5a241206e44c42ab3b7db9fe580342f2bea99968651192c9abe9985f4edc846a327ddbb4451fc9b5cac378b1ef70b728e7fe77f3715817a271291b5838c8760b"
+    },
+    {
+      "name": "integer beyond 2**53",
+      "note": "JSON.parse holds a double, so the gate signs 1152921504606847000 for the exact integer 1152921504606846977",
+      "fields": {
+        "agentDid": "did:key:z6MkTestVectorAgent",
+        "action": "flight-purchase",
+        "amount": 1152921504606846977,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "issuedAt": "2026-09-21T12:00:00Z"
+      },
+      "message": "did:key:z6MkTestVectorAgent|flight-purchase|1152921504606847000|USD|||0123456789abcdef0123456789abcdef|2026-09-21T12:00:00Z",
+      "signature": "84f4d1e65c6062b15465d2f0fa2bdad672ea7beec052b3eb7c6bbd845d174e302359e2f557c35e68786f70a8d109f8eb4af6866449597d227d236c39a2acb806"
+    }
+  ]
+}

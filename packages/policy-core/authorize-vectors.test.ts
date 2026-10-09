@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { buildAuthMessage } from './canonical.js';
 
@@ -13,7 +14,11 @@ import { buildAuthMessage } from './canonical.js';
  * the fix. The other half is integrations/metamynd-client/tests/test_protocol_vectors.py, which reads the SAME file:
  * change the message format here and the vectors (and therefore the Python client's test) fail until both agree.
  */
-const FILE = join(process.cwd(), '..', 'docs', 'protocol', 'authorize-vectors.json');
+// backend/src/policy-core here, packages/policy-core in the public mirror (scripts/oss/publish-guard-repo.mjs, which
+// mirrors docs/protocol too): the repository root is found from this file, never from the cwd.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = basename(dirname(HERE)) === 'packages' ? join(HERE, '..', '..') : join(HERE, '..', '..', '..');
+const FILE = join(REPO, 'docs', 'protocol', 'authorize-vectors.json');
 const doc = JSON.parse(readFileSync(FILE, 'utf8')) as {
   algorithm: string;
   fieldOrder: string[];

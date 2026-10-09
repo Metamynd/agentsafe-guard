@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { AUTH_MESSAGE_V2_TAG, buildAuthMessage } from './canonical.js';
 
@@ -9,7 +10,11 @@ import { AUTH_MESSAGE_V2_TAG, buildAuthMessage } from './canonical.js';
  * from the v1 vectors on purpose — every client that pins authorize-vectors.json asserts eight fields, and must keep passing
  * until it implements v2. An SDK that signs `jurisdiction` reproduces these before it is trusted with a real request.
  */
-const doc = JSON.parse(readFileSync(join(process.cwd(), '..', 'docs', 'protocol', 'authorize-v2-vectors.json'), 'utf8')) as {
+// backend/src/policy-core here, packages/policy-core in the public mirror (scripts/oss/publish-guard-repo.mjs, which
+// mirrors docs/protocol too): the repository root is found from this file, never from the cwd.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = basename(dirname(HERE)) === 'packages' ? join(HERE, '..', '..') : join(HERE, '..', '..', '..');
+const doc = JSON.parse(readFileSync(join(REPO, 'docs', 'protocol', 'authorize-v2-vectors.json'), 'utf8')) as {
   fieldOrder: string[];
   versionTag: string;
   seed: string;

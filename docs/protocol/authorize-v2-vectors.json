@@ -1,0 +1,90 @@
+{
+  "description": "Known-answer vectors for the v2 authorize message (MAGP spec §8.3.12): a request that carries a signed `jurisdiction` signs the eight v1 fields, then the literal tag MAGP-AUTH-v2, then the jurisdiction. A request without it signs the v1 message (docs/protocol/authorize-vectors.json). Each field escaped as in §8.3.1 (`\\` → `\\\\`, `|` → `\\|`). Ed25519 is deterministic: an implementation must reproduce each signature byte for byte.",
+  "algorithm": "Ed25519",
+  "delimiter": "|",
+  "fieldOrder": [
+    "agentDid",
+    "action",
+    "amount",
+    "currency",
+    "merchant",
+    "resource",
+    "nonce",
+    "issuedAt",
+    "MAGP-AUTH-v2",
+    "jurisdiction"
+  ],
+  "versionTag": "MAGP-AUTH-v2",
+  "seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "publicKey": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "vectors": [
+    {
+      "name": "v2 minimal jurisdiction",
+      "note": "no merchant, no resource; jurisdiction SG → the eight v1 fields, MAGP-AUTH-v2, SG",
+      "fields": {
+        "agentDid": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+        "action": "flight-purchase",
+        "amount": 150,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "n-v2-0001",
+        "issuedAt": "2026-09-27T10:00:00.000Z",
+        "jurisdiction": "SG"
+      },
+      "message": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw|flight-purchase|150|USD|||n-v2-0001|2026-09-27T10:00:00.000Z|MAGP-AUTH-v2|SG",
+      "signature": "05394032a221c86f75c805a19093944da8e23f7a3fc2975c9c4e5f3269e9af74275821afdedcace8475a2c67849828997516e43895fa42cefaed1182b40a8300"
+    },
+    {
+      "name": "v2 merchant resource and jurisdiction",
+      "note": "every optional field present",
+      "fields": {
+        "agentDid": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+        "action": "flight-purchase",
+        "amount": 99.5,
+        "currency": "EUR",
+        "merchant": "skyward-air",
+        "resource": "booking-db",
+        "nonce": "n-v2-0002",
+        "issuedAt": "2026-09-27T10:00:00.000Z",
+        "jurisdiction": "DE"
+      },
+      "message": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw|flight-purchase|99.5|EUR|skyward-air|booking-db|n-v2-0002|2026-09-27T10:00:00.000Z|MAGP-AUTH-v2|DE",
+      "signature": "84f377dfb8bd10e9934600c40f1768625f7330e189f0d2d04b18905452a62aee0b7352ea82b52d506d73ac48d77f08247a258932133748f4f5dda8cf75573307"
+    },
+    {
+      "name": "v2 non-financial action",
+      "note": "amount/currency defaulted to 0/USD before signing, as for v1",
+      "fields": {
+        "agentDid": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+        "action": "vehicle-inspection",
+        "amount": 0,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "n-v2-0003",
+        "issuedAt": "2026-09-27T10:00:00.000Z",
+        "jurisdiction": "MY"
+      },
+      "message": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw|vehicle-inspection|0|USD|||n-v2-0003|2026-09-27T10:00:00.000Z|MAGP-AUTH-v2|MY",
+      "signature": "d22da334b5571758dcde2e4e75bf26f952a04dd323c5d1f59c76dcc6d3767234fba2c966007935b72bfcb9ab5bec20542b075b475245d87698ec0a85a40bcd04"
+    },
+    {
+      "name": "v1 control (no jurisdiction)",
+      "note": "the same request with jurisdiction absent: exactly the v1 eight-field message",
+      "fields": {
+        "agentDid": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+        "action": "flight-purchase",
+        "amount": 150,
+        "currency": "USD",
+        "merchant": null,
+        "resource": null,
+        "nonce": "n-v2-0001",
+        "issuedAt": "2026-09-27T10:00:00.000Z",
+        "jurisdiction": null
+      },
+      "message": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw|flight-purchase|150|USD|||n-v2-0001|2026-09-27T10:00:00.000Z",
+      "signature": "16c508e4c02e18270ced0318e97abe5abcb949a94a9cf0bdece893c215f122c10652473b0403b66dfc34546a3d2c8520062f9bf9cee0f17f8bb8ba478bbb5804"
+    }
+  ]
+}
