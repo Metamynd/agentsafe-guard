@@ -75,6 +75,24 @@ await check('a binding refusal before the guard runs is reported too (it named a
   assert.deepEqual([reports[0].outcome, reports[0].reasonCode], ['refused', 'PAYLOAD_UNBINDABLE']);
 });
 
+// Pre-beta 2026-10-09, L1: a query-string refusal returned before the request was read, so it never reached the owner's
+// Activity Log. It names an agent like any other signed request; one with no signed request still names nobody.
+await check('a query-string refusal of a signed request is reported (QUERY_NOT_BOUND)', async () => {
+  const gw = gatewayWith({ reportOutcomes: true });
+  const res = await call(gw, signedBy('did:key:zMine'), '/perform?amount=9999');
+  await settled(gw);
+  assert.equal(res.body.reasonCode, 'QUERY_NOT_BOUND');
+  assert.equal(forwarded, 0);
+  assert.deepEqual([reports[0]?.outcome, reports[0]?.reasonCode, reports[0]?.httpStatus, reports[0]?.signed.agentDid], ['refused', 'QUERY_NOT_BOUND', 403, 'did:key:zMine']);
+});
+
+await check('a query-string refusal with no signed request names nobody, so nothing is reported', async () => {
+  const gw = gatewayWith({ reportOutcomes: true });
+  const res = await call(gw, null, '/perform?amount=9999');
+  await settled(gw);
+  assert.equal(res.body.reasonCode, 'QUERY_NOT_BOUND');
+  assert.equal(reports.length, 0);
+});
 await check('repeated refusals of one caller for one reason are aggregated: the first at once, the rest as ONE report with their count', async () => {
   const gw = gatewayWith({ reportOutcomes: true });
   for (let i = 0; i < 5; i++) await call(gw, signedBy('did:key:zTheirs'));
