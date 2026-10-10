@@ -96,7 +96,8 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.34.0: a tool whose gateway predates the approved-context binding (AUTHORIZATION_CONTEXT_REQUIRED) no longer voids the approval;
 // resume() works again once the gateway is upgraded, and a voided approval is reported AUTHORIZATION_VOIDED (pre-beta rerun 6 FW6-1).
 // 0.35.0: a payment in another currency than a currency-scoped cap is refused CURRENCY_NOT_ALLOWED, not SOP_SPEND_CAP (M2).
-const GUARD_VERSION = '^0.35.0';
+// 0.36.0: ships TypeScript declarations (agentsafe-guard.d.mts), so a TypeScript agent gets types with no @types package (L5).
+const GUARD_VERSION = '^0.36.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
 function harnessConfigLoad() {

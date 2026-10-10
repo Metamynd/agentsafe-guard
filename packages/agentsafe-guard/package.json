@@ -1,18 +1,23 @@
 {
   "name": "@metamynd/agentsafe-guard",
-  "version": "0.35.0",
+  "version": "0.36.0",
   "description": "Zero-dependency runtime governance for any Node AI agent \u2014 gate tool calls through MetaMynd/AgentSafe (allow / block / escalate) against the agent's mandate, enforced Standards, and SOPs. Ed25519-signed, deterministic, fail-closed.",
   "type": "module",
   "main": "./agentsafe-guard.mjs",
+  "types": "./agentsafe-guard.d.mts",
   "module": "./agentsafe-guard.mjs",
   "exports": {
-    ".": "./agentsafe-guard.mjs",
+    ".": {
+      "types": "./agentsafe-guard.d.mts",
+      "default": "./agentsafe-guard.mjs"
+    },
     "./policy-core": "./policy-core.mjs",
     "./keepalive-fetch": "./keepalive-fetch.mjs",
     "./package.json": "./package.json",
     "./verify": "./verify.mjs"
   },
   "files": [
+    "agentsafe-guard.d.mts",
     "keepalive-fetch.mjs",
     "demo.mjs",
     "cli.mjs",
