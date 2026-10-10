@@ -40,7 +40,7 @@ ok(matchRoute(routes, 'GET', '/health') === null, 'unprotected path → no match
 const forwarded = [];
 const forward = async (req) => { forwarded.push(req.path); return { status: 200, body: { upstream: true, path: req.path } }; };
 const guardFor = (decision, reasonCode = 'X') => ({ verifyRequest: async (r) => ({ decision, reasonCode, seenAction: r.action }) });
-const signedHeader = (over = {}) => ({ 'x-magp-request': JSON.stringify({ agentDid: 'did:key:zA', amount: 100, action: 'CLIENT-CLAIMED', nonce: 'n', issuedAt: new Date().toISOString(), signature: 'sig', ...over }) });
+const signedHeader = (over = {}) => ({ 'x-magp-request': JSON.stringify({ agentDid: 'did:key:zA', amount: 100, action: 'flight-purchase', nonce: 'n', issuedAt: new Date().toISOString(), signature: 'sig', ...over }) });
 
 async function main() {
   // Unprotected route → passes through untouched.
@@ -59,8 +59,20 @@ async function main() {
     const res = await gw({ method: 'POST', path: '/book/42', headers: signedHeader(), body: {} });
     ok(res.status === 200 && forwarded.includes('/book/42'), 'protected + allow → forwarded upstream');
     ok(res.governance?.decision === 'allow', 'allow verdict is attached');
-    // The route pins the action — the client's 'CLIENT-CLAIMED' is overridden with 'flight-purchase'.
-    ok(res.governance?.seenAction === 'flight-purchase', 'route pins the governed action (client cannot relabel)');
+    ok(res.governance?.seenAction === 'flight-purchase', 'the guard judges the route\'s action');
+  }
+
+  // The route pins the action: a request signed for ANOTHER action is refused by name, before the guard is asked
+  // (it used to be relabelled, and the relabelled signature failed as SIGNATURE_INVALID — pre-beta 2026-10-09, M2).
+  {
+    forwarded.length = 0;
+    let asked = 0;
+    const guard = { verifyRequest: async () => { asked++; return { decision: 'allow' }; } };
+    const gw = createHttpGateway({ guard, routes, forward });
+    const res = await gw({ method: 'POST', path: '/book/42', headers: signedHeader({ action: 'CLIENT-CLAIMED' }), body: {} });
+    ok(res.status === 403 && res.body.reasonCode === 'GATEWAY_ACTION_MISMATCH', 'a request signed for another action → 403 GATEWAY_ACTION_MISMATCH', res.body.reasonCode);
+    ok(res.body.action === 'flight-purchase' && res.body.signedAction === 'CLIENT-CLAIMED', 'the refusal names both actions');
+    ok(asked === 0 && forwarded.length === 0, 'nothing verified, claimed or forwarded');
   }
 
   // Protected + block → 403, upstream never called.

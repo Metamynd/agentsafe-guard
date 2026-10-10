@@ -1,4 +1,4 @@
-import { ATOM_REGISTRY, contextValueMatch, type ContextValueMatch } from './atom-registry.js';
+import { ATOM_REGISTRY, contextValueMatch, currencyOutOfScope, type ContextValueMatch } from './atom-registry.js';
 import { ownEntry } from './own-entry.js';
 import { ATOM_SPECS, type AtomConfigField } from './atom-catalog.js';
 import type { EvaluationContext, PolicyDecision } from './types.js';
@@ -14,6 +14,22 @@ import {
 
 /** The reason a molecule escalated because it could not trust the context it was asked to judge. */
 export const CONTEXT_UNVERIFIABLE = 'CONTEXT_UNVERIFIABLE';
+/** The reason a currency-scoped cap fired because the request is in another currency, not because it is over the cap. */
+export const CURRENCY_NOT_ALLOWED = 'CURRENCY_NOT_ALLOWED';
+
+/** The cap atoms whose `currency` scope fires them outright on any other currency (atom-registry.ts, currencyOutOfScope). */
+const CURRENCY_SCOPED_CAPS = new Set(['amount-over', 'cumulative-over']);
+
+/**
+ * Whether a FIRED molecule fired because the request's currency is outside a cap's scope. Such a cap fires whatever the
+ * amount (fail closed), so its own code ("over the cap", SOP_SPEND_CAP) named the wrong cause: EUR 10 against a USD 200 cap
+ * read as an overspend (pre-beta evaluation 2026-10-09, M2). A `none` molecule fires when its atoms do NOT, so a currency
+ * scope there is never the cause.
+ */
+function firedOnCurrency(m: Molecule, ctx: EvaluationContext): boolean {
+  if (m.combinator === 'none') return false;
+  return (m.atoms ?? []).some((a) => CURRENCY_SCOPED_CAPS.has(a.predicate) && currencyOutOfScope(ctx, a.config?.currency));
+}
 
 /**
  * The Standards rules engine — the DETERMINISTIC runtime gate.
@@ -278,7 +294,7 @@ export function evaluateStandardRules(
     if (fired) contextSignals.push(...contextSignalsOf(m, ctx, m.decision));
     let decision: FireDecision = fired ? m.decision : 'escalate';
     if (unverifiable.length > 0 && PRECEDENCE[decision] < PRECEDENCE.escalate) decision = 'escalate';
-    const reasonCode = fired ? m.reasonCode : CONTEXT_UNVERIFIABLE;
+    const reasonCode = !fired ? CONTEXT_UNVERIFIABLE : firedOnCurrency(m, ctx) ? CURRENCY_NOT_ALLOWED : m.reasonCode;
     if (!best || PRECEDENCE[decision] > PRECEDENCE[best.decision]) {
       best = { decision, reasonCode, id: m.id, unverifiable: unverifiable.length > 0 ? unverifiable : undefined };
     }

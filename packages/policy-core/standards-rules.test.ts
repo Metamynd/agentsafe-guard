@@ -47,6 +47,36 @@ describe('molecule combinators', () => {
   });
 });
 
+describe('a currency-scoped cap names the currency, not an overspend (pre-beta 2026-10-09, M2)', () => {
+  const usdCap = (predicate: string, combinator: Molecule['combinator'] = 'any'): Molecule => ({
+    id: 'cap',
+    combinator,
+    atoms: [{ id: 'a', predicate, config: { limit: 200, currency: 'USD' } }],
+    decision: 'block',
+    reasonCode: 'SOP_SPEND_CAP',
+  });
+
+  it('EUR under the cap → block CURRENCY_NOT_ALLOWED', () => {
+    const r = evaluateStandardRules([usdCap('amount-over')], ctx({ amount: 10, currency: 'EUR' }));
+    expect(r).toMatchObject({ decision: 'block', reasonCode: 'CURRENCY_NOT_ALLOWED', firedMoleculeId: 'cap' });
+  });
+  it('no currency at all is the same refusal (fail closed)', () => {
+    expect(evaluateStandardRules([usdCap('amount-over')], ctx({ amount: 10 })).reasonCode).toBe('CURRENCY_NOT_ALLOWED');
+  });
+  it('the budget atom too', () => {
+    expect(evaluateStandardRules([usdCap('cumulative-over')], ctx({ amount: 10, cumulativeSpend: 0, currency: 'EUR' })).reasonCode).toBe('CURRENCY_NOT_ALLOWED');
+  });
+  it('USD over the cap keeps the rule\'s own code', () => {
+    expect(evaluateStandardRules([usdCap('amount-over')], ctx({ amount: 500, currency: 'usd' })).reasonCode).toBe('SOP_SPEND_CAP');
+  });
+  it('USD under the cap does not fire', () => {
+    expect(evaluateStandardRules([usdCap('amount-over')], ctx({ amount: 10, currency: 'USD' })).decision).toBe('allow');
+  });
+  it('a cap with no currency scope never says CURRENCY_NOT_ALLOWED', () => {
+    expect(evaluateStandardRules([spendMolecule], ctx({ amount: 500, currency: 'EUR' })).reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+  });
+});
+
 describe('evaluateStandardRules', () => {
   it('allows when nothing fires', () => {
     expect(evaluateStandardRules([spendMolecule], ctx({ amount: 50 })).decision).toBe('allow');

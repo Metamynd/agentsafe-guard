@@ -17,6 +17,7 @@ agent → [ HTTP gateway ] → upstream service
               └─ route protected:
                     query / %3F / ; / #    → 403 QUERY_NOT_BOUND (verifyRequest never called)
                     no signed request      → 401
+                    signed for another action → 403 GATEWAY_ACTION_MISMATCH (verifyRequest never called)
                     payload ≠ signed value → 403 PAYLOAD_NOT_BOUND (verifyRequest never called)
                     verifyRequest(signed)  → allow/observe → forward upstream (+ x-agentsafe-decision)
                                            → block/escalate → 403 (upstream never called)
@@ -25,7 +26,8 @@ agent → [ HTTP gateway ] → upstream service
 
 Protected routes are declared in `agentsafe-routes.json` (path patterns: `*` = one segment, `**` =
 the rest). The route **pins the governed action**, so a client cannot relabel a purchase as a cheap
-read. The agent presents its signed MAGP request in the `x-magp-request` header (the same object the
+read: a request signed for another action is refused `403 GATEWAY_ACTION_MISMATCH` (0.29.0; it used to fail as
+`SIGNATURE_INVALID`, because the gateway substituted the route's action before verifying). The agent presents its signed MAGP request in the `x-magp-request` header (the same object the
 guard already verifies); the gateway forwards only on `allow`/`observe`.
 
 ```json
