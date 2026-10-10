@@ -1,4 +1,4 @@
-// Type declarations for @metamynd/agentsafe-http-gateway (0.31.0), as .d.mts: the declarations of an ES module
+// Type declarations for @metamynd/agentsafe-http-gateway (0.31.1), as .d.mts: the declarations of an ES module
 // (gateway.mjs). Hand-written: the package ships plain ESM with no build step and had no types (pre-beta evaluation
 // 2026-10-09, L5d follow-up). route-match.d.mts and service-identity.d.mts declare the other entry points.
 
@@ -26,12 +26,14 @@ export interface ServiceVerdict {
 
 /** What the gateway needs of its guard: createMcpGuard() from @metamynd/agentsafe-mcp-guard provides all of it. */
 export interface GatewayGuard {
-  verifyRequest(signed: SignedRequest, opts?: Record<string, unknown>): Promise<ServiceVerdict>;
-  reportOutcome?(input: Record<string, unknown>): Promise<{ ok: boolean; reasonCode?: string; status?: number; reportId?: string }>;
-  captureAuthorization?(input: Record<string, unknown>): Promise<{ ok: boolean; [key: string]: unknown }>;
-  releaseAuthorization?(input: Record<string, unknown>): Promise<{ ok: boolean; [key: string]: unknown }>;
-  markAuthorizationUnknown?(input: Record<string, unknown>): Promise<{ ok: boolean; [key: string]: unknown }>;
-  [key: string]: unknown;
+  // Inputs are `any`, not Record<string, unknown>: a guard's own input types (agentsafe-mcp-guard's ReportOutcomeInput,
+  // VerifyOptions, ...) are interfaces, which TypeScript does not treat as assignable to a Record, so
+  // createHttpGateway({ guard: createMcpGuard(...) }) failed to compile under --strict in 0.31.0.
+  verifyRequest(signed: SignedRequest, opts?: any): Promise<ServiceVerdict>;
+  reportOutcome?(input: any): Promise<{ ok: boolean; reasonCode?: string; status?: number; reportId?: string }>;
+  captureAuthorization?(input: any): Promise<{ ok: boolean; [key: string]: unknown }>;
+  releaseAuthorization?(input: any): Promise<{ ok: boolean; [key: string]: unknown }>;
+  markAuthorizationUnknown?(input: any): Promise<{ ok: boolean; [key: string]: unknown }>;
 }
 
 /** The request the gateway is handed (server.mjs builds it from node:http). */
