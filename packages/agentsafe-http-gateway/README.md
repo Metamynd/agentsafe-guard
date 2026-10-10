@@ -102,6 +102,35 @@ only keys whose value the upstream may take from the caller unchecked (paging, s
 `currency`, `merchant`, or one in its `valueFields`), in any letter case, refuses to start. Shipped as a patch so every `^0.17.0` install
 picks it up; a governed route that relied on forwarding a query needs `allowedQuery` after upgrading.
 
+## Keep the API key at the gateway — 0.30.0
+
+A tool that runs inside the agent's process (the guard's `guardTool` with a local handler) holds whatever API key it uses,
+and the agent's own code could call the API without asking the guard. For a value-bearing action, run the tool **behind
+this gateway** instead: the gateway holds the key, adds it only to calls the guard permitted, and the agent never sees it.
+
+```bash
+npm i @metamynd/agentsafe-http-gateway
+
+# 1. The gateway's own identity: a did:key and its signing key, written owner-readable only. Prints the DID.
+npx agentsafe-gateway service-id --out service-identity.json
+
+# 2. Register that DID: dashboard → Trusted Counterparties → Register a service → paste the DID → "Get challenge".
+#    Sign the challenge here and paste the signature back. No owner password in a terminal.
+npx agentsafe-gateway accept-challenge --identity service-identity.json "<challenge>"
+
+# 3. Run it, holding the key.
+AGENTSAFE_UPSTREAM=https://api.payments.example AGENTSAFE_UPSTREAM_CREDENTIAL="Bearer sk_live_..." AGENTSAFE_ALLOWED_AGENTS=did:hedera:testnet:z...your-agent AGENTSAFE_GATEWAY_OWNER=did:hedera:testnet:z...you SERVICE_IDENTITY_FILE=service-identity.json MAGP_API=https://metamynd.ai/api/v1 AGENTSAFE_ROUTES=agentsafe-routes.json npx agentsafe-gateway serve    # the same as: node node_modules/@metamynd/agentsafe-http-gateway/server.mjs
+```
+
+- `AGENTSAFE_UPSTREAM_CREDENTIAL` (+ `AGENTSAFE_UPSTREAM_CREDENTIAL_HEADER`, default `Authorization`) is one owner's key,
+  so it refuses to start with `AGENTSAFE_ALLOWED_AGENTS=any`; a gateway serving many owners uses the Credential Vault.
+- `AGENTSAFE_GATEWAY_OWNER` is your principal DID: the agent's public manifest lists it
+  (`GET /api/v1/magp/manifest/{agentDid}` → `principal.dids`).
+- `SERVICE_IDENTITY_FILE` replaces `SERVICE_DID` / `SERVICE_KEY` (those still work, and win when set). A file whose key does
+  not belong to its DID is a startup error.
+- In the agent, the tool handler calls the gateway with the signed request:
+  `fetch(gatewayUrl, { method: 'POST', headers: await decision.governanceHeaders(), body })`.
+
 ## Run
 
 ```bash
