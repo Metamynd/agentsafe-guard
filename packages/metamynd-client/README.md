@@ -297,6 +297,11 @@ below the authorized amount or release it — the gate refuses the agent's attem
 with the reason), on purpose: otherwise an agent could wait for a purchase to happen and then take
 its budget back. An agent can `capture` at the full amount, and `void` a hold nobody has claimed.
 
+**No stalls on a flaky IPv6 path (0.22.0).** The gate answers on IPv6 and IPv4 addresses. The client races them
+(Happy Eyeballs, RFC 8305) instead of trying each in turn with the full `timeout`, so a network that drops some IPv6
+connections no longer turns a 0.5 s call into 15 or 30 s. The client never retries an authorize: one whose answer never
+arrives raises `GateUnreachable`, the tool does not run, and the hold the gate may have made is released in the background.
+
 **Why a settlement was refused (0.5.3).** A refused `capture` or `void` is `ok=False` with `reason_code` — the
 gate's stable code (MAGP 8.7.8) — and `detail`, a sentence for people. Branch on `reason_code`, never on `detail`:
 `COUNTERPARTY_MISMATCH` (403: the hold is claimed and you are not its claimer), `NOT_HELD` (409 on capture: it is

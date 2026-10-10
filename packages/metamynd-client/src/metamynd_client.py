@@ -120,6 +120,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import decimal
+import errno
 import functools
 import hashlib
 import inspect
@@ -127,6 +128,7 @@ import json
 import math
 import os
 import secrets
+import selectors
 import socket
 import sys
 import threading
@@ -176,7 +178,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.21.1"
+__version__ = "0.22.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1126,6 +1128,125 @@ class _DaemonSigner:
 
 
 # --------------------------------------------------------------------------------------
+# Transport
+# --------------------------------------------------------------------------------------
+
+# The production gate sits behind a CDN that answers on two IPv6 and two IPv4 addresses. urllib connects through
+# socket.create_connection, which tries them ONE AT A TIME, IPv6 first, each with the full client timeout. On a network
+# that drops some IPv6 SYNs, a call stalled for 15 s or 30 s (one or two dead IPv6 attempts) before IPv4 answered in
+# 80 ms: 6 of 29 authorize calls in the 2026-10-09 pre-beta evaluation (M1). The Node guard never stalled because Node
+# races address families (Happy Eyeballs). So does this, after RFC 8305: start the next address 250 ms after the last
+# one if nothing has connected yet, keep every attempt running, take the first that connects. The whole connect phase
+# stays inside the client's `timeout`.
+_CONNECTION_ATTEMPT_DELAY = 0.25  # RFC 8305 section 5
+_CONNECT_IN_PROGRESS = {code for code in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EAGAIN, getattr(errno, "WSAEWOULDBLOCK", None)) if code is not None}
+
+
+def _interleave_families(infos: "list[tuple]") -> "list[tuple]":
+    """getaddrinfo's order, with the families alternated (RFC 8305 section 4): the first family first, then the other."""
+    first = [info for info in infos if info[0] == infos[0][0]]
+    rest = [info for info in infos if info[0] != infos[0][0]]
+    ordered = []
+    for i in range(max(len(first), len(rest))):
+        ordered.extend(group[i] for group in (first, rest) if i < len(group))
+    return ordered
+
+
+def _happy_eyeballs_connect(address: "tuple[str, int]", timeout: Any = None, source_address: Any = None, *, _getaddrinfo: Callable[..., list] = socket.getaddrinfo) -> socket.socket:
+    """socket.create_connection, racing the host's addresses instead of trying them in turn."""
+    host, port = address
+    seconds = timeout if isinstance(timeout, (int, float)) else socket.getdefaulttimeout()
+    infos = _interleave_families(list(_getaddrinfo(host, port, 0, socket.SOCK_STREAM)))
+    if not infos:
+        raise OSError(f"getaddrinfo returned no addresses for {host!r}")
+    deadline = None if seconds is None else time.monotonic() + seconds
+    selector = selectors.DefaultSelector()
+    pending: "dict[socket.socket, Any]" = {}
+    errors: "list[OSError]" = []
+    next_start = time.monotonic()
+    winner: Optional[socket.socket] = None
+    try:
+        while winner is None:
+            now = time.monotonic()
+            if infos and (now >= next_start or not pending):
+                family, kind, proto, _canon, sockaddr = infos.pop(0)
+                sock = socket.socket(family, kind, proto)
+                try:
+                    sock.setblocking(False)
+                    if source_address:
+                        sock.bind(source_address)
+                    code = sock.connect_ex(sockaddr)
+                except OSError as exc:
+                    sock.close()
+                    errors.append(exc)
+                    continue
+                if code == 0:
+                    winner = sock
+                    break
+                if code not in _CONNECT_IN_PROGRESS:
+                    sock.close()
+                    errors.append(OSError(code, os.strerror(code)))
+                    continue
+                selector.register(sock, selectors.EVENT_WRITE)
+                pending[sock] = sockaddr
+                next_start = now + _CONNECTION_ATTEMPT_DELAY
+                continue
+            if not pending:
+                raise errors[-1] if errors else OSError(f"could not connect to {host!r}")
+            if deadline is not None and now >= deadline:
+                raise socket.timeout("timed out")
+            waits = [w for w in (None if deadline is None else deadline - now, next_start - now if infos else None) if w is not None]
+            for key, _events in selector.select(max(0.0, min(waits)) if waits else None):
+                sock = key.fileobj  # type: ignore[assignment]
+                selector.unregister(sock)
+                pending.pop(sock, None)
+                code = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if code == 0:
+                    winner = sock
+                    break
+                sock.close()
+                errors.append(OSError(code, os.strerror(code)))
+                next_start = time.monotonic()  # a refusal is an answer: try the next address now, not in 250 ms
+    finally:
+        for sock in pending:
+            if sock is not winner:
+                sock.close()
+        selector.close()
+    winner.settimeout(seconds)
+    return winner
+
+
+def _racing(connection_class: Callable[..., Any]) -> Callable[..., Any]:
+    def build(host: str, **kwargs: Any) -> Any:
+        connection = connection_class(host, **kwargs)
+        connection._create_connection = _happy_eyeballs_connect  # what HTTPConnection.connect opens its socket with
+        return connection
+
+    return build
+
+
+class _RacingHTTPHandler(urllib.request.HTTPHandler):
+    def do_open(self, http_class, req, **http_conn_args):  # type: ignore[override]
+        return super().do_open(_racing(http_class), req, **http_conn_args)
+
+
+class _RacingHTTPSHandler(urllib.request.HTTPSHandler):
+    def do_open(self, http_class, req, **http_conn_args):  # type: ignore[override]
+        return super().do_open(_racing(http_class), req, **http_conn_args)
+
+
+_opener: Optional[urllib.request.OpenerDirector] = None
+
+
+def _urlopen(request: urllib.request.Request, timeout: float) -> Any:
+    """urllib.request.urlopen (proxies, redirects, HTTPError for a non-2xx answer), with racing connects."""
+    global _opener
+    if _opener is None:
+        _opener = urllib.request.build_opener(_RacingHTTPHandler, _RacingHTTPSHandler)
+    return _opener.open(request, timeout=timeout)
+
+
+# --------------------------------------------------------------------------------------
 # Client
 # --------------------------------------------------------------------------------------
 
@@ -1523,7 +1644,7 @@ class MetaMyndClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout):
+            with _urlopen(request, self.timeout):
                 return "claimed"
         except urllib.error.HTTPError as exc:
             try:
@@ -1580,7 +1701,7 @@ class MetaMyndClient:
         """GET a public gate endpoint and return its `data`, with the same failure rules as authorize."""
         request = urllib.request.Request(f"{self.api}{path}", headers={"User-Agent": USER_AGENT}, method="GET")
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _urlopen(request, self.timeout) as response:
                 raw = response.read()
             return (_loads(raw, "gate returned a non-JSON body") or {}).get("data") or {}
         except urllib.error.HTTPError as exc:
@@ -1610,7 +1731,7 @@ class MetaMyndClient:
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _urlopen(request, self.timeout) as response:
                 raw = response.read()
             data = (_loads(raw, "gate returned a non-JSON body") or {}).get("data") or {}
         except urllib.error.HTTPError as exc:
@@ -1647,7 +1768,7 @@ class MetaMyndClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with _urlopen(request, self.timeout) as response:
                 raw = response.read()
             return _loads(raw, "gate returned a non-JSON body")
         except urllib.error.HTTPError as exc:
