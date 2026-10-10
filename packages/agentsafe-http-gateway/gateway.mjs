@@ -812,6 +812,15 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     // (or one smuggled into the path) the route has not explicitly allowed — before anything is claimed or consumed.
     const queryProblem = queryRefusal(req.path, route);
     if (queryProblem) {
+      // Reported like every other refusal of a signed request (0.30.1, pre-beta 2026-10-09 L1): it used to return before
+      // the request was read, so the owner's Activity Log never saw it. Reading the header claims and consumes nothing; a
+      // call with no signed request (or one that cannot be read) names no agent and stays unreported, as MISSING_GOVERNANCE.
+      try {
+        const presented = (route.extract ?? extractGovernance)(req);
+        if (presented && typeof presented.agentDid === 'string') trace.request = presented;
+      } catch {
+        // unreadable: nobody to attribute the refusal to
+      }
       return { status: 403, body: { decision: 'block', reasonCode: 'QUERY_NOT_BOUND', action: route.action, error: `refused: ${queryProblem}` } };
     }
 

@@ -85,7 +85,7 @@ the upstream verbatim and unchecked. Reproduced: a body bound to a $250 `skyward
 reads query parameters would have acted on values nobody signed. Now:
 
 - Any query string on a protected route — even an innocuous `?page=2`, even a bare `?` — is refused with
-  `403 QUERY_NOT_BOUND` before `verifyRequest` is called, so no hold is claimed and no nonce consumed.
+  `403 QUERY_NOT_BOUND` before `verifyRequest` is called, so no hold is claimed and no nonce consumed. Since 0.30.1 the refusal is reported (with `reportOutcomes`) under the signed request it carried, like the other refusals; a call with no signed request names no agent and is not.
 - A query, path parameter or fragment smuggled into the **path** is refused the same way: `/book%3Famount=4000`,
   `/book;amount=4000`, `/book%3Bamount=4000`, `#` / `%23`, and double- or triple-encoded forms (`%253F`). Route matching
   now cuts a request path at a decoded `?`/`#` and drops a segment's `;params`, so such a variant of a protected path
