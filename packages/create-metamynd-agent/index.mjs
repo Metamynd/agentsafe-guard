@@ -224,7 +224,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.28.0: a 403 for a refused claim carries the issuer's detail (FW6-1); depends on agentsafe-mcp-guard ^0.29.0.
 // 0.29.0: a request signed for another action than the route's is refused GATEWAY_ACTION_MISMATCH, not SIGNATURE_INVALID (M2);
 // depends on agentsafe-mcp-guard ^0.30.0.
-const GATEWAY_VERSION = '^0.29.0';
+// 0.30.0: `agentsafe-gateway service-id` / `accept-challenge` / `serve`, SERVICE_IDENTITY_FILE and AGENTSAFE_UPSTREAM_CREDENTIAL (M4).
+const GATEWAY_VERSION = '^0.30.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `

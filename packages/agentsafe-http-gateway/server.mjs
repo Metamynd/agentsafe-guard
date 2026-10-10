@@ -24,6 +24,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createMcpGuard } from '@metamynd/agentsafe-mcp-guard';
 import { createHttpGateway } from './gateway.mjs';
+import { readServiceIdentity } from './service-identity.mjs';
 // fetch() with a 60 s keep-alive (metamynd.ai sits behind Cloudflare, which strips the Keep-Alive header, so the built-in
 // fetch would drop an idle connection after 4 s) — see keepalive-fetch.mjs.
 import { keepAliveFetch as fetch } from './keepalive-fetch.mjs';
@@ -90,6 +91,12 @@ const CREDENTIAL_VAULT_URL = (process.env.CREDENTIAL_VAULT_URL || '').replace(/\
 const CREDENTIAL_VAULT_GATEWAY_TOKEN = process.env.CREDENTIAL_VAULT_GATEWAY_TOKEN || '';
 const CREDENTIAL_VAULT_CONNECTOR_ID = process.env.CREDENTIAL_VAULT_CONNECTOR_ID || '';
 const CREDENTIAL_VAULT_HEADER_NAME = process.env.CREDENTIAL_VAULT_HEADER_NAME || 'Authorization';
+// The simplest way to keep an upstream API key out of the agent (0.30.0, pre-beta 2026-10-09 M4): the gateway holds it and
+// adds it to every call it forwards, after the guard has permitted it. The agent never sees it. One owner's credential, so it
+// requires AGENTSAFE_ALLOWED_AGENTS to name that owner's agents (see buildResolveCredential).
+//   AGENTSAFE_UPSTREAM_CREDENTIAL="Bearer sk_live_..."   AGENTSAFE_UPSTREAM_CREDENTIAL_HEADER=Authorization (the default)
+const STATIC_CREDENTIAL = process.env.AGENTSAFE_UPSTREAM_CREDENTIAL || '';
+const STATIC_CREDENTIAL_HEADER = process.env.AGENTSAFE_UPSTREAM_CREDENTIAL_HEADER || 'Authorization';
 
 function loadRoutes() {
   try {
@@ -130,6 +137,15 @@ function readBody(req) {
  * many, without this process ever holding or guessing a tenant identity.
  */
 function buildResolveCredential() {
+  if (STATIC_CREDENTIAL) {
+    if (CREDENTIAL_VAULT_URL) throw new Error('Set AGENTSAFE_UPSTREAM_CREDENTIAL or CREDENTIAL_VAULT_URL, not both: one source for the upstream credential.');
+    // One owner's credential, so this gateway must act for that owner's agents only. With `any`, every agent on the
+    // platform whose owner granted a matching action would run on it (the XT-1 confused deputy, MAGP §16.3).
+    if (ALLOWED_AGENTS === 'any') throw new Error('AGENTSAFE_UPSTREAM_CREDENTIAL is one owner\'s credential: set AGENTSAFE_ALLOWED_AGENTS to that owner\'s agent DID(s), not `any` (use the Credential Vault for a gateway that serves many owners).');
+    return async function resolveCredential() {
+      return { header: STATIC_CREDENTIAL_HEADER, value: STATIC_CREDENTIAL };
+    };
+  }
   if (!CREDENTIAL_VAULT_URL) return undefined;
   if (!CREDENTIAL_VAULT_GATEWAY_TOKEN || !CREDENTIAL_VAULT_CONNECTOR_ID) {
     // A half-configured vault is a misconfiguration, not "vault off": refuse to start rather than
@@ -180,9 +196,16 @@ async function main() {
       `default, not a mistake to fix silently — unset the env var to restore it.`
     );
   }
+  // The upstream credential's configuration is checked before anything else is built: a misconfiguration is a startup error.
+  const resolveCredential = buildResolveCredential();
+  // SERVICE_IDENTITY_FILE: the file `npx @metamynd/agentsafe-http-gateway service-id` writes (0.30.0) — no hand-built did:key.
+  // A file whose key does not belong to its DID is a startup error. SERVICE_DID / SERVICE_KEY still work, and win when set.
+  const identity = process.env.SERVICE_IDENTITY_FILE && !(process.env.SERVICE_DID && process.env.SERVICE_KEY)
+    ? readServiceIdentity(process.env.SERVICE_IDENTITY_FILE)
+    : { serviceDid: process.env.SERVICE_DID, serviceKey: process.env.SERVICE_KEY };
   const guard = createMcpGuard({
-    serviceDid: process.env.SERVICE_DID,
-    serviceKey: process.env.SERVICE_KEY,
+    serviceDid: identity.serviceDid,
+    serviceKey: identity.serviceKey,
     issuerApi: MAGP_API,
     requireAuthorization: REQUIRE_AUTHORIZATION,
     // MetaMynd's policy-signing key (GET /magp/policy/pubkey, fetched once out of band). With it the guard refuses a
@@ -210,8 +233,9 @@ async function main() {
       `to be a complete allow-list.`
     );
   }
-  const resolveCredential = buildResolveCredential();
-  if (resolveCredential) {
+  if (resolveCredential && STATIC_CREDENTIAL) {
+    console.log(`[gateway] upstream credential held by this gateway, added as "${STATIC_CREDENTIAL_HEADER}" to every permitted call (never sent to the agent)`);
+  } else if (resolveCredential) {
     console.log(`[gateway] Credential Vault hook ENABLED → ${CREDENTIAL_VAULT_URL} (connector "${CREDENTIAL_VAULT_CONNECTOR_ID}", header "${CREDENTIAL_VAULT_HEADER_NAME}")`);
   }
   const gateway = createHttpGateway({ guard, routes, forward: forwardToUpstream, denyByDefault: DENY_BY_DEFAULT, resolveCredential, reportOutcomes: REPORT_OUTCOMES, reportSpool: REPORT_SPOOL });
