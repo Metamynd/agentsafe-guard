@@ -299,6 +299,10 @@ later step needs to branch on the result.
 npm i @metamynd/agentsafe-guard
 ```
 
+**TypeScript (0.36.0).** The package ships its own declarations (`agentsafe-guard.d.mts`): `createGuard`,
+`createGuardFromConfig`, `guard.guardTool<Args, Result>(...)` with a typed `decision` (`decision.governanceHeaders()`),
+`Verdict`, `GovernanceBlocked` and the rest. Nothing to install from `@types`.
+
 Requires Node ≥ 18 (built-in `fetch` + Ed25519). The package has **no dependencies**.
 
 ### Fastest start — scaffold a governed agent in one command

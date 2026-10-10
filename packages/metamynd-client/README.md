@@ -291,6 +291,21 @@ client.void(verdict.authorization_id, reason="not needed")           # release a
 out = client.outcome(verdict.authorization_id)                       # did it happen? may I retry?
 ```
 
+**From agent.metamynd.json, the ids of a permitted call, and LangGraph error status (0.23.0).**
+
+```python
+client = MetaMyndClient.from_config("agent.metamynd.json")             # passphrase="..." for an encrypted key
+book = guard_agent_tool(client, "flight-purchase", book_flight, map_args,
+                        on_verdict=lambda v: log.info("%s %s %s", v.decision, v.authorization_id, v.event_id))
+# inside the running tool: current_verdict().authorization_id
+ToolNode([guard_langchain_tool(client, "flight-purchase", book_flight, map_args)])  # refusal = status="error"
+```
+
+`from_config` reads what the Node guard's `createGuardFromConfig` reads (`apiBase`, `agentDid`, `agentKey`, a daemon, or
+`agentKeyEncrypted` with `passphrase`). `on_verdict` sees every gate answer, a permit included; a callback that raises is a
+warning, never a different outcome. `guard_langchain_tool` is `guard_agent_tool` as a LangChain tool whose refusal is a
+`ToolMessage` with `status="error"`; the turn still completes.
+
 **Who settles.** The *service* that executed the action settles or releases the hold it claimed;
 an agent normally doesn't. Once a service has claimed a hold, only that service can settle it
 below the authorized amount or release it — the gate refuses the agent's attempt (`ok=False`,

@@ -171,14 +171,17 @@ __all__ = [
     "agent_settle_message",
     "guard_tool",
     "guard_agent_tool",
+    "guard_langchain_tool",
     "current_governance",
+    "current_verdict",
+    "decrypt_agent_key",
     "governance_headers",
     "GovernanceBlocked",
     "GovernanceRefusal",
     "ToolNotExecuted",
 ]
 
-__version__ = "0.22.0"
+__version__ = "0.23.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1127,6 +1130,26 @@ class _DaemonSigner:
         return bytes.fromhex(result["envelopeSignature"])
 
 
+def decrypt_agent_key(ciphertext: str, passphrase: str, salt: str) -> str:
+    """Open a passphrase-encrypted agent key (`agentKeyEncrypted` in agent.metamynd.json): `iv:tag:data` hex, AES-256-GCM
+    under PBKDF2-SHA512 (100 000 rounds) of the passphrase with the salt AS ITS OWN TEXT, AAD "hedera-data", exactly the
+    Node guard's decryptAgentKeyWithPassword. A wrong passphrase raises ValueError."""
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    parts = str(ciphertext).split(":")
+    if len(parts) != 3:
+        raise ValueError("agentKeyEncrypted: invalid encrypted data format (expected iv:tag:data)")
+    iv, tag, data = (bytes.fromhex(part) for part in parts)
+    key = PBKDF2HMAC(algorithm=hashes.SHA512(), length=32, salt=salt.encode("utf-8"), iterations=100_000).derive(passphrase.encode("utf-8"))
+    try:
+        return AESGCM(key).decrypt(iv, data + tag, b"hedera-data").decode("utf-8")
+    except InvalidTag as exc:
+        raise ValueError("agentKeyEncrypted: wrong passphrase (or the key was altered)") from exc
+
+
 # --------------------------------------------------------------------------------------
 # Transport
 # --------------------------------------------------------------------------------------
@@ -1288,6 +1311,53 @@ class MetaMyndClient:
         if bool(agent_key) == bool(daemon_socket):
             raise ValueError("MetaMyndClient needs exactly one of agent_key or daemon_socket")
         self._signer = _LocalKeySigner(load_key(agent_key)) if agent_key else _DaemonSigner(daemon_socket)
+
+    @classmethod
+    def from_config(
+        cls,
+        source: "Union[str, os.PathLike, Mapping[str, Any]]",
+        *,
+        passphrase: Optional[str] = None,
+        **overrides: Any,
+    ) -> "MetaMyndClient":
+        """Build from the `agent.metamynd.json` the deploy screen (or `create-metamynd-agent`) gives you (0.23.0).
+
+        The Node guard's `createGuardFromConfig('./agent.metamynd.json')`, for Python: `apiBase`, `agentDid` and the key
+        (`agentKey`; or `keyProvider: "daemon"` with `daemonSocketPath`; or `agentKeyEncrypted`, decrypted with
+        `passphrase`). `signContext: false` in the file turns context signing off. Keyword `overrides` win over the file
+        (`api`, `agent_did`, `agent_key`, `daemon_socket`, `timeout`, `sign_context`, ...). A `{success, data}` API
+        response is unwrapped. Pre-beta evaluation 2026-10-09, L5a: there was no loader, so every Python example rebuilt
+        it from environment variables by hand.
+
+            client = MetaMyndClient.from_config("agent.metamynd.json")
+        """
+        if isinstance(source, Mapping):
+            cfg: Mapping[str, Any] = source
+        else:
+            with open(source, encoding="utf-8") as handle:
+                cfg = json.load(handle)
+        if not isinstance(cfg, Mapping):
+            raise ValueError("agent config: expected a JSON object")
+        if isinstance(cfg.get("data"), Mapping) and not cfg.get("agentDid"):
+            cfg = cfg["data"]
+        api = overrides.pop("api", None) or cfg.get("apiBase") or cfg.get("api")
+        agent_did = overrides.pop("agent_did", None) or cfg.get("agentDid")
+        agent_key = overrides.pop("agent_key", None)
+        daemon_socket = overrides.pop("daemon_socket", None)
+        if not agent_key and not daemon_socket:
+            # The file's own key source, in the Node guard's resolveKeyProvider order: a daemon, else the key.
+            if cfg.get("keyProvider") == "daemon":
+                daemon_socket = cfg.get("daemonSocketPath")
+            else:
+                agent_key = cfg.get("agentKey")
+                encrypted = cfg.get("agentKeyEncrypted")
+                if not agent_key and isinstance(encrypted, Mapping):
+                    if not passphrase:
+                        raise ValueError("agent config: the key in this config is passphrase-encrypted; pass passphrase=")
+                    agent_key = decrypt_agent_key(str(encrypted.get("ciphertext", "")), passphrase, str(encrypted.get("salt", "")))
+        if "sign_context" not in overrides and cfg.get("signContext") is False:
+            overrides["sign_context"] = False
+        return cls(str(api or ""), str(agent_did or ""), agent_key or None, daemon_socket=daemon_socket or None, **overrides)
 
     @classmethod
     def from_env(cls) -> "MetaMyndClient":
@@ -1926,8 +1996,15 @@ def guard_tool(
     settle: str = "capture",
     release_on_error: "Any" = False,
     resume_timeout: float = 600.0,
+    on_verdict: "Any" = None,
 ) -> "Any":
     """Wrap a callable so it runs ONLY on a permit.
+
+    Every gate answer, a permit included, reaches `on_verdict(verdict)` when it is given (0.23.0), before the tool runs or
+    the refusal is returned: the place to log `verdict.authorization_id` and `verdict.event_id`, which a permitted call's
+    result otherwise hides (pre-beta 2026-10-09, L5b). Inside the running tool, `current_verdict()` returns the same
+    Verdict. A callback that raises is reported as a warning and never changes the outcome. With an async tool it is
+    called from the worker thread that made the gate call.
 
     What becomes of the hold a permitted call was granted (0.12.0; before, nothing — an unclaimed hold lapses with its
     TTL, so a tool that RAN handed its budget back after 15 minutes, and one that FAILED kept it reserved until then):
@@ -2035,6 +2112,31 @@ def guard_tool(
         raise TypeError(
             "on_refusal is an async function but the tool is sync: pass an async def tool, or a sync on_refusal handler"
         )
+
+    if on_verdict is not None and not callable(on_verdict):
+        raise ValueError(f"on_verdict must be a callable, not {on_verdict!r}")
+
+    def _notify(verdict: "Verdict") -> None:
+        try:
+            on_verdict(verdict)
+        except Exception as exc:  # noqa: BLE001 - an observer's failure must not change what governance decided
+            warnings.warn(f"on_verdict raised {exc!r}; the verdict ({verdict.decision}/{verdict.reason_code}) stands", stacklevel=2)
+
+    def _observed(gate: "Any") -> "Any":
+        """The gate call, with every answer it gives (a permit, or a refusal on its way out) shown to on_verdict."""
+        if on_verdict is None:
+            return gate
+
+        def observed(*args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any]]":
+            try:
+                verdict, payload = gate(*args, **kwargs)
+            except GovernanceBlocked as refused:
+                _notify(refused.verdict)
+                raise
+            _notify(verdict)
+            return verdict, payload
+
+        return observed
 
     def _refused(refused: "GovernanceBlocked") -> "Any":
         """The tool's result for a governance refusal when it is not raised. The tool has NOT run."""
@@ -2285,12 +2387,14 @@ def guard_tool(
                 result = _refused(refused)
                 return (await result) if inspect.isawaitable(result) else result
             token = _GOVERNANCE.set(verdict.signed)
+            vtoken = _VERDICT.set(verdict)
             try:
                 out = await fn(*args, **kwargs)
             except Exception as exc:  # a cancellation is not evidence of anything: it propagates at once, hold kept
                 await asyncio.to_thread(_after_failure, verdict, exc)
                 raise
             finally:
+                _VERDICT.reset(vtoken)
                 _GOVERNANCE.reset(token)
             # The tool RAN. A cancellation from here on cannot stop the capture: it runs in its own thread to completion.
             await asyncio.to_thread(_after_success, verdict, payload)
@@ -2298,12 +2402,12 @@ def guard_tool(
 
         @functools.wraps(fn)
         async def governed_async(*args: "Any", **kwargs: "Any") -> "Any":
-            return await _run_async(_gate, args, kwargs)
+            return await _run_async(_observed(_gate), args, kwargs)
 
         async def resume_async(escalation_id: str, *args: "Any", **kwargs: "Any") -> "Any":
             _take_resume(escalation_id)
             try:
-                return await _run_async(lambda *a, **k: _approved(escalation_id, *a, **k), args, kwargs)
+                return await _run_async(_observed(lambda *a, **k: _approved(escalation_id, *a, **k)), args, kwargs)
             finally:
                 _drop_resume(escalation_id)
 
@@ -2324,9 +2428,11 @@ def guard_tool(
         # gateway does `headers=governance_headers()`. Reset afterwards so it can never leak into
         # an unrelated call.
         token = _GOVERNANCE.set(verdict.signed)
+        vtoken = _VERDICT.set(verdict)
         try:
             result = fn(*args, **kwargs)
         except BaseException as exc:
+            _VERDICT.reset(vtoken)
             _GOVERNANCE.reset(token)
             _after_failure(verdict, exc)
             raise
@@ -2335,33 +2441,37 @@ def guard_tool(
             # of one): the body has not run yet, so hold the signed request across the await instead of
             # resetting it before the tool can read it. (The gate call above was blocking; an `async def`
             # gets the worker-thread path.)
+            _VERDICT.reset(vtoken)
             _GOVERNANCE.reset(token)
 
             async def _await_with_governance() -> "Any":
                 inner = _GOVERNANCE.set(verdict.signed)
+                vinner = _VERDICT.set(verdict)
                 try:
                     out = await result
                 except Exception as exc:  # a cancellation propagates at once, hold kept
                     await asyncio.to_thread(_after_failure, verdict, exc)
                     raise
                 finally:
+                    _VERDICT.reset(vinner)
                     _GOVERNANCE.reset(inner)
                 await asyncio.to_thread(_after_success, verdict, payload)
                 return out
 
             return _await_with_governance()
+        _VERDICT.reset(vtoken)
         _GOVERNANCE.reset(token)
         _after_success(verdict, payload)
         return result
 
     @functools.wraps(fn)
     def governed(*args: "Any", **kwargs: "Any") -> "Any":
-        return _run(_gate, args, kwargs)
+        return _run(_observed(_gate), args, kwargs)
 
     def resume(escalation_id: str, *args: "Any", **kwargs: "Any") -> "Any":
         _take_resume(escalation_id)
         try:
-            return _run(lambda *a, **k: _approved(escalation_id, *a, **k), args, kwargs)
+            return _run(_observed(lambda *a, **k: _approved(escalation_id, *a, **k)), args, kwargs)
         finally:
             _drop_resume(escalation_id)
 
@@ -2378,6 +2488,7 @@ def guard_agent_tool(
     settle: str = "capture",
     release_on_error: "Any" = False,
     resume_timeout: float = 600.0,
+    on_verdict: "Any" = None,
 ) -> "Any":
     """Wrap a tool you hand to an AGENT FRAMEWORK so it runs ONLY on a permit (0.9.0).
 
@@ -2400,12 +2511,71 @@ def guard_agent_tool(
     Signature, type hints and sync/async-ness are preserved, so a framework builds the same tool schema it would
     for `fn` unguarded.
     """
-    return guard_tool(client, action, fn, map_args, on_refusal="return", settle=settle, release_on_error=release_on_error, resume_timeout=resume_timeout)
+    return guard_tool(client, action, fn, map_args, on_refusal="return", settle=settle, release_on_error=release_on_error, resume_timeout=resume_timeout, on_verdict=on_verdict)
+
+
+def guard_langchain_tool(
+    client: "MetaMyndClient",
+    action: str,
+    fn: "Any",
+    map_args: "Any" = None,
+    *,
+    settle: str = "capture",
+    release_on_error: "Any" = False,
+    resume_timeout: float = 600.0,
+    on_verdict: "Any" = None,
+) -> "Any":
+    """`guard_agent_tool` as a LangChain `StructuredTool` whose refusal is an ERROR tool message (0.23.0).
+
+    Given to LangGraph's `ToolNode`, `guard_agent_tool`'s refusal is an ordinary result, so its `ToolMessage` says
+    `status="success"` (pre-beta 2026-10-09, L5c): code that branches on the status reads a refused payment as done. This
+    tool raises a `ToolException` instead and handles it itself (`handle_tool_error=True`), so the refusal is a
+    `ToolMessage` with `status="error"` and the refusal JSON as its content, and the turn still completes: the exception
+    never reaches `ToolNode`, so sibling calls are unaffected. Needs `langchain-core`.
+
+        ToolNode([guard_langchain_tool(client, "flight-purchase", book_flight, map_args)])
+    """
+    try:
+        from langchain_core.tools import StructuredTool, ToolException
+    except ImportError as exc:  # pragma: no cover - exercised where langchain-core is absent
+        raise ImportError("guard_langchain_tool needs langchain-core: pip install langchain-core") from exc
+
+    def raise_tool_error(refused: "GovernanceBlocked") -> "Any":
+        raise ToolException(json.dumps(GovernanceRefusal(refused.verdict, refused.action)))
+
+    async def raise_tool_error_async(refused: "GovernanceBlocked") -> "Any":
+        raise_tool_error(refused)
+
+    is_async = inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(getattr(fn, "__call__", None))
+    governed = guard_tool(
+        client,
+        action,
+        fn,
+        map_args,
+        on_refusal=raise_tool_error_async if is_async else raise_tool_error,
+        settle=settle,
+        release_on_error=release_on_error,
+        resume_timeout=resume_timeout,
+        on_verdict=on_verdict,
+    )
+    if is_async:
+        return StructuredTool.from_function(coroutine=governed, name=fn.__name__, description=(fn.__doc__ or fn.__name__), handle_tool_error=True)
+    return StructuredTool.from_function(governed, handle_tool_error=True)
 
 
 # The signed request of the guarded tool call currently running, if any. A ContextVar, so it is
 # per-thread and per-asyncio-task: two tools running concurrently never see each other's.
 _GOVERNANCE: "contextvars.ContextVar[Optional[SignedRequest]]" = contextvars.ContextVar("metamynd_governance", default=None)
+
+
+# The Verdict of the guarded tool call currently running (0.23.0), beside _GOVERNANCE: its authorization and event ids.
+_VERDICT: "contextvars.ContextVar[Optional[Verdict]]" = contextvars.ContextVar("metamynd_verdict", default=None)
+
+
+def current_verdict() -> Optional[Verdict]:
+    """The Verdict of the `guard_tool` call this code is running inside, or None (0.23.0): `authorization_id`,
+    `event_id` and the rest, which a permitted call's result does not carry (pre-beta 2026-10-09, L5b)."""
+    return _VERDICT.get()
 
 
 def current_governance() -> Optional[SignedRequest]:
