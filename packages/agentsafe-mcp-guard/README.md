@@ -13,6 +13,8 @@ agent's request instead of trusting the agent's own guard.
   (§4.1.2), so the guard verifies signatures and handshakes offline.
 - **Fail-closed.** A bad signature, a stale request, a failed bundle fetch, or any error
   yields `block`.
+- **TypeScript (0.31.0).** Ships its own declarations (`agentsafe-mcp-guard.d.mts`): `createMcpGuard`, `McpGuard`,
+  `verifyRequest`'s `ServiceVerdict`, a typed `guardIncomingTool`, and the payload-binding helpers. No `@types` package.
 
 ## 1. Mutual handshake (§8.2)
 

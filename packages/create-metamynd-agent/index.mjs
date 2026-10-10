@@ -186,7 +186,8 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // (NF-RISK-SELF). Required: a gateway on an older guard would read an operation rule's atom as unknown and let it run.
 // 0.29.0: a claim the issuer refuses is logged in one line and its block carries the issuer's detail (FW6-1).
 // 0.30.0: same CURRENCY_NOT_ALLOWED code in a gateway's local judgement as at the gate (M2).
-const MCP_GUARD_VERSION = '^0.30.0';
+// 0.31.0: ships TypeScript declarations (agentsafe-mcp-guard.d.mts).
+const MCP_GUARD_VERSION = '^0.31.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -226,7 +227,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.29.0: a request signed for another action than the route's is refused GATEWAY_ACTION_MISMATCH, not SIGNATURE_INVALID (M2);
 // depends on agentsafe-mcp-guard ^0.30.0.
 // 0.30.0: `agentsafe-gateway service-id` / `accept-challenge` / `serve`, SERVICE_IDENTITY_FILE and AGENTSAFE_UPSTREAM_CREDENTIAL (M4).
-const GATEWAY_VERSION = '^0.30.0';
+// 0.31.0: ships TypeScript declarations (gateway, route-match, service-identity); depends on agentsafe-mcp-guard ^0.31.0.
+const GATEWAY_VERSION = '^0.31.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `

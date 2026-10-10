@@ -102,6 +102,9 @@ only keys whose value the upstream may take from the caller unchecked (paging, s
 `currency`, `merchant`, or one in its `valueFields`), in any letter case, refuses to start. Shipped as a patch so every `^0.17.0` install
 picks it up; a governed route that relied on forwarding a query needs `allowedQuery` after upgrading.
 
+**TypeScript (0.31.0).** The package ships declarations for its three entry points (`gateway.d.mts`, `route-match.d.mts`,
+`service-identity.d.mts`): `createHttpGateway`, `Route`, `GatewayRequest` / `GatewayResponse` and the service-identity helpers.
+
 ## Keep the API key at the gateway — 0.30.0
 
 A tool that runs inside the agent's process (the guard's `guardTool` with a local handler) holds whatever API key it uses,
