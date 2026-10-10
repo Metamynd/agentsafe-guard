@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/agentsafe-http-gateway",
-  "version": "0.30.1",
+  "version": "0.31.0",
   "description": "Generic HTTP interception gateway (SAFR §17) — a zero-dependency reverse proxy that governs arbitrary HTTP calls through the AgentSafe gate before forwarding upstream.",
   "type": "module",
   "main": "gateway.mjs",
@@ -8,14 +8,26 @@
     "agentsafe-gateway": "cli.mjs"
   },
   "exports": {
-    ".": "./gateway.mjs",
-    "./route-match": "./route-match.mjs",
+    ".": {
+      "types": "./gateway.d.mts",
+      "default": "./gateway.mjs"
+    },
+    "./route-match": {
+      "types": "./route-match.d.mts",
+      "default": "./route-match.mjs"
+    },
     "./keepalive-fetch": "./keepalive-fetch.mjs",
     "./server": "./server.mjs",
-    "./service-identity": "./service-identity.mjs",
+    "./service-identity": {
+      "types": "./service-identity.d.mts",
+      "default": "./service-identity.mjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
+    "service-identity.d.mts",
+    "route-match.d.mts",
+    "gateway.d.mts",
     "keepalive-fetch.mjs",
     "gateway.mjs",
     "route-match.mjs",
@@ -31,7 +43,7 @@
     "test": "node gateway.smoke.mjs && node bind-payload.smoke.mjs && node payload-binding.smoke.mjs && node bind-payload.fuzz.mjs && node credential-vault.smoke.mjs && node gateway-settle.smoke.mjs && node settle-after-answer.smoke.mjs && node context-signature.smoke.mjs && node query-binding.smoke.mjs && node allowed-agents.smoke.mjs && node report-outcomes.smoke.mjs && node service-identity.smoke.mjs"
   },
   "dependencies": {
-    "@metamynd/agentsafe-mcp-guard": "^0.30.0"
+    "@metamynd/agentsafe-mcp-guard": "^0.31.0"
   },
   "engines": {
     "node": ">=18"
@@ -65,5 +77,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "types": "./gateway.d.mts"
 }
