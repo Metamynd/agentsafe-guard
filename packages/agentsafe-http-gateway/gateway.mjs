@@ -820,7 +820,14 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     if (!signed) {
       return { status: 401, body: { decision: 'block', reasonCode: 'MISSING_GOVERNANCE', action: route.action } };
     }
-    // The route pins the action — a client cannot relabel a governed call as something cheaper.
+    // The route pins the action — a client cannot relabel a governed call as something cheaper. A request signed for another
+    // action is refused here, by name: substituting the route's action made the signature fail, and the agent was told
+    // SIGNATURE_INVALID — a key problem — for calling the wrong route (pre-beta evaluation 2026-10-09, M2). Nothing is claimed
+    // and no nonce consumed; the refusal is reported under the request as the agent signed it, so it still verifies.
+    if (route.action && typeof signed.action === 'string' && signed.action !== route.action) {
+      trace.request = signed;
+      return { status: 403, body: { decision: 'block', reasonCode: 'GATEWAY_ACTION_MISMATCH', action: route.action, signedAction: signed.action } };
+    }
     const request = { ...signed, action: route.action ?? signed.action };
     trace.request = request;
 

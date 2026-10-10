@@ -623,6 +623,12 @@ function ownEntry(table, key) {
 
 // src/policy-core/standards-rules.ts
 var CONTEXT_UNVERIFIABLE = "CONTEXT_UNVERIFIABLE";
+var CURRENCY_NOT_ALLOWED = "CURRENCY_NOT_ALLOWED";
+var CURRENCY_SCOPED_CAPS = /* @__PURE__ */ new Set(["amount-over", "cumulative-over"]);
+function firedOnCurrency(m, ctx) {
+  if (m.combinator === "none") return false;
+  return (m.atoms ?? []).some((a) => CURRENCY_SCOPED_CAPS.has(a.predicate) && currencyOutOfScope(ctx, a.config?.currency));
+}
 var CONTEXT_VALUE_ATOMS = ["context-value-in", "context-value-not-in"];
 function contextSignalsOf(m, ctx, decision) {
   if (decision === "observe" || m.combinator !== "all" && m.combinator !== "any") return [];
@@ -713,7 +719,7 @@ function evaluateStandardRules(molecules, ctx, standardKey = null) {
     if (fired) contextSignals.push(...contextSignalsOf(m, ctx, m.decision));
     let decision = fired ? m.decision : "escalate";
     if (unverifiable.length > 0 && PRECEDENCE[decision] < PRECEDENCE.escalate) decision = "escalate";
-    const reasonCode = fired ? m.reasonCode : CONTEXT_UNVERIFIABLE;
+    const reasonCode = !fired ? CONTEXT_UNVERIFIABLE : firedOnCurrency(m, ctx) ? CURRENCY_NOT_ALLOWED : m.reasonCode;
     if (!best || PRECEDENCE[decision] > PRECEDENCE[best.decision]) {
       best = { decision, reasonCode, id: m.id, unverifiable: unverifiable.length > 0 ? unverifiable : void 0 };
     }
@@ -850,6 +856,7 @@ function reasonFor(constraint, req) {
     const v = req.values[leftOperand];
     return v === void 0 || v === null || v === "" ? "JURISDICTION_REQUIRED" : "JURISDICTION_NOT_ALLOWED";
   }
+  if (constraint.unit && !unitMatches(constraint, req)) return "CURRENCY_NOT_ALLOWED";
   return ownEntry(REASON_BY_OPERAND, leftOperand) ?? `CONSTRAINT_FAILED:${leftOperand}`;
 }
 function constraintSatisfied(c, req, strict) {
@@ -857,10 +864,12 @@ function constraintSatisfied(c, req, strict) {
   if (!op) return false;
   const left = Object.prototype.hasOwnProperty.call(req.values, c.leftOperand) ? req.values[c.leftOperand] : void 0;
   if (!c.unit) return op(left, c.rightOperand);
+  return unitMatches(c, req) ? op(left, c.rightOperand) : !strict;
+}
+function unitMatches(c, req) {
   const currency = req.values["mm:currency"];
-  const allowedUnits = Array.isArray(c.unit) ? c.unit : [c.unit];
-  const unitMatches = typeof currency === "string" && allowedUnits.some((u) => u.toUpperCase() === currency.toUpperCase());
-  return unitMatches ? op(left, c.rightOperand) : !strict;
+  const allowedUnits = Array.isArray(c.unit) ? c.unit : c.unit ? [c.unit] : [];
+  return typeof currency === "string" && allowedUnits.some((u) => u.toUpperCase() === currency.toUpperCase());
 }
 function targetOf(rule, mandate) {
   return rule.target ?? mandate.target;

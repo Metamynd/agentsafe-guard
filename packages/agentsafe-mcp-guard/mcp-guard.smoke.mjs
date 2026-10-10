@@ -199,7 +199,7 @@ console.log('\n— unit-bearing mandate constraint (currency) —');
   };
   await checkUnit('within cap, implicit USD → allow', signedRequest({ amount: 100 }), ['allow', 'AUTHORIZED']);
   await checkUnit('within cap, explicit matching USD → allow', signedRequest({ amount: 100, currency: 'USD' }), ['allow', 'AUTHORIZED']);
-  await checkUnit('same numeric amount in a DIFFERENT currency → block', signedRequest({ amount: 100, currency: 'JPY' }), ['block', 'SPEND_LIMIT_EXCEEDED']);
+  await checkUnit('same numeric amount in a DIFFERENT currency → block', signedRequest({ amount: 100, currency: 'JPY' }), ['block', 'CURRENCY_NOT_ALLOWED']);
 }
 
 console.log('\n— SOP-side currency-scoped amount-over atom (verdictFromBundle context) —');

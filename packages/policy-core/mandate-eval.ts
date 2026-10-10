@@ -72,6 +72,9 @@ function reasonFor(constraint: Constraint | undefined, req: MandateRequest): str
     const v = req.values[leftOperand];
     return v === undefined || v === null || v === '' ? 'JURISDICTION_REQUIRED' : 'JURISDICTION_NOT_ALLOWED';
   }
+  // A constraint denominated in a currency fails on ANY other currency, whatever the amount (constraintSatisfied, strict).
+  // Naming that SPEND_LIMIT_EXCEEDED told the developer to ask for less (pre-beta evaluation 2026-10-09, M2).
+  if (constraint.unit && !unitMatches(constraint, req)) return 'CURRENCY_NOT_ALLOWED';
   return ownEntry(REASON_BY_OPERAND, leftOperand) ?? `CONSTRAINT_FAILED:${leftOperand}`;
 }
 
@@ -114,11 +117,14 @@ function constraintSatisfied(c: Constraint, req: MandateRequest, strict: boolean
     ? req.values[c.leftOperand]
     : undefined;
   if (!c.unit) return op(left, c.rightOperand);
+  return unitMatches(c, req) ? op(left, c.rightOperand) : !strict;
+}
+
+/** Whether the request's (signed) currency is the constraint's unit, or one of its units. */
+function unitMatches(c: Constraint, req: MandateRequest): boolean {
   const currency = req.values['mm:currency'];
-  const allowedUnits = Array.isArray(c.unit) ? c.unit : [c.unit];
-  const unitMatches =
-    typeof currency === 'string' && allowedUnits.some((u) => u.toUpperCase() === currency.toUpperCase());
-  return unitMatches ? op(left, c.rightOperand) : !strict;
+  const allowedUnits = Array.isArray(c.unit) ? c.unit : c.unit ? [c.unit] : [];
+  return typeof currency === 'string' && allowedUnits.some((u) => u.toUpperCase() === currency.toUpperCase());
 }
 
 function targetOf(rule: Permission | Prohibition, mandate: Mandate): string | undefined {

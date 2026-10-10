@@ -82,7 +82,8 @@ describe('evaluateMandate — spend limits', () => {
       req({ 'mm:payAmount': 800, 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus', 'mm:currency': 'JPY' }),
     );
     expect(r.decision).toBe('block');
-    expect(r.reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+    // Named for its cause: the currency, not an overspend (pre-beta 2026-10-09, M2).
+    expect(r.reasonCode).toBe('CURRENCY_NOT_ALLOWED');
     expect(r.matched?.constraint?.leftOperand).toBe('mm:payAmount');
   });
 
@@ -140,7 +141,7 @@ describe('evaluateMandate — unit as a multi-currency allow-list', () => {
       req({ 'mm:payAmount': 500, 'mm:cumulativeSpend': 0, 'mm:currency': 'JPY' }),
     );
     expect(r.decision).toBe('block');
-    expect(r.reasonCode).toBe('SPEND_LIMIT_EXCEEDED');
+    expect(r.reasonCode).toBe('CURRENCY_NOT_ALLOWED');
   });
 
   it('is case-insensitive across the list, matching the single-unit behavior', () => {

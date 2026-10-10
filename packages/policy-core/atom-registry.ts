@@ -30,7 +30,7 @@ const RISK_RANK: Record<string, number> = { low: 0, medium: 1, high: 2, critical
  * mandate-eval.ts's currency check was written to close on the ODRL mandate layer. Compared
  * case-insensitively, same as mandate-eval.ts.
  */
-function currencyOutOfScope(ctx: EvaluationContext, cfgCurrency: unknown): boolean {
+export function currencyOutOfScope(ctx: EvaluationContext, cfgCurrency: unknown): boolean {
   if (cfgCurrency === undefined || cfgCurrency === null) return false;
   const allowed = (Array.isArray(cfgCurrency) ? cfgCurrency : [cfgCurrency]) as unknown[];
   if (allowed.length === 0) return false;
