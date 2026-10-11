@@ -105,7 +105,7 @@ function harnessConfigLoad() {
 // Say so, with the way forward, instead of letting readFileSync throw a bare ENOENT.
 let config;
 try {
-  config = JSON.parse(readFileSync('./agent.metamynd.json', 'utf8'));
+  config = JSON.parse(readFileSync('./agent.metamynd.json', 'utf8').replace(/^\\uFEFF/, '')); // a UTF-8 BOM is not JSON
 } catch (e) {
   console.error(e && e.code === 'ENOENT'
     ? ['No ./agent.metamynd.json. It holds the local key for this agent and is gitignored, so a fresh clone never has it.',
@@ -228,7 +228,9 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // depends on agentsafe-mcp-guard ^0.30.0.
 // 0.30.0: `agentsafe-gateway service-id` / `accept-challenge` / `serve`, SERVICE_IDENTITY_FILE and AGENTSAFE_UPSTREAM_CREDENTIAL (M4).
 // 0.31.0: ships TypeScript declarations (gateway, route-match, service-identity); depends on agentsafe-mcp-guard ^0.31.0.
-const GATEWAY_VERSION = '^0.31.0';
+// 0.32.0: `reportOutcomes` defaults to true. The hosted templates already set it; the --harness gateway (no issuer, no
+// network) now sets `reportOutcomes: false`, so it does not log NO_ISSUER on its first refusal.
+const GATEWAY_VERSION = '^0.32.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `
@@ -451,7 +453,8 @@ function onCliError(e) {
 // directly instead — `rules` is ignored when `molecules` is present.
 function loadConfigFile(path) {
   let raw;
-  try { raw = readFileSync(resolve(path), 'utf8'); }
+  // A UTF-8 BOM (Notepad and other Windows tools add one on save) is not JSON whitespace — strip it before parsing.
+  try { raw = readFileSync(resolve(path), 'utf8').replace(/^\uFEFF/, ''); }
   catch (e) { fail(`Could not read config file ${path} (${e.message})`); }
   let json;
   try { json = JSON.parse(raw); }
@@ -3057,6 +3060,8 @@ const gateway = createHttpGateway({
   // body that is not exactly that one — the values of every allowed field, not only amount and merchant. A request that
   // bound no payload is refused (PAYLOAD_BINDING_REQUIRED) instead of run unbound.
   requirePayloadBinding: true,
+  // No issuer to report to: --harness never touches the network (the gateway reports by default since 0.32.0).
+  reportOutcomes: false,
   // Reached ONLY after the guard allowed the request AND the body was bound to what was signed.
   forward: async (req) => {
     const route = matchRoute(ROUTES, req.method, req.path);

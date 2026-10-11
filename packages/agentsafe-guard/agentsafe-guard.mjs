@@ -222,7 +222,9 @@ export function executionAdapterFromEnv(env = (typeof process !== 'undefined' ? 
 function readConfigFile(path, who) {
   let text;
   try {
-    text = readFileSync(path, 'utf8');
+    // A UTF-8 BOM (Notepad and other Windows tools add one on save) is not JSON whitespace — strip it, or JSON.parse
+    // rejects an otherwise valid file (pre-beta eval 2026-10-11, L6).
+    text = readFileSync(path, 'utf8').replace(/^\uFEFF/, '');
   } catch (e) {
     if (e && e.code === 'ENOENT') {
       throw new Error([
@@ -296,7 +298,10 @@ export function createGuard(opts = {}) {
     cfg = readConfigFile(opts.configPath, 'createGuard');
   }
   if (cfg && cfg.data && !cfg.agentDid) cfg = cfg.data; // unwrap a { success, data } API response
-  const api = opts.api ?? cfg?.apiBase ?? cfg?.api;
+  // `apiBase` is accepted as an override too — it is the config file's own field name, so a caller pointing a guard at
+  // staging or a local gate naturally writes { apiBase }. It used to be silently ignored and the guard went on calling
+  // the config file's apiBase (production) instead (pre-beta eval 2026-10-11, L5).
+  const api = opts.api ?? opts.apiBase ?? cfg?.apiBase ?? cfg?.api;
   const agentDid = opts.agentDid ?? cfg?.agentDid;
   if (!api || !agentDid) throw new Error('createGuard requires { api, agentDid } — directly, or via { config } / { configPath } / createGuardFromConfig() — plus either { agentKey } or { keyProvider }');
   const base = api.replace(/\/$/, '');

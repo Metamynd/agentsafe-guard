@@ -63,7 +63,8 @@ export function writeServiceIdentity(path, id, { force = false } = {}) {
 export function readServiceIdentity(path) {
   let raw;
   try {
-    raw = readFileSync(path, 'utf8');
+    // Strip a UTF-8 BOM (Notepad and other Windows tools add one on save): it is not JSON whitespace.
+    raw = readFileSync(path, 'utf8').replace(/^\uFEFF/, '');
   } catch (err) {
     throw new Error(`cannot read the service identity file ${path}: ${err?.message ?? err}`);
   }

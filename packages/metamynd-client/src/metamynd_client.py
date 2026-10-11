@@ -181,7 +181,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.23.0"
+__version__ = "0.23.1"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1329,18 +1329,27 @@ class MetaMyndClient:
         response is unwrapped. Pre-beta evaluation 2026-10-09, L5a: there was no loader, so every Python example rebuilt
         it from environment variables by hand.
 
+        `api_base` is accepted as an alias of `api` (0.23.1), matching the Node guard's `{ apiBase }` override; `api` wins
+        if both are given. A leading UTF-8 byte-order mark in the file (Notepad and other Windows editors add one) is
+        ignored (pre-beta evaluation 2026-10-11, L5/L6).
+
             client = MetaMyndClient.from_config("agent.metamynd.json")
+            local = MetaMyndClient.from_config("agent.metamynd.json", api="http://localhost:9926/api/v1")
         """
         if isinstance(source, Mapping):
             cfg: Mapping[str, Any] = source
         else:
-            with open(source, encoding="utf-8") as handle:
+            # utf-8-sig, not utf-8: a BOM is not JSON whitespace, so json.load rejected an otherwise valid file.
+            with open(source, encoding="utf-8-sig") as handle:
                 cfg = json.load(handle)
         if not isinstance(cfg, Mapping):
             raise ValueError("agent config: expected a JSON object")
         if isinstance(cfg.get("data"), Mapping) and not cfg.get("agentDid"):
             cfg = cfg["data"]
-        api = overrides.pop("api", None) or cfg.get("apiBase") or cfg.get("api")
+        # Pop both spellings so neither reaches __init__ as an unexpected keyword.
+        api_override = overrides.pop("api", None)
+        api_base_override = overrides.pop("api_base", None)
+        api = api_override or api_base_override or cfg.get("apiBase") or cfg.get("api")
         agent_did = overrides.pop("agent_did", None) or cfg.get("agentDid")
         agent_key = overrides.pop("agent_key", None)
         daemon_socket = overrides.pop("daemon_socket", None)

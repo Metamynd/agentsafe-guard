@@ -386,6 +386,35 @@ export function queryRefusal(path, route) {
   return null;
 }
 
+/**
+ * Error codes that prove the connection to the upstream was never made, so not one byte of the request was sent (0.32.2).
+ * Deliberately NOT here: ECONNRESET, EPIPE, ETIMEDOUT, "socket hang up", UND_ERR_SOCKET, UND_ERR_HEADERS_TIMEOUT — each can
+ * happen after the request was written (a reused keep-alive socket, a timeout while the upstream works), so it stays ambiguous.
+ */
+export const CONNECT_FAILURE_CODES = Object.freeze(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'EADDRNOTAVAIL', 'UND_ERR_CONNECT_TIMEOUT']);
+
+/** The connect-failure code of `err`, looked for in its `cause` chain and in an AggregateError's `errors`; null when none. */
+export function connectFailureCode(err, depth = 0) {
+  if (!err || typeof err !== 'object' || depth > 8) return null;
+  if (typeof err.code === 'string' && CONNECT_FAILURE_CODES.includes(err.code)) return err.code;
+  // Node's happy-eyeballs connect (autoSelectFamily) fails with an AggregateError of one error per address tried: the
+  // connection was never made only if EVERY attempt failed to connect.
+  if (Array.isArray(err.errors) && err.errors.length > 0) {
+    const codes = err.errors.map((e) => connectFailureCode(e, depth + 1));
+    if (codes.every(Boolean)) return codes[0];
+  }
+  return connectFailureCode(err.cause, depth + 1);
+}
+
+/**
+ * True when a `forward()` throw proves the request never left: the connection to the upstream was refused, its host does
+ * not resolve, or connecting timed out (Node's fetch and keepalive-fetch both throw `TypeError('fetch failed')` carrying the
+ * socket error as `cause`). Only a positive identification counts — anything else is treated as possibly delivered.
+ */
+export function requestNeverSent(err) {
+  return connectFailureCode(err) !== null;
+}
+
 /** Validate a route's `allowedQuery` at construction time; throws on a misconfiguration (never guesses). */
 function assertAllowedQuery(route) {
   if (route?.allowedQuery === undefined) return;
@@ -497,20 +526,34 @@ function withHeader(headers, name, value) {
  * UNBOUND (logged at startup); a signed value field (amount/currency/merchant, or one in `valueFields`) cannot be listed.
  * Unmatched routes are untouched.
  *
- * reportOutcomes — OPTIONAL (default false, since 0.20.0; needs agentsafe-mcp-guard >= 0.21.0 with a self-certifying
- * serviceDid and its key): report every governed request this gateway answers to the issuer, signed as this gateway, into the
+ * reportOutcomes — OPTIONAL (default true since 0.32.0, false from 0.20.0 to 0.31.x; `false` opts out; needs
+ * agentsafe-mcp-guard >= 0.21.0 with a self-certifying serviceDid and its key — a guard that cannot report is skipped
+ * silently unless reportOutcomes was set explicitly): report every governed request this gateway answers to the issuer, signed as this gateway, into the
  * audit trail of the owner of the agent it acts for (MAGP §16.4) — what it EXECUTED without claiming an authorization (a
  * bundle-only route: the issuer never sees those otherwise) and what it REFUSED itself (AGENT_NOT_ADMITTED, a rule, a binding
  * failure). An execution under a claimed authorization is not reported: the claim already put it on the effect chain. A
  * request refused before it named an agent (no signed request, a query string) has nobody to attribute it to and is not
  * reported. Reports run in the background like settlements (drainSettlements waits for both) and never change a response.
  *
+ * releaseOnConnectFailure — OPTIONAL (default true, since 0.32.2): when `forward()` throws because the upstream connection
+ * was never made — refused (ECONNREFUSED), no such host (ENOTFOUND / EAI_AGAIN), no route (EHOSTUNREACH / ENETUNREACH), or
+ * undici's connect timeout (UND_ERR_CONNECT_TIMEOUT), anywhere in the error's `cause` chain (see requestNeverSent) — no byte
+ * of the request was sent, so nothing can have executed: the claimed hold is RELEASED (reason UPSTREAM_UNREACHABLE) and the
+ * caller gets `502 { decision: 'block', reasonCode: 'UPSTREAM_UNREACHABLE', executed: false }` instead of a throw. Any
+ * other failure (a reset, a timeout after connecting, a lost response) still parks the hold UNKNOWN and rethrows. Set it to
+ * `false` for a forward() that makes more than one upstream call (an earlier one may have run before a later one was
+ * refused); every throw is then treated as ambiguous, as before.
+ *
  * Returns async (req) => { status, headers?, body, governance? }, where req is a normalized
  * { method, path, headers, body }.
  */
-export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false, requireContextSignature, settleInBackground = true, settleRetryDelaysMs = [500, 2000], reportOutcomes = false, reportSpool, reportSpoolRetryMs = 30_000, refusalWindowMs = 60_000 } = {}) {
+export function createHttpGateway({ guard, routes = [], forward, extractGovernance = defaultExtractGovernance, denyByDefault = false, bind = defaultBindPayload, resolveCredential, settle = true, releaseOnStatus = [], requirePayloadBinding = false, requireContextSignature, settleInBackground = true, settleRetryDelaysMs = [500, 2000], reportOutcomes, reportSpool, reportSpoolRetryMs = 30_000, refusalWindowMs = 60_000, releaseOnConnectFailure = true } = {}) {
   if (typeof forward !== 'function') throw new Error('createHttpGateway requires a forward(req) function');
-  if (reportOutcomes && typeof guard?.reportOutcome !== 'function') {
+  // Unset means on (0.32.0). Only an explicit `true` warns about a guard that cannot report: the default must not nag a
+  // gateway that never asked for reports.
+  const reportOutcomesExplicit = reportOutcomes !== undefined;
+  reportOutcomes = reportOutcomes ?? true;
+  if (reportOutcomesExplicit && reportOutcomes && typeof guard?.reportOutcome !== 'function') {
     console.warn('[gateway] reportOutcomes is set, but this guard cannot report (needs @metamynd/agentsafe-mcp-guard >= 0.21.0) — nothing will be reported');
   }
 
@@ -969,7 +1012,18 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     try {
       upstream = await forward(forwardReq);
     } catch (err) {
-      // A throw does not prove the upstream did nothing (the request may have been sent and the
+      // The connection was never made (refused, no such host, connect timeout): not one byte of the request left this
+      // process, so nothing can have executed (0.32.2, pre-beta 2026-10-11 L7). Release the hold — the same close-out as a
+      // vault that released no credential — and tell the caller so, instead of parking it UNKNOWN for an owner to reconcile.
+      // `releaseOnConnectFailure: false` opts out, for a forward() that makes more than one upstream call.
+      if (releaseOnConnectFailure !== false && requestNeverSent(err)) {
+        trace.forwarded = false;
+        const cause = connectFailureCode(err);
+        console.warn(`[gateway] upstream unreachable for "${route.method ?? '*'} ${route.path}" (${cause}) — nothing was sent; releasing the claimed hold`);
+        await releaseUnexecuted(decision, 'UPSTREAM_UNREACHABLE');
+        return { status: 502, body: { decision: 'block', reasonCode: 'UPSTREAM_UNREACHABLE', action: route.action, executed: false, error: `upstream unreachable (${cause}); nothing was sent` }, governance: decision };
+      }
+      // Anything else does not prove the upstream did nothing (the request may have been sent and the
       // response lost) — park the hold as UNKNOWN rather than releasing it, then let the error
       // propagate exactly as it did before.
       await settleHold(decision, request, route, undefined);
