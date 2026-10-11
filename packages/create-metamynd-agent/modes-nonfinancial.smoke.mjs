@@ -187,6 +187,16 @@ await check('--sandbox --non-financial says when a config file scope is not used
   assert.match(r.out, /the scope "send-customer-notice" in the config file is not used/);
 });
 
+await check('a --config file saved with a UTF-8 BOM (Notepad) is read, not refused as invalid JSON (pre-beta eval 2026-10-11, L6)', async () => {
+  modern = true;
+  const dir = fresh(); const cfg = join(dir, 'bom.json');
+  writeFileSync(cfg, String.fromCharCode(0xfeff) + JSON.stringify({ name: 'x', scope: 'send-customer-notice' }), 'utf8');
+  const r = await cli(['--sandbox', '--config', cfg, '--yes', '--out', join(dir, 'proj')]);
+  assert.equal(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /not valid JSON/);
+  assert.match(r.out, /the scope "send-customer-notice" in the config file is not used/, 'the file was parsed');
+});
+
 await check('--sandbox --financial with a spend-free config still gets the payment agent', async () => {
   modern = true; seen.sandbox.length = 0;
   const dir = fresh();

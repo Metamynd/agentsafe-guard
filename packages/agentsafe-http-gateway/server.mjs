@@ -70,8 +70,11 @@ const ALLOWED_AGENTS = (() => {
 })();
 // Report every governed request this gateway answers (what it executed with no claim, what it refused itself) into the
 // audit trail of the owner of the agent it acts for, signed as SERVICE_DID (MAGP §16.4). Needs SERVICE_DID + SERVICE_KEY
-// and that DID registered as a counterparty by the owner. Off unless set.
-const REPORT_OUTCOMES = process.env.AGENTSAFE_REPORT_OUTCOMES === 'true';
+// and that DID registered as a counterparty by the owner. On unless set to `false` (0.32.0; before, off unless set — and a
+// gateway run from the guide then kept every refusal it decided itself out of the owner's Activity Log).
+// Unset is passed through as undefined, so createHttpGateway applies its own default and stays quiet about a guard that
+// cannot report, exactly as it does for a library caller who never set the option.
+const REPORT_OUTCOMES = (process.env.AGENTSAFE_REPORT_OUTCOMES ?? '') === '' ? undefined : process.env.AGENTSAFE_REPORT_OUTCOMES !== 'false';
 // Where reports the issuer could not take are kept and re-sent (JSON lines). Unset: such a report is lost after one retry.
 const REPORT_SPOOL = process.env.AGENTSAFE_REPORT_SPOOL || undefined;
 // The principal DID that owns this gateway's upstream credentials (§16.3): required with a list of agents, each of which must
@@ -98,13 +101,29 @@ const CREDENTIAL_VAULT_HEADER_NAME = process.env.CREDENTIAL_VAULT_HEADER_NAME ||
 const STATIC_CREDENTIAL = process.env.AGENTSAFE_UPSTREAM_CREDENTIAL || '';
 const STATIC_CREDENTIAL_HEADER = process.env.AGENTSAFE_UPSTREAM_CREDENTIAL_HEADER || 'Authorization';
 
+// Only a routes file that does not EXIST means "nothing governed" (a plain pass-through proxy). One that exists but cannot
+// be read or parsed stops the gateway: it used to be logged as "no routes file" and the gateway ran with zero governed
+// routes, so a typo in the file (or a UTF-8 BOM) silently let every request through ungoverned (pre-beta evaluation
+// 2026-10-11, follow-up to L6).
 function loadRoutes() {
+  let text;
   try {
-    return JSON.parse(readFileSync(ROUTES_PATH, 'utf8'));
-  } catch {
-    console.warn(`[gateway] no routes file at ${ROUTES_PATH} — nothing is governed (all pass through)`);
-    return [];
+    text = readFileSync(ROUTES_PATH, 'utf8');
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      console.warn(`[gateway] no routes file at ${ROUTES_PATH} — nothing is governed (all pass through)`);
+      return [];
+    }
+    throw new Error(`[gateway] cannot read the routes file ${ROUTES_PATH} (${err?.code ?? err?.message ?? err}); refusing to start ungoverned`);
   }
+  let routes;
+  try {
+    routes = JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch (err) {
+    throw new Error(`[gateway] the routes file ${ROUTES_PATH} is not valid JSON (${err?.message ?? err}); refusing to start ungoverned`);
+  }
+  if (!Array.isArray(routes)) throw new Error(`[gateway] the routes file ${ROUTES_PATH} must be a JSON array of routes; refusing to start ungoverned`);
+  return routes;
 }
 
 /** Read the raw request body (bounded) as a Buffer. */

@@ -111,6 +111,8 @@ export interface KeyProvider {
 export interface GuardOptions {
   /** The issuer API, e.g. https://metamynd.ai/api/v1 (or `config.apiBase`). */
   api?: string;
+  /** Same as `api` (the config file's own field name). Either one wins over the config's `apiBase`; `api` wins if both are set. */
+  apiBase?: string;
   agentDid?: string;
   /** The agent's key (DER PKCS#8 hex from agent.metamynd.json). Or a keyProvider. */
   agentKey?: string;

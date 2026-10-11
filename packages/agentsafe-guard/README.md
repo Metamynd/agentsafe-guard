@@ -322,6 +322,16 @@ import { createGuardFromConfig } from '@metamynd/agentsafe-guard';
 const guard = await createGuardFromConfig('./agent.metamynd.json');   // no env vars
 ```
 
+Options passed as the second argument win over the file. To point the same config at a
+staging or local gate, pass `apiBase` (or its alias `api`):
+
+```js
+const guard = await createGuardFromConfig('./agent.metamynd.json', { apiBase: 'http://localhost:9926/api/v1' });
+```
+
+The file is read as UTF-8; a leading byte-order mark (added by Notepad and some other
+Windows editors) is ignored.
+
 The rest of this guide shows the manual path (seed → wire) and the advanced features
 (local eval, handshake, escalation, payments).
 

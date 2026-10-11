@@ -42,8 +42,11 @@ export interface GatewayRequest {
   /** Path with any query string, e.g. `/payments` or `/payments?id=1`. */
   path: string;
   headers: Record<string, string | string[] | undefined>;
-  /** The raw body; the payload binding digests exactly these bytes. */
-  rawBody?: Buffer | Uint8Array;
+  /**
+   * The raw body; the payload binding digests exactly these bytes. A Node Buffer is a Uint8Array, so it fits. Declared
+   * without Node's types (0.32.4): TypeScript 6+ loads them only when a project asks, and `Buffer` here broke the rest.
+   */
+  rawBody?: Uint8Array;
   body?: unknown;
   [key: string]: unknown;
 }
@@ -53,7 +56,7 @@ export interface GatewayResponse {
   status: number;
   headers?: Record<string, string>;
   body?: unknown;
-  rawBody?: Buffer | Uint8Array;
+  rawBody?: Uint8Array;
   /** The guard's verdict, when the guard was asked. */
   governance?: ServiceVerdict;
   [key: string]: unknown;
@@ -108,10 +111,13 @@ export interface HttpGatewayOptions {
   requireContextSignature?: boolean;
   settleInBackground?: boolean;
   settleRetryDelaysMs?: number[];
+  /** Report what the gateway executed without a claim and what it refused itself to the owner's audit trail. Default true (0.32.0); false opts out. */
   reportOutcomes?: boolean;
   reportSpool?: string;
   reportSpoolRetryMs?: number;
   refusalWindowMs?: number;
+  /** Release the claimed hold when forward() throws a connect failure (nothing was sent). Default true (0.32.2). */
+  releaseOnConnectFailure?: boolean;
 }
 
 /** The gateway: call it with each request. */
@@ -132,5 +138,8 @@ export function defaultBindPayload(req: GatewayRequest, signed: SignedRequest, r
 export function boundValueMatches(field: string, signedValue: unknown, payloadValue: unknown): boolean;
 export function executedPayloadDigest(req: GatewayRequest, route: Route): { digest?: string; error?: unknown };
 export function queryRefusal(path: string, route: Route): string | null;
+export const CONNECT_FAILURE_CODES: readonly string[];
+export function connectFailureCode(err: unknown): string | null;
+export function requestNeverSent(err: unknown): boolean;
 export function parseStrictJson(text: string): unknown;
 export function keepAliveFetch(input: string | URL, init?: Record<string, unknown>): Promise<Response>;

@@ -163,12 +163,36 @@ await check('a request that named no agent, or an unrouted path, has nobody to a
   assert.equal(reports.length, 0);
 });
 
-await check('off by default: nothing is reported', async () => {
+// On by default since 0.32.0 (pre-beta evaluation 2026-10-11, H1): a gateway set up from the guide reported none of the
+// refusals it decided itself, so tampering and replays at the enforcement point never reached the owner's audit trail.
+await check('on by default: an execution and a refusal are both reported', async () => {
   const gw = gatewayWith();
   await call(gw, signedBy('did:key:zMine'));
   await call(gw, signedBy('did:key:zTheirs'));
   await settled(gw);
+  assert.deepEqual(reports.map((r) => [r.outcome, r.reasonCode]), [['executed', 'EXECUTED'], ['refused', 'AGENT_NOT_ADMITTED']]);
+});
+
+await check('reportOutcomes: false opts out: nothing is reported', async () => {
+  const gw = gatewayWith({ reportOutcomes: false });
+  await call(gw, signedBy('did:key:zMine'));
+  await call(gw, signedBy('did:key:zTheirs'));
+  await settled(gw);
   assert.equal(reports.length, 0);
+});
+
+await check('a guard that cannot report: silent by default, warned once when reporting was asked for', async () => {
+  const { reportOutcome, ...mute } = guard;
+  const warnings = [];
+  const quiet = console.warn; console.warn = (m) => warnings.push(String(m));
+  try {
+    const forward = async () => ({ status: 200, body: { done: true } });
+    const byDefault = createHttpGateway({ guard: mute, routes: [route], denyByDefault: true, settle: false, forward });
+    assert.equal((await call(byDefault, signedBy('did:key:zMine'))).status, 200);
+    assert.equal(warnings.length, 0, 'the default does not nag a guard that was never asked to report');
+    createHttpGateway({ guard: mute, routes: [route], denyByDefault: true, settle: false, forward, reportOutcomes: true });
+    assert.equal(warnings.filter((w) => w.includes('cannot report')).length, 1);
+  } finally { console.warn = quiet; }
 });
 
 await check('a report that fails never changes the response', async () => {

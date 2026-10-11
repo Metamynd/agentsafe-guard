@@ -71,6 +71,24 @@ class FromConfig(unittest.TestCase):
         client = MetaMyndClient.from_config(cfg, api=self.base, timeout=3)
         self.assertEqual((client.api, client.agent_did, client.timeout, client.sign_context), (self.base, "did:key:z6MkA", 3, False))
 
+    def test_an_api_base_override_wins_over_the_file_like_api(self) -> None:
+        # Pre-beta evaluation 2026-10-11, L5: the Node guard dropped { apiBase } and called the file's apiBase
+        # (production); Python takes the same override as `api_base=`, and `api=` still wins when both are given.
+        path = self.write({"apiBase": "http://production.invalid/api/v1", "agentDid": "did:key:z6MkOverride", "agentKey": self.seed})
+        client = MetaMyndClient.from_config(path, api_base=self.base)
+        self.assertEqual(client.api, self.base)
+        self.assertEqual(client.authorize("flight-purchase", 10, merchant="skyward-air", context={"riskLevel": "low"}).decision, "allow")
+        both = MetaMyndClient.from_config(path, api=self.base, api_base="http://other.invalid/api/v1")
+        self.assertEqual(both.api, self.base)
+
+    def test_a_file_with_a_utf8_bom_loads(self) -> None:
+        # Pre-beta evaluation 2026-10-11, L6: a file saved by Notepad starts with a BOM, which json.load rejected.
+        path = self.dir / "agent.metamynd.json"
+        path.write_text(json.dumps({"apiBase": self.base, "agentDid": "did:key:z6MkBom", "agentKey": self.seed}), encoding="utf-8-sig")
+        self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"))
+        client = MetaMyndClient.from_config(path)
+        self.assertEqual((client.api, client.agent_did), (self.base, "did:key:z6MkBom"))
+
     def test_a_passphrase_encrypted_key(self) -> None:
         enc = {"ciphertext": encrypt_agent_key(self.seed, "correct horse", "a1b2c3"), "salt": "a1b2c3"}
         path = self.write({"apiBase": self.base, "agentDid": "did:key:z6MkEnc", "agentKeyEncrypted": enc})

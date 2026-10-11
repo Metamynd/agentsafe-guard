@@ -51,6 +51,13 @@ test('write then read round-trips; an existing file is not overwritten without f
   if (process.platform !== 'win32') assert.equal(statSync(p).mode & 0o777, 0o600);
 });
 
+test('a service identity file saved with a UTF-8 BOM (Notepad) still reads (pre-beta eval 2026-10-11, L6)', () => {
+  const p = join(dir, 'id-bom.json');
+  const id = createServiceIdentity();
+  writeFileSync(p, String.fromCharCode(0xfeff) + JSON.stringify(id, null, 2), 'utf8');
+  assert.equal(readServiceIdentity(p).serviceDid, id.serviceDid);
+});
+
 test('acceptChallenge signs the registration challenge; the signature verifies against the DID', async () => {
   const id = createServiceIdentity();
   const m = challengeFor(id.serviceDid);

@@ -57,8 +57,9 @@ holds one owner's upstream credential must therefore say whom it acts for (MAGP 
 The issuer sees an execution only when the gateway **claims** an authorization. A bundle-only route (no claim, every
 non-financial agent's) runs requests nobody else ever sees, and a refusal the gateway decides itself (`AGENT_NOT_ADMITTED`,
 a rule, a binding failure) is just as invisible — which is how another tenant's agent used an agent's gateway with nothing
-in its owner's Activity Log (XT-1). With `reportOutcomes: true` (or `AGENTSAFE_REPORT_OUTCOMES=true` for `server.mjs`) the
-gateway reports each governed request it answers through `guard.reportOutcome()` (agentsafe-mcp-guard ≥ 0.21.0), signed as
+in its owner's Activity Log (XT-1). **Since 0.32.0 this is on by default**; pass `reportOutcomes: false` (or set
+`AGENTSAFE_REPORT_OUTCOMES=false` for `server.mjs`) to turn it off. From 0.20.0 to 0.31.x it was off unless set, so a gateway
+run from the guide kept every refusal it decided itself out of the owner's audit trail. With it on, the gateway reports each governed request it answers through `guard.reportOutcome()` (agentsafe-mcp-guard ≥ 0.21.0), signed as
 its own service identity, into the audit trail of the owner of the agent it acts for (MAGP §16.4):
 
 - what it **executed** without a claim, and what it **refused** itself;
@@ -66,7 +67,9 @@ its own service identity, into the audit trail of the owner of the agent it acts
 
 It needs a self-certifying `serviceDid` with its key (`SERVICE_DID` / `SERVICE_KEY`), registered by the agent's owner as a
 counterparty — `create-metamynd-agent` does both. Reports run in the background (`drainSettlements` waits for them) and
-never change a response; a failure is logged once per reason.
+never change a response; a failure is logged once per reason. A guard that cannot report at all (agentsafe-mcp-guard
+below 0.21.0, or a custom guard without `reportOutcome`) is skipped silently under the default, and warned about once when
+you set `reportOutcomes: true` yourself.
 
 ## A refused claim says why — since 0.28.0
 
@@ -347,7 +350,19 @@ budget back. This gateway is that party, so once the upstream answers it closes 
 |---|---|---|
 | 2xx | `captureAuthorization` at the authorized amount (the body was bound to it) | spent |
 | a status in `releaseOnStatus` | `releaseAuthorization` — the upstream declined | returned |
-| any other status, or `forward()` throws | `markAuthorizationUnknown` — outcome ambiguous | stays committed |
+| `forward()` throws a connect failure (0.32.2) | `releaseAuthorization` (reason `UPSTREAM_UNREACHABLE`) — nothing was sent | returned |
+| any other status, or any other `forward()` throw | `markAuthorizationUnknown` — outcome ambiguous | stays committed |
+
+**0.32.2 — an upstream that never took the connection releases the hold (`releaseOnConnectFailure`, default on).** When
+`forward()` throws because the connection was never made — refused (`ECONNREFUSED`), no such host (`ENOTFOUND`,
+`EAI_AGAIN`), no route (`EHOSTUNREACH`, `ENETUNREACH`, `EADDRNOTAVAIL`), or undici's `UND_ERR_CONNECT_TIMEOUT`, found
+anywhere in the error's `cause` chain — not one byte of the request left the gateway, so nothing can have executed. The
+hold is released and the caller gets `502 { decision: 'block', reasonCode: 'UPSTREAM_UNREACHABLE', executed: false }`;
+retrying once the upstream is back is safe. Before, the hold was parked `unknown` (`RESPONSE_LOST:UPSTREAM_ERROR` in the
+Activity Log) and stayed against the budget until the owner reconciled it. A reset, a timeout after connecting or a lost
+response is still ambiguous: parked unknown, and the throw propagates (`502 GATEWAY_ERROR` from `agentsafe-gateway
+serve`). Pass `releaseOnConnectFailure: false` for a `forward()` that makes more than one upstream call, or follows a
+redirect to another host — an earlier call may have run before a later connection was refused.
 
 `releaseOnStatus` defaults to `[]` **on purpose**. Releasing returns the budget, so it is only right
 when a status *guarantees* the upstream did not execute; an upstream that runs the action and then

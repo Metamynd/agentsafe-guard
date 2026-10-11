@@ -5,6 +5,8 @@ import { createGuard, createGuardFromConfig, type GovernanceBlocked, type ToolDe
 async function example(): Promise<void> {
   const guard = await createGuardFromConfig('./agent.metamynd.json', { mode: 'remote' });
   const direct = createGuard({ api: 'https://metamynd.ai/api/v1', agentDid: 'did:key:z6Mk', agentKey: '302e...' });
+  const staging = await createGuardFromConfig('./agent.metamynd.json', { apiBase: 'http://localhost:9926/api/v1' });
+  void staging;
 
   const verdict: Verdict = await guard.authorize({ action: 'invoice.pay', amount: 120, currency: 'USD', merchant: 'acme', context: { riskLevel: 'low' } });
   if (verdict.decision === 'allow' && verdict.authorizationId) await direct.capture(verdict.authorizationId, 120);
