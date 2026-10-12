@@ -135,6 +135,66 @@ await check('a capture the issuer refuses (a gateway already settled it) never c
   } finally { globalThis.fetch = real; f.restore(); }
 });
 
+// D-5 (0.37.0, pre-beta rerun 2026-10-12): a tool that handed its call to a gateway (governanceHeaders()) and RETURNED the
+// gateway's refusal used to have its hold captured: spend booked for money that never moved. A value-bearing call a gateway
+// runs is claimed before it executes, so an unclaimed hold after such a tool returns means nothing ran: it is released.
+const withEffect = (effect) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).endsWith('/effect') ? { ok: true, status: 200, json: async () => ({ success: true, data: effect }) } : real(url, init));
+  return () => { globalThis.fetch = real; };
+};
+const viaGateway = (answer) => async (_a, decision) => { await decision.governanceHeaders(); return answer; };
+
+await check('a tool that handed its call to a gateway, which did not claim it, has its hold RELEASED, not captured', async () => {
+  const f = fakeIssuer();
+  const undo = withEffect({ outcome: 'not_started', effectState: 'authorized', claimed: false });
+  try {
+    const out = await guard.guardTool('flight-purchase', viaGateway({ http: 403, reasonCode: 'PAYLOAD_NOT_BOUND' }), mapArgs)({ amount: 120 });
+    assert.equal(out.reasonCode, 'PAYLOAD_NOT_BOUND', 'the tool\'s result is unchanged');
+    assert.deepEqual(settlements(f.calls), ['void']);
+    assert.match(f.calls.find((c) => c.url.endsWith('/void')).body.reason, /did not claim it/);
+  } finally { undo(); f.restore(); }
+});
+
+await check('a tool that handed its call to a gateway which CLAIMED it is left to that gateway (no capture, no void)', async () => {
+  const f = fakeIssuer();
+  const undo = withEffect({ outcome: 'in_flight', effectState: 'dispatching', claimed: true });
+  try {
+    await guard.guardTool('flight-purchase', viaGateway({ paid: true }), mapArgs)({ amount: 120 });
+    assert.deepEqual(settlements(f.calls), []);
+  } finally { undo(); f.restore(); }
+});
+
+await check('a handed-off call the gate cannot report on is still captured (the safe side)', async () => {
+  const f = fakeIssuer();
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => { if (String(url).endsWith('/effect')) throw new TypeError('fetch failed'); return real(url, init); };
+  try {
+    await guard.guardTool('flight-purchase', viaGateway({ paid: true }), mapArgs)({ amount: 120 });
+    assert.deepEqual(settlements(f.calls), ['capture']);
+  } finally { globalThis.fetch = real; f.restore(); }
+});
+
+await check('a handed-off call with NO amount is still captured at 0 (a non-financial gateway runs it without claiming)', async () => {
+  const f = fakeIssuer();
+  const undo = withEffect({ outcome: 'not_started', effectState: 'authorized', claimed: false });
+  try {
+    const nfArgs = () => ({ context: { riskLevel: 'low', op: 'read' } });
+    await guard.guardTool('records.read', viaGateway({ read: 'A' }), nfArgs)({});
+    assert.deepEqual(settlements(f.calls), ['capture']);
+    assert.equal(f.calls.find((c) => c.url.endsWith('/capture')).body.amountCharged, 0);
+  } finally { undo(); f.restore(); }
+});
+
+await check('a tool that ran in-process (never asked for governanceHeaders) is captured even when unclaimed, as before', async () => {
+  const f = fakeIssuer();
+  const undo = withEffect({ outcome: 'not_started', effectState: 'authorized', claimed: false });
+  try {
+    await guard.guardTool('flight-purchase', async () => ({ pnr: 'PNR-LOCAL' }), mapArgs)({ amount: 120 });
+    assert.deepEqual(settlements(f.calls), ['capture']);
+  } finally { undo(); f.restore(); }
+});
+
 await check('a downstream refusal (GovernanceBlocked from the tool) releases the hold, signed, and still throws', async () => {
   const f = fakeIssuer();
   try {

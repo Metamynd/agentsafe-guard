@@ -32,10 +32,18 @@ guard already verifies); the gateway forwards only on `allow`/`observe`.
 
 ```json
 [
-  { "method": "POST", "path": "/book/*",     "action": "flight-purchase" },
-  { "method": "POST", "path": "/payments/**", "action": "payment-execute" }
+  { "method": "POST", "path": "/book/*",      "action": "flight-purchase",
+    "valueFields": ["amount", "merchant"], "allowedFields": ["amount", "currency", "merchant"] },
+  { "method": "POST", "path": "/payments/**", "action": "payment-execute",
+    "valueFields": ["amount", "currency", "merchant"], "allowedFields": ["amount", "currency", "merchant"] }
 ]
 ```
+
+`valueFields` are the body fields the signature covers (each must be present and equal the signed
+value). `allowedFields` lists every top-level key the body may carry; any other key is refused
+`403 PAYLOAD_UNBINDABLE`, so an agent cannot add a field the approval never saw. Declaring both
+explicitly gives a clean start; a route that omits either logs a startup warning naming it (see "Payload binding" and
+"Unknown fields are refused by default" below).
 
 ## Whom this gateway acts for (`AGENTSAFE_ALLOWED_AGENTS`, `AGENTSAFE_GATEWAY_OWNER`, per-route `allowedAgents`) — required since 0.21.0
 

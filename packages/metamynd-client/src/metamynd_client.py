@@ -181,7 +181,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.23.1"
+__version__ = "0.24.0"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -2311,6 +2311,7 @@ def guard_tool(
 
     def _after_failure(verdict: "Verdict", exc: BaseException) -> None:
         """Release the hold of a call that cannot have run; keep it otherwise. Best effort: the TTL is the backstop."""
+        _take_handed_off(verdict)  # a failure is settled by its exception, not by the hand-off; forget the mark
         # A gateway that predates the approved-context binding refused to claim the approval (0.20.0, pre-beta rerun 6 FW6-1):
         # nothing ran there and the hold is unclaimed, so it is KEPT. Voiding it left the owner to approve the same request
         # again, and the next resume misreported it as AUTHORIZATION_ALREADY_USED. The gate re-opens the one resume for it, so
@@ -2337,9 +2338,21 @@ def guard_tool(
         # A hold a counterparty CLAIMED is not this agent's to settle (0.16.0, pre-beta rerun 4 F-3): the gateway that ran the
         # tool claimed it before executing and settles it itself, at what it really charged. Capturing here raced that and
         # left the settlement `unattested`. Only when the gate cannot be asked does the agent capture (the safe side).
+        handed_off = _take_handed_off(verdict)
         try:
             state = client.outcome(verdict.authorization_id)
             if state.claimed or state.outcome in _SETTLED_OUTCOMES:
+                return
+            # A tool that asked for governance_headers() handed the call to a gateway, and a value-bearing call a gateway
+            # runs is CLAIMED before it executes. Unclaimed now (the gate says so plainly) means the gateway ran nothing: it
+            # refused, and the tool returned that answer instead of raising. Capturing it booked a refusal as spend (0.24.0,
+            # pre-beta rerun 2026-10-12, D-5), so it is released. A call with no amount is still settled at 0: a
+            # non-financial gateway runs it without claiming anything.
+            if handed_off and amount > 0 and state.raw.get("claimed") is False:
+                try:
+                    client.void(verdict.authorization_id, reason="handed to a gateway that did not claim it: nothing ran there")
+                except Exception:  # noqa: BLE001 — best effort; the TTL is the backstop
+                    pass
                 return
         except Exception:  # noqa: BLE001 — unreachable or unreadable: fall through and count the spend
             pass
@@ -2592,13 +2605,37 @@ def current_governance() -> Optional[SignedRequest]:
     return _GOVERNANCE.get()
 
 
+# The guarded calls (by Verdict identity) whose tool asked for governance_headers(), i.e. handed the call to a gateway
+# (0.24.0, D-5). A Verdict is frozen and holds a dict, so it cannot be a set member itself; it stays alive until its call is
+# settled, which is when its mark is taken, so its id is not reused meanwhile. Shared across threads: a sync tool may call
+# governance_headers() from a worker thread, and _after_success runs in one.
+_HANDED_OFF: "set[int]" = set()
+_HANDED_OFF_LOCK = threading.Lock()
+
+
+def _take_handed_off(verdict: "Verdict") -> bool:
+    """Whether this call's tool handed it to a gateway; forgets the mark either way."""
+    with _HANDED_OFF_LOCK:
+        present = id(verdict) in _HANDED_OFF
+        _HANDED_OFF.discard(id(verdict))
+    return present
+
+
 def governance_headers() -> dict:
     """Headers to attach to a call to a MAGP-protected service, from inside a guarded tool.
 
     Returns `{}` outside one — calling a protected service without them is refused by the
     service (`MISSING_GOVERNANCE`), which is the safe failure.
+
+    Asking for them marks the call as handed to that service (0.24.0): if it then returns with
+    its hold still unclaimed, the service ran nothing, and the hold is released rather than
+    captured. Raise instead of returning a refusal and that is decided by the exception as before.
     """
     signed = _GOVERNANCE.get()
+    verdict = _VERDICT.get()
+    if signed is not None and verdict is not None:
+        with _HANDED_OFF_LOCK:
+            _HANDED_OFF.add(id(verdict))
     return signed.headers() if signed is not None else {}
 
 

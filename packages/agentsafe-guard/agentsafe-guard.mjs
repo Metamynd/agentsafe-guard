@@ -1176,7 +1176,23 @@ export function createGuard(opts = {}) {
         try { await capture(authorizationId, amount); return; } catch { /* unreachable — try again */ }
       }
     }
+    // A tool that asked for governanceHeaders() handed the call to a gateway, and a value-bearing call that a gateway runs is
+    // CLAIMED by it before it executes. So once such a tool returns, an unclaimed hold means the gateway ran nothing: it
+    // refused (a body it could not bind, a route mismatch, a replay) and the tool returned its answer instead of throwing.
+    // Capturing that hold booked a refusal as spend: the Activity Log showed an agent-side capture beside the gateway's own
+    // refusal report, and the budget counted money that never moved (0.37.0, pre-beta rerun 2026-10-12, D-5). It is released
+    // instead. A call with no amount is still settled at 0: a non-financial gateway runs it without claiming anything.
+    async function settleDelegated(authorizationId, amount) {
+      const fx = await effectStatus(authorizationId);
+      if (fx?.claimed === true || SETTLED_OUTCOMES.has(fx?.outcome)) return;
+      if (fx?.claimed === false) {
+        await voidHold(authorizationId, 'handed to a gateway that did not claim it: nothing ran there');
+        return;
+      }
+      await captureRan(authorizationId, amount); // the gate could not be asked: counting the spend is the safe side
+    }
     async function run(args, permit, mapped) {
+      let delegated = false;
       // The headers a tool hands a MAGP-protected service (a gateway) to have THIS permitted call executed there
       // (0.31.0; pre-beta rerun 5, FW N-3): the same request, freshly signed with its payload bound, carrying the
       // authorization it was granted. Python's guarded tools have governance_headers(); a Node tool used to rebuild and
@@ -1184,6 +1200,7 @@ export function createGuard(opts = {}) {
       const decision = Object.defineProperty({ ...permit }, 'governanceHeaders', {
         enumerable: false,
         value: async () => {
+          delegated = true;
           const signed = await buildSignedRequest({ action, ...requestFieldsOf(mapped) });
           return { 'x-magp-request': JSON.stringify(permit.authorizationId ? { ...signed, authorizationId: permit.authorizationId } : signed) };
         },
@@ -1212,7 +1229,8 @@ export function createGuard(opts = {}) {
       // and then read as `expired`, an action that never ran (0.33.1, pre-beta rerun 6 FW6-4). A local permit has no hold.
       const ranAmount = mapped?.amount ?? 0;
       if (decision.authorizationId && settle === 'capture' && typeof ranAmount === 'number') {
-        await captureRan(decision.authorizationId, ranAmount);
+        if (delegated && ranAmount > 0) await settleDelegated(decision.authorizationId, ranAmount);
+        else await captureRan(decision.authorizationId, ranAmount);
       }
       return result;
     }
