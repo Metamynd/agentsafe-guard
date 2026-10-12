@@ -207,6 +207,12 @@ tool's signature is unchanged. Without the header the service refuses (`MISSING_
 safe failure. The gateway also refuses arguments that differ from what was signed
 (`PAYLOAD_NOT_BOUND`), so the amount you authorized is the amount that executes.
 
+**The hold (since 0.24.0).** A gateway that runs a value-bearing call claims its hold before it executes it, and
+settles it itself. If a tool that called `governance_headers()` returns with the hold still unclaimed, the gateway
+ran nothing (it refused), so `guard_tool` releases the hold instead of capturing it. Before 0.24.0, returning the
+gateway's refusal (as `.json()` above does on a 403) booked it as spend. Raising `ToolNotExecuted` on a refusal is
+still the clearer code. A call with no amount is settled at 0 as before.
+
 **After a human approves a held action**, the request you first signed is stale (a service refuses
 one more than a few minutes old). Sign a fresh one carrying the approved authorization:
 

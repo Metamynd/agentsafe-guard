@@ -146,6 +146,9 @@ class Resume(unittest.TestCase):
 
         def book_flight(airline: str, amount: float, risk: str) -> str:
             seen.append(governance_headers())
+            # The gateway it was handed to claims the approval's hold before it executes, and settles it itself.
+            for h in self.gate.holds.values():
+                h["claimed"] = True
             return "booked"
 
         book = guard_tool(self.client, "flight-purchase", book_flight, FLIGHT, resume_timeout=5)
@@ -158,7 +161,8 @@ class Resume(unittest.TestCase):
         self.assertEqual(book.resume(esc, "skyward-air", 90, "high"), "booked")
         self.assertEqual(len(seen), 1)
         self.assertIn(self.gate.escalations[esc]["authorizationId"], seen[0]["x-magp-request"])
-        self.assertEqual(self.gate.holds[self.gate.escalations[esc]["authorizationId"]]["state"], "captured")
+        # Handed to a gateway that claimed it: the gateway settles it, so the agent neither captures nor voids (0.24.0, D-5).
+        self.assertEqual(self.gate.holds[self.gate.escalations[esc]["authorizationId"]]["state"], "held")
         # Once only: the approval's authorization is used now, so a second resume never touches the tool.
         with self.assertRaises(GovernanceBlocked) as again:
             book.resume(esc, "skyward-air", 90, "high")
@@ -278,6 +282,70 @@ class OrphanAndRace(unittest.TestCase):
         self.assertEqual(first.get("r"), "booked")
         self.assertEqual(len(runs), 1)
 
+
+class HandOffToAGateway(unittest.TestCase):
+    """D-5 (0.24.0, pre-beta rerun 2026-10-12): a tool that handed its call to a gateway (governance_headers()) and RETURNED
+    the gateway's refusal had its hold captured, booking spend for money that never moved. A value-bearing call a gateway
+    runs is claimed before it executes, so an unclaimed hold after such a tool returns means nothing ran: it is released."""
+
+    def setUp(self) -> None:
+        key, seed = new_agent_key()
+        self.gate = FakeGate(key.public_key())
+        self.client = MetaMyndClient(self.gate.start(), "did:key:z6MkHandOff", seed, timeout=5)
+
+    def tearDown(self) -> None:
+        self.gate.stop()
+
+    def states(self) -> "list[str]":
+        return [h["state"] for h in self.gate.holds.values()]
+
+    def test_handed_off_and_unclaimed_is_released_not_captured(self) -> None:
+        def via_gateway(airline: str, amount: float) -> dict:
+            governance_headers()
+            return {"http": 403, "reasonCode": "PAYLOAD_NOT_BOUND"}  # returned, not raised
+
+        out = guard_tool(self.client, "flight-purchase", via_gateway, FLIGHT)("skyward-air", 120)
+        self.assertEqual(out["reasonCode"], "PAYLOAD_NOT_BOUND", "the tool's result is unchanged")
+        self.assertEqual(self.states(), ["voided"])
+
+    def test_handed_off_and_claimed_is_left_to_the_gateway(self) -> None:
+        def via_gateway(airline: str, amount: float) -> str:
+            governance_headers()
+            for h in self.gate.holds.values():
+                h["claimed"] = True  # the gateway claimed it before executing
+            return "paid"
+
+        guard_tool(self.client, "flight-purchase", via_gateway, FLIGHT)("skyward-air", 120)
+        self.assertEqual(self.states(), ["held"], "the gateway settles it: the agent neither captures nor voids")
+
+    def test_handed_off_with_no_amount_is_still_captured_at_zero(self) -> None:
+        def read(airline: str) -> str:
+            governance_headers()
+            return "ok"
+
+        guard_tool(self.client, "flight-purchase", read, lambda airline: FLIGHT(airline, 0))("skyward-air")
+        self.assertEqual(self.states(), ["captured"])
+
+    def test_a_tool_that_ran_in_process_is_captured_as_before(self) -> None:
+        guard_tool(self.client, "flight-purchase", lambda airline, amount: {"pnr": "P1"}, FLIGHT)("skyward-air", 120)
+        self.assertEqual(self.states(), ["captured"])
+
+    def test_async_hand_off_is_released_too(self) -> None:
+        async def via_gateway(airline: str, amount: float) -> dict:
+            governance_headers()
+            return {"http": 403}
+
+        asyncio.run(guard_tool(self.client, "flight-purchase", via_gateway, FLIGHT)("skyward-air", 50))
+        self.assertEqual(self.states(), ["voided"])
+
+    def test_a_raised_refusal_is_still_decided_by_the_exception(self) -> None:
+        def via_gateway(airline: str, amount: float) -> None:
+            governance_headers()
+            raise ToolNotExecuted("gateway refused")
+
+        with self.assertRaises(ToolNotExecuted):
+            guard_tool(self.client, "flight-purchase", via_gateway, FLIGHT)("skyward-air", 40)
+        self.assertEqual(self.states(), ["voided"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -563,6 +563,14 @@ const book = guard.guardTool('flight-purchase', async (args, decision) => {
 It is the Node counterpart of the Python client's `governance_headers()`. Send the body your `mapArgs` returned as `payload`:
 a gateway that requires payload binding refuses any other.
 
+**What happens to the hold (since 0.37.0).** A gateway that runs a value-bearing call claims its hold before executing it, and
+settles it itself. So when a tool that asked for `governanceHeaders()` returns and the hold is still unclaimed, the gateway ran
+nothing (it refused the call) and the guard releases the hold instead of capturing it. Before 0.37.0 a tool that returned the
+gateway's refusal body had the hold captured: spend was booked for a payment that never happened. Throwing on a refusal (with
+`nothingExecuted: true`) is still the clearer code, and settles the same way. A call with no amount is settled at 0 as before,
+since a non-financial gateway runs it without claiming anything. If the gate cannot be asked, the hold is captured: counting the
+spend is the safe side.
+
 ### Jurisdiction (signed, since 0.16.0)
 
 Pass `jurisdiction` (ISO 3166-1 alpha-2, e.g. `'SG'`) to `authorize()`, `buildSignedRequest()`, `guardTool`'s
