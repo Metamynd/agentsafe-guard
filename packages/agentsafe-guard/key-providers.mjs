@@ -58,7 +58,7 @@ export function createStaticKeyProvider(agentKeyHex) {
     },
     // The resume claim (0.28.0, MAGP-RESUME-CLAIM-v1; v2 since 0.32.0 when `fields` carry requestDigest and contextDigest, which
     // binds the approved request and context — pre-beta rerun 6 F-1-NF-R): takes the one resume of an approved escalation.
-    // OPTIONAL: without it (the signer daemon) a resume runs unclaimed, as before.
+    // OPTIONAL: without it a resume runs unclaimed, as before (the signer daemon has it since signer 0.23.0).
     async signResumeClaim(fields) {
       return rawSign(buildResumeClaimMessage(fields));
     },
@@ -205,6 +205,20 @@ export function createDaemonKeyProvider({ socketPath }) {
       } catch (err) {
         if (err?.code === 'DAEMON_UNKNOWN_OPERATION') {
           throw Object.assign(new Error('the agentsafe-signer daemon predates payload binding (sign-payload, signer 0.15.0); upgrade it, or omit `payload`'), { code: 'PAYLOAD_BINDING_UNSUPPORTED' });
+        }
+        throw err;
+      }
+    },
+    // `sign-resume-claim` (signer 0.23.0): takes the one resume of an approved escalation (MAGP §9a.6). A daemon that
+    // predates it answers DAEMON_UNKNOWN_OPERATION, reported as RESUME_CLAIM_SIGNING_UNSUPPORTED: the guard then resumes
+    // unclaimed, as every daemon-custody agent did before this op existed.
+    async signResumeClaim(fields) {
+      try {
+        const { signature } = await daemonRequest(socketPath, 'sign-resume-claim', fields);
+        return signature;
+      } catch (err) {
+        if (err?.code === 'DAEMON_UNKNOWN_OPERATION') {
+          throw Object.assign(new Error('the agentsafe-signer daemon predates sign-resume-claim (signer 0.23.0); upgrade it so a resume is taken once at the issuer'), { code: 'RESUME_CLAIM_SIGNING_UNSUPPORTED' });
         }
         throw err;
       }

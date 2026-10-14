@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 import metamynd_client
-from metamynd_client import DaemonError, MetaMyndClient, canonical_message, payload_binding_message, payload_digest, payload_rebind_message, utc_now_rfc3339
+from metamynd_client import DaemonError, MetaMyndClient, canonical_message, payload_binding_message, payload_digest, payload_rebind_message, resume_claim_message, utc_now_rfc3339
 
 NODE = shutil.which("node")
 FIXTURE = str(TESTS / "daemon_fixture.mjs")
@@ -160,6 +160,19 @@ class DaemonSignerConformance(unittest.TestCase):
         self.assertTrue(name_a.startswith("agentsafe-signer-"))
         self.assertNotEqual(name_a, metamynd_client._daemon_pipe_name(self.daemon.socket_path + "-different"))
 
+    def test_the_resume_claim_signed_by_the_real_daemon_verifies_as_v1_and_v2(self) -> None:
+        # sign-resume-claim (signer 0.23.0): before it a daemon-custody agent's resume ran unclaimed. Called on the signer the
+        # way claim_resume() does, checking what it PRODUCES — there is no gate here.
+        client = self._client()
+        esc, auth, nonce, issued_at = str(uuid.uuid4()), str(uuid.uuid4()), "n" * 16, utc_now_rfc3339()
+        base = {"escalationId": esc, "authorizationId": auth, "agentDid": client.agent_did, "nonce": nonce, "issuedAt": issued_at}
+        v1 = client._signer.sign_resume_claim(base)
+        _public_key(self.daemon).verify(v1, resume_claim_message(esc, auth, client.agent_did, nonce, issued_at).encode("utf-8"))
+        req, ctx = payload_digest({"r": 1}), payload_digest({"c": 2})
+        v2 = client._signer.sign_resume_claim({**base, "requestDigest": req, "contextDigest": ctx})
+        message = resume_claim_message(esc, auth, client.agent_did, nonce, issued_at, req, ctx)
+        self.assertTrue(message.startswith("MAGP-RESUME-CLAIM-v2|"))
+        _public_key(self.daemon).verify(v2, message.encode("utf-8"))
     def test_client_construction_requires_exactly_one_of_agent_key_or_daemon_socket(self) -> None:
         with self.assertRaises(ValueError):
             MetaMyndClient("http://127.0.0.1:1", "did:key:zBoth", "aa" * 32, daemon_socket=self.daemon.socket_path)
@@ -185,6 +198,22 @@ class DaemonErrorMapping(unittest.TestCase):
             signer.sign_payload_binding({"agentDid": "d", "action": "a", "nonce": "n", "issuedAt": "t", "payloadDigest": "sha256:" + "0" * 64})
         self.assertEqual(ctx.exception.code, "DAEMON_MALFORMED_REQUEST")
 
+    def test_DAEMON_UNKNOWN_OPERATION_on_the_resume_claim_becomes_RESUME_CLAIM_SIGNING_UNSUPPORTED(self) -> None:
+        signer = metamynd_client._DaemonSigner("unused-in-this-test")
+        signer._request = lambda op, fields: (_ for _ in ()).throw(DaemonError("DAEMON_UNKNOWN_OPERATION"))
+        with self.assertRaises(DaemonError) as ctx:
+            signer.sign_resume_claim({"escalationId": "e", "authorizationId": "a", "agentDid": "d", "nonce": "n", "issuedAt": "t"})
+        self.assertEqual(ctx.exception.code, "RESUME_CLAIM_SIGNING_UNSUPPORTED")
+
+    def test_claim_resume_runs_unclaimed_on_an_old_daemon_and_refuses_on_a_failed_one(self) -> None:
+        """An older daemon (no sign-resume-claim) keeps the old behaviour: "unsupported", the resume runs unclaimed. Any other
+        daemon failure refuses the resume SIGNER_UNREACHABLE: never run a resume the gate was not told about."""
+        client = MetaMyndClient("http://127.0.0.1:1", "did:key:zDaemon", daemon_socket="unused-in-this-test")
+        client._signer.sign_resume_claim = lambda fields: (_ for _ in ()).throw(DaemonError("RESUME_CLAIM_SIGNING_UNSUPPORTED", "old daemon"))
+        with self.assertWarns(UserWarning):
+            self.assertEqual(client.claim_resume(str(uuid.uuid4()), str(uuid.uuid4())), "unsupported")
+        client._signer.sign_resume_claim = lambda fields: (_ for _ in ()).throw(DaemonError("DAEMON_UNREACHABLE", "down"))
+        self.assertEqual(client.claim_resume(str(uuid.uuid4()), str(uuid.uuid4())), "SIGNER_UNREACHABLE")
     def test_sign_authorize_does_not_get_the_payload_specific_remap(self) -> None:
         signer = metamynd_client._DaemonSigner("unused-in-this-test")
         signer._call = lambda op, fields: (_ for _ in ()).throw(DaemonError("DAEMON_UNKNOWN_OPERATION"))

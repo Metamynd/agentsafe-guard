@@ -425,6 +425,7 @@ export function createGuard(opts = {}) {
   const orphanDelaysMs = Array.isArray(opts.orphanReleaseDelaysMs) ? opts.orphanReleaseDelaysMs : [2_000, 10_000, 30_000];
   let warnedNoRequestDigest = false; // once per guard: the gate predates the resume binding (§9a.5)
   let warnedNoResumeClaim = false; // once per guard: the gate predates the resume claim (§9a.6)
+  let warnedNoResumeClaimSigner = false; // once per guard: the signer daemon predates sign-resume-claim (signer 0.23.0)
   let warnedNoContextDigest = false; // once per guard: the gate predates the approved-context binding (§9a.5, rerun 5 F-1-NF)
   // Escalations being resumed in THIS process right now, by any gated tool of this guard: a second, concurrent resume of
   // the same one is refused instead of racing the first past the "still unused?" check (since 0.22.0).
@@ -1298,7 +1299,22 @@ export function createGuard(opts = {}) {
       const nonce = crypto.randomUUID();
       const issuedAt = new Date().toISOString();
       const bound = digests ? { requestDigest: digests.requestDigest, contextDigest: digests.contextDigest } : {};
-      const signature = await keyProvider.signResumeClaim({ escalationId, authorizationId, agentDid, nonce, issuedAt, ...bound });
+      let signature;
+      try {
+        signature = await keyProvider.signResumeClaim({ escalationId, authorizationId, agentDid, nonce, issuedAt, ...bound });
+      } catch (err) {
+        // A signer daemon older than 0.23.0 cannot sign the claim: resume unclaimed, as daemon-custody agents always did.
+        if (err?.code === 'RESUME_CLAIM_SIGNING_UNSUPPORTED') {
+          if (!warnedNoResumeClaimSigner) {
+            warnedNoResumeClaimSigner = true;
+            console.warn(`[agentsafe] ${err.message}: resume() runs unclaimed, so two processes resuming one approval could both run it`);
+          }
+          return 'unsupported';
+        }
+        // Any other signer failure (daemon down, a refusal) refuses the resume, as authorize() does — never run unclaimed.
+        if (typeof err?.code === 'string' && err.code.startsWith('DAEMON_')) return 'SIGNER_UNREACHABLE';
+        throw err;
+      }
       let res;
       try {
         res = await fetch(`${base}/policy/escalations/${encodeURIComponent(escalationId)}/resume-claim`, {

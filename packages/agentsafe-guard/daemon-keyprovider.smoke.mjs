@@ -74,6 +74,23 @@ async function main() {
     check(threw !== null && threw.code === 'DAEMON_MALFORMED_REQUEST', 'the daemon itself rejects a non-reportable decision (e.g. "decommission") even when asked over the real socket, not just in-process');
   }
 
+  // --- the resume claim through the REAL daemon (MAGP 9a.6, signer 0.23.0): before `sign-resume-claim` a daemon-custody
+  //     agent could not sign it, so its resume ran unclaimed and two processes could both run one approval ---
+  {
+    const { buildResumeClaimMessage } = await import('./resume-binding.mjs');
+    const keyProvider = createDaemonKeyProvider({ socketPath });
+    const digest = () => `sha256:${crypto.randomBytes(32).toString('hex')}`;
+    const base = { escalationId: crypto.randomUUID(), authorizationId: crypto.randomUUID(), agentDid, nonce: crypto.randomUUID(), issuedAt: new Date().toISOString() };
+    const v1 = await keyProvider.signResumeClaim(base);
+    check(verifyDidSignature(agentDid, buildResumeClaimMessage(base), v1), 'keyProvider.signResumeClaim via the real daemon verifies as MAGP-RESUME-CLAIM-v1');
+    const bound = { ...base, nonce: crypto.randomUUID(), requestDigest: digest(), contextDigest: digest() };
+    const v2 = await keyProvider.signResumeClaim(bound);
+    check(verifyDidSignature(agentDid, buildResumeClaimMessage(bound), v2), '...and as MAGP-RESUME-CLAIM-v2 over the approved request and context digests');
+    let threw = null;
+    try { await keyProvider.signResumeClaim({ ...base, escalationId: 'not-a-uuid' }); } catch (err) { threw = err; }
+    check(threw?.code === 'DAEMON_MALFORMED_REQUEST', 'the daemon validates the claim it signs, over the real socket too');
+  }
+
   // --- payload binding through the REAL daemon (MAGP 8.3.9 / 8.3.11): before signer 0.15.0 a daemon-custody agent asked to bind
   //     a payload failed closed; now `sign-payload` signs it without the key ever entering this process ---
   {

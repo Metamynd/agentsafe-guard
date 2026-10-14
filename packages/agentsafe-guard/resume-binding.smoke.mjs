@@ -276,6 +276,34 @@ await check('an issuer without resumeClaimVersion gets the v1 claim it knows', a
     assert.ok(crypto.verify(null, Buffer.from(msg, 'utf8'), publicKey, Buffer.from(claims[0].signature, 'hex')));
   } finally { globalThis.fetch = real; }
 });
+// 0.37.1: a signer daemon signs the claim since signer 0.23.0 (`sign-resume-claim`). A daemon older than that cannot, and the
+// resume runs unclaimed as daemon-custody resumes always did; a daemon that is down refuses the resume instead.
+async function resumeWithSigner(signResumeClaim) {
+  const { createStaticKeyProvider } = await import('./key-providers.mjs');
+  const keyProvider = { ...createStaticKeyProvider(agentKey), signResumeClaim };
+  const g = createGuard({ api: 'http://issuer.test/api/v1', agentDid, keyProvider, mode: 'remote' });
+  const f = fakeIssuer(bound);
+  const ran = [];
+  try {
+    const tool = g.guardTool('flight-purchase', async (a) => { ran.push(a); return { pnr: 'PNR-1' }; }, mapArgs);
+    try { return { out: await tool.resume('esc-1', { amount: 5, merchant: 'skyward-air', riskLevel: 'high' }, { timeoutMs: 1000 }), ran, calls: f.calls }; }
+    catch (e) { return { err: e, ran, calls: f.calls }; }
+  } finally { f.restore(); }
+}
+
+await check('a signer daemon older than 0.23.0 (no sign-resume-claim): the resume runs unclaimed, as before', async () => {
+  const r = await resumeWithSigner(async () => { throw Object.assign(new Error('the agentsafe-signer daemon predates sign-resume-claim (signer 0.23.0)'), { code: 'RESUME_CLAIM_SIGNING_UNSUPPORTED' }); });
+  assert.equal(r.err, undefined, r.err?.message);
+  assert.equal(r.ran.length, 1);
+  assert.equal(r.calls.some((u) => u.endsWith('/resume-claim')), false, 'nothing was claimed');
+});
+
+await check('a signer daemon that is down refuses the resume SIGNER_UNREACHABLE, and the tool never runs', async () => {
+  const r = await resumeWithSigner(async () => { throw Object.assign(new Error('agentsafe-signer daemon unreachable'), { code: 'DAEMON_UNREACHABLE' }); });
+  assert.equal(r.err?.governance?.reasonCode, 'SIGNER_UNREACHABLE');
+  assert.equal(r.ran.length, 0);
+});
+
 await check('the bundled resume-binding reproduces docs/protocol/resume-binding-vectors.json', async () => {
   const v = JSON.parse(readFileSync(new URL('../../docs/protocol/resume-binding-vectors.json', import.meta.url), 'utf8'));
   for (const c of v.vectors) {
