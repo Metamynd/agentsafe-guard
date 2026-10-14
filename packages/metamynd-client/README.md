@@ -283,7 +283,9 @@ daemon key providers speak (`agentsafe-guard`'s `key-providers.mjs`): the daemon
 canonical message itself from structured fields, so this client never hands it — or is asked to hand it —
 bytes to blind-sign. `DaemonError` (`.code`) reports `DAEMON_UNREACHABLE`, `PAYLOAD_BINDING_UNSUPPORTED`
 (the daemon predates `sign-payload`, signer < 0.15.0 — upgrade it, or don't bind a payload against it) and
-the daemon's own refusal codes. Stdlib only: `socket.AF_UNIX` on Linux/macOS, raw `ctypes` calls into
+the daemon's own refusal codes. Since 0.24.1 the daemon also signs the resume claim (signer ≥ 0.23.0,
+`sign-resume-claim`), so a resumed approval is taken once at the gate as it is with an in-process key; an older
+daemon resumes unclaimed with a warning, and a daemon that cannot sign refuses the resume `SIGNER_UNREACHABLE`. Stdlib only: `socket.AF_UNIX` on Linux/macOS, raw `ctypes` calls into
 `kernel32` for the named pipe on Windows — no extra dependency either way. Verified against the real
 `agentsafe-signer` daemon (`tests/test_daemon_signer.py`), on both transports (CI runs the POSIX path;
 Windows was run and confirmed directly, not merely reasoned about — the named-pipe transport has genuine

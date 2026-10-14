@@ -744,8 +744,10 @@ touching the tool, and one started while another resume of it is still running i
 `AUTHORIZATION_IN_USE` (0.22.0). Since 0.28.0 that holds across *processes* too: before running, `.resume()` takes the
 approval's one resume at the issuer (`POST /policy/escalations/:id/resume-claim`, signed `MAGP-RESUME-CLAIM-v1`, `-v2` since 0.32.0), a single
 atomic update — a second process gets `AUTHORIZATION_IN_USE` and never runs the tool. It is at most once: a resume that
-crashed after taking it does not hand the approval to another run (the owner approves again). A key provider that cannot
-sign the claim (the signer daemon), or an issuer that predates it, resumes as before.
+crashed after taking it does not hand the approval to another run (the owner approves again). Since 0.37.1 the signer
+daemon signs the claim too (`agentsafe-signer` 0.23.0, `sign-resume-claim`); a daemon that is down refuses the resume
+`SIGNER_UNREACHABLE`. A key provider that cannot sign the claim (a daemon older than signer 0.23.0, with a warning), or an
+issuer that predates it, resumes as before — unclaimed.
 
 **Only what was approved** (0.24.0). The approval is for one request: this amount, this merchant, this payload. The
 escalation status carries a `requestDigest` of it, and `.resume()` recomputes that digest from the args it is given. Args

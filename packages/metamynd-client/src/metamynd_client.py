@@ -181,7 +181,7 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.24.0"
+__version__ = "0.24.1"
 
 DEFAULT_API = "http://localhost:9926/api/v1"
 
@@ -1114,6 +1114,17 @@ class _DaemonSigner:
                 raise DaemonError("SETTLE_SIGNING_UNSUPPORTED", "the agentsafe-signer daemon predates sign-settle (signer 0.20.0); upgrade it to settle an unclaimed hold as the agent") from exc
             raise
 
+    def sign_resume_claim(self, fields: Mapping[str, Any]) -> bytes:
+        # `sign-resume-claim` (signer 0.23.0): the one resume of an approved escalation (MAGP 9a.6). An older daemon answers
+        # DAEMON_UNKNOWN_OPERATION, reported as RESUME_CLAIM_SIGNING_UNSUPPORTED: claim_resume() then resumes unclaimed, as
+        # daemon-custody agents did before.
+        try:
+            return self._request("sign-resume-claim", fields)
+        except DaemonError as exc:
+            if exc.code == "DAEMON_UNKNOWN_OPERATION":
+                raise DaemonError("RESUME_CLAIM_SIGNING_UNSUPPORTED", "the agentsafe-signer daemon predates sign-resume-claim (signer 0.23.0); upgrade it so a resume is taken once at the gate") from exc
+            raise
+
     def sign_envelope(self, fields: Mapping[str, Any]) -> bytes:
         # The daemon builds the envelope itself from these fields (`sign-envelope`, every signer version). This client always
         # sends amount and currency, so even a daemon older than signer 0.19.0 (which defaulted an omitted currency) hashes
@@ -1702,9 +1713,9 @@ class MetaMyndClient:
     def claim_resume(self, escalation_id: str, authorization_id: str, request_digest: Optional[str] = None, context_digest: Optional[str] = None) -> str:
         """Take the ONE resume of an approved escalation at the gate (0.17.0, MAGP 9a.6) before running a tool under it.
 
-        Returns "claimed"; "unsupported" when this signer cannot sign the claim (a daemon) or the gate predates it (the
-        resume then runs unclaimed, as before); or the refusal code, e.g. AUTHORIZATION_IN_USE when another process took
-        it first. Raises GateUnreachable when the gate cannot be reached — never run a resume the gate was not told about.
+        Returns "claimed"; "unsupported" when this signer cannot sign the claim (a signer daemon older than 0.23.0) or the
+        gate predates it (the resume then runs unclaimed, as before); or the refusal code, e.g. AUTHORIZATION_IN_USE when
+        another process took it first, or SIGNER_UNREACHABLE when the daemon cannot sign. Raises GateUnreachable when the gate cannot be reached — never run a resume the gate was not told about.
 
         With `request_digest` and `context_digest` (0.19.0, pre-beta rerun 6 F-1-NF-R) — the digests of the call about to run —
         the claim is signed as MAGP-RESUME-CLAIM-v2 and the gate refuses it unless they are the approved request and context.
@@ -1715,7 +1726,17 @@ class MetaMyndClient:
         nonce = secrets.token_hex(16)
         issued_at = utc_now_rfc3339()
         bound = {"requestDigest": request_digest, "contextDigest": context_digest} if request_digest is not None or context_digest is not None else {}
-        signature = self._signer.sign_resume_claim({"escalationId": escalation_id, "authorizationId": authorization_id, "agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at, **bound})
+        try:
+            signature = self._signer.sign_resume_claim({"escalationId": escalation_id, "authorizationId": authorization_id, "agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at, **bound})
+        except DaemonError as exc:
+            # A signer daemon older than 0.23.0 cannot sign the claim: resume unclaimed, as daemon-custody agents always did.
+            if exc.code == "RESUME_CLAIM_SIGNING_UNSUPPORTED":
+                if not getattr(self, "_warned_no_resume_claim_signer", False):
+                    self._warned_no_resume_claim_signer = True
+                    warnings.warn(f"{exc}: resume() runs unclaimed, so two processes resuming one approval could both run it", stacklevel=3)
+                return "unsupported"
+            # Any other daemon failure refuses the resume, as authorize does: never run a resume the gate was not told about.
+            return "SIGNER_UNREACHABLE"
         request = urllib.request.Request(
             f"{self.api}/policy/escalations/{urllib.parse.quote(escalation_id, safe='')}/resume-claim",
             data=json.dumps({"agentDid": self.agent_did, "nonce": nonce, "issuedAt": issued_at, "signature": signature.hex(), **bound}).encode("utf-8"),
