@@ -82,7 +82,7 @@ describe('evaluateMandate — spend limits', () => {
       req({ 'mm:payAmount': 800, 'mm:cumulativeSpend': 0, 'mm:merchant': 'amadeus', 'mm:currency': 'JPY' }),
     );
     expect(r.decision).toBe('block');
-    // Named for its cause: the currency, not an overspend (pre-beta 2026-10-09, M2).
+    // Named for its cause: the currency, not an overspend.
     expect(r.reasonCode).toBe('CURRENCY_NOT_ALLOWED');
     expect(r.matched?.constraint?.leftOperand).toBe('mm:payAmount');
   });
@@ -175,7 +175,7 @@ describe('evaluateMandate — scope', () => {
 });
 
 describe('evaluateMandate — which failing constraint is NAMED (reason precedence)', () => {
-  it('a merchant the mandate never allows is named even when the budget ALSO fails (tester rerun 2026-09-24)', () => {
+  it('a merchant the mandate never allows is named even when the budget ALSO fails', () => {
     // cumulativeSpend comes first in the document and fails too; before, this said SPEND_LIMIT_EXCEEDED — as if more
     // budget would have let a disallowed merchant through.
     const r = evaluateMandate(flightMandate, req({ 'mm:payAmount': 100, 'mm:cumulativeSpend': 5000, 'mm:merchant': 'sabre' }));
@@ -396,7 +396,7 @@ describe('sumEventField — the cumulative-spend kernel', () => {
  * A resource-scoped mandate — the generic engine needs zero changes for this: `resource`
  * is just another leftOperand, exactly like `mm:merchant`, confirmed by direct code read
  * of constraintSatisfied() (unprefixed key lookup) before this was wired up
- * (ResourceService.scopeConstraint(), mandate.service.ts's signed operand set).
+ * (ResourceService.scopeConstraint(), the issuer's signed operand set).
  */
 const resourceScopedMandate: Mandate = {
   uid: 'urn:metamynd:mandate:resource-test',
@@ -428,7 +428,7 @@ describe('evaluateMandate — resource scope', () => {
     });
     expect(r.decision).toBe('block');
     // No REASON_BY_OPERAND entry for 'resource' — falls back to CONSTRAINT_FAILED:resource,
-    // exactly as resource.service.ts's own docstring documents.
+    // exactly as the issuer documents it.
     expect(r.reasonCode).toBe('CONSTRAINT_FAILED:resource');
   });
 

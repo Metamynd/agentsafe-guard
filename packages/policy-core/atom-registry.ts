@@ -128,7 +128,7 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
   // is present (e.g. no counterparty resolved) the atom simply does not fire — no guidance.
   'hol-trust-below-review': (c, cfg) =>
     typeof c.holTrustScore === 'number' && c.holTrustScore < Number(cfg?.reviewBelow ?? 60),
-  // --- Owner-keyed context atoms (pre-beta rerun 6, NF-RISK-SELF). For a non-financial action the only risk input
+  // --- Owner-keyed context atoms. For a non-financial action the only risk input
   //     used to be the riskLevel the agent declares about itself: {riskLevel:'low', op:'delete-all'} ran unreviewed.
   //     These let the owner key a rule on WHAT is being done — a field of the context the executor acts on — so the
   //     agent's label no longer decides. See contextValueMatch below for the matching and fail-closed rules. ---
@@ -139,7 +139,7 @@ export const ATOM_REGISTRY: Record<string, (ctx: EvaluationContext, config?: any
   'context-value-not-in': (c, cfg) => contextValueMatch(c, cfg, 'not-in') !== null,
 };
 
-// ─── owner-keyed context values (NF-RISK-SELF) ──────────────────────────────────────────────────────────
+// ─── owner-keyed context values ────────────────────────────────────────────────────────────────────────
 
 /** Why a context-value atom fired: the value is listed / not listed, or the field could not be judged. */
 export interface ContextValueMatch {

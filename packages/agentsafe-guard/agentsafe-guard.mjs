@@ -2,7 +2,7 @@
 //
 // ZERO external dependencies: uses Node's built-in Ed25519 (node:crypto) + fetch (Node 18+),
 // plus policy-core.mjs (the deterministic evaluator, itself dependency-free, generated from
-// backend/src/policy-core). Before an agent performs a governed action the guard can either
+// the policy core, packages/policy-core). Before an agent performs a governed action the guard can either
 // call the AgentSafe authorize gate (trustless fallback) OR evaluate a signed policy bundle
 // LOCALLY (spec §9.2 cooperative mode) — both compute the identical allow/block/escalate
 // verdict from the identical inputs, because they run the same policy-core.
@@ -47,7 +47,7 @@ export function normalizeJurisdiction(value) {
   return trimmed.toUpperCase();
 }
 
-/** The `trace` keys the gate's authorize schema keeps (mandate.controller.ts TraceSchema); it strips any other. */
+/** The `trace` keys the gate's authorize schema keeps (the issuer's trace schema); it strips any other. */
 const TRACE_KEYS = ['workflowId', 'workflowStep', 'parentActionId', 'toolCalls', 'dataSources', 'checksPerformed', 'upstreamEvidenceRefs'];
 
 /**
@@ -74,7 +74,7 @@ const SETTLED_OUTCOMES = new Set(['settled', 'not_executed', 'expired', 'reversi
 
 /**
  * What a gateway older than the approved-context binding (MAGP §9a.5) answers when asked to run an approval: its claim states
- * no context, and the issuer refuses it AUTHORIZATION_CONTEXT_REQUIRED with the hold untouched (pre-beta rerun 6 FW6-1).
+ * no context, and the issuer refuses it AUTHORIZATION_CONTEXT_REQUIRED with the hold untouched.
  */
 const OUTDATED_GATEWAY_CODE = 'AUTHORIZATION_CONTEXT_REQUIRED';
 const OUTDATED_GATEWAY_HINT =
@@ -147,7 +147,7 @@ function withoutUnsignedJurisdiction(context) {
 /**
  * Replay a Merkle sibling chain and report whether it reconstructs `root`.
  *
- * Byte-identical to backend/src/features/magp/merkle.ts: leaves and siblings are hex
+ * Byte-identical to the issuer's evidence Merkle tree: leaves and siblings are hex
  * sha256 digests, and an internal node is sha256 over the CONCATENATED RAW BYTES of its
  * children (not the hex text), in left-then-right order. Hashing the hex strings instead
  * would produce a self-consistent but incompatible tree — one that verified nothing the
@@ -216,14 +216,14 @@ export function executionAdapterFromEnv(env = (typeof process !== 'undefined' ? 
  * Read + parse an agent config file, failing with the NEXT STEP rather than a bare `ENOENT`.
  * `agent.metamynd.json` holds the agent's identity (and, for a managed key, its secret), so it is
  * deliberately gitignored — which means a fresh clone of any agent project can never contain it.
- * A raw "no such file or directory" left a first-time user with no way forward (beta regression
- * 2026-09-20, BR-004); the message below names the three ways to get the file.
+ * A raw "no such file or directory" left a first-time user with no way forward;
+ * the message below names the three ways to get the file.
  */
 function readConfigFile(path, who) {
   let text;
   try {
     // A UTF-8 BOM (Notepad and other Windows tools add one on save) is not JSON whitespace — strip it, or JSON.parse
-    // rejects an otherwise valid file (pre-beta eval 2026-10-11, L6).
+    // rejects an otherwise valid file.
     text = readFileSync(path, 'utf8').replace(/^\uFEFF/, '');
   } catch (e) {
     if (e && e.code === 'ENOENT') {
@@ -251,7 +251,7 @@ function readConfigFile(path, who) {
  * endpoint returns: a URL, a file path, or the config object itself. Overrides win over the config.
  *   const guard = await createGuardFromConfig('./agent.metamynd.json');
  *
- * Passphrase-encrypted key delivery (docs/design/passphrase-encrypted-key-delivery-plan.md): when
+ * Passphrase-encrypted key delivery: when
  * the loaded config carries `agentKeyEncrypted` (no plaintext `agentKey` — the operator set a
  * passphrase at issuance) and no explicit `agentKey`/`keyProvider` override was given, pass
  * `{ passphrase }` here to decrypt it IN-MEMORY before the guard is built:
@@ -300,7 +300,7 @@ export function createGuard(opts = {}) {
   if (cfg && cfg.data && !cfg.agentDid) cfg = cfg.data; // unwrap a { success, data } API response
   // `apiBase` is accepted as an override too — it is the config file's own field name, so a caller pointing a guard at
   // staging or a local gate naturally writes { apiBase }. It used to be silently ignored and the guard went on calling
-  // the config file's apiBase (production) instead (pre-beta eval 2026-10-11, L5).
+  // the config file's apiBase (production) instead.
   const api = opts.api ?? opts.apiBase ?? cfg?.apiBase ?? cfg?.api;
   const agentDid = opts.agentDid ?? cfg?.agentDid;
   if (!api || !agentDid) throw new Error('createGuard requires { api, agentDid } — directly, or via { config } / { configPath } / createGuardFromConfig() — plus either { agentKey } or { keyProvider }');
@@ -308,14 +308,14 @@ export function createGuard(opts = {}) {
   // ExecutionAdapter seam (SAFR §19): an explicit opt wins, else the AGENTSAFE_EXECUTION_MODE env,
   // else live. Applies to every guarded tool unless a tool passes its own adapter.
   const defaultExecutionAdapter = opts.executionAdapter ?? executionAdapterFromEnv() ?? liveExecutionAdapter;
-  // keyProvider seam (docs/design/agent-key-custody-local-signer-daemon-plan.md): defaults to
+  // keyProvider seam (agent key custody; see key-providers.mjs): defaults to
   // 'staticKey' (the raw key in THIS process, today's only behavior before this seam existed) —
   // pass keyProvider:'daemon' + daemonSocketPath to keep the key out of this process entirely.
   // Every place this file used to call a local sign(message) now calls one of the provider's
   // four methods instead — see key-providers.mjs for why there are four, not one.
   const keyProvider = resolveKeyProvider(opts, cfg);
 
-  // Context-claim binding (MAGP §8.3.13, docs/design/context-claim-binding.md): sign the GovernanceEnvelope hash too, so
+  // Context-claim binding (MAGP §8.3.13): sign the GovernanceEnvelope hash too, so
   // the gate and every counterparty can prove the agent's OWN key attested to the context it submitted (itinerary, trace,
   // materiality) — not just the signed action subset — and refuse one rewritten in transit (CONTEXT_SIGNATURE_INVALID).
   // ON by default since 0.17.0; `signContext: false` (option or config file) opts out, and the wire body then carries no
@@ -426,7 +426,7 @@ export function createGuard(opts = {}) {
   let warnedNoRequestDigest = false; // once per guard: the gate predates the resume binding (§9a.5)
   let warnedNoResumeClaim = false; // once per guard: the gate predates the resume claim (§9a.6)
   let warnedNoResumeClaimSigner = false; // once per guard: the signer daemon predates sign-resume-claim (signer 0.23.0)
-  let warnedNoContextDigest = false; // once per guard: the gate predates the approved-context binding (§9a.5, rerun 5 F-1-NF)
+  let warnedNoContextDigest = false; // once per guard: the gate predates the approved-context binding (§9a.5)
   // Escalations being resumed in THIS process right now, by any gated tool of this guard: a second, concurrent resume of
   // the same one is refused instead of racing the first past the "still unused?" check (since 0.22.0).
   const resumesInFlight = new Set();
@@ -438,7 +438,7 @@ export function createGuard(opts = {}) {
   let _bundle = null;
   let _bundleAt = 0;
   let _bundleMaxAgeMs = 10 * 60 * 1000; // overwritten by the bundle's maxStaleness
-  // How old a cached bundle may be for a LOCAL permit or containment refusal (0.30.0, rerun 5 N-1): the agent's live state
+  // How old a cached bundle may be for a LOCAL permit or containment refusal (since 0.30.0): the agent's live state
   // (suspended, reinstated, rules edited) reaches this process within this window, not within maxStaleness. 0 = every time.
   const lifecycleMaxAgeOpt = opts.lifecycleMaxAgeMs ?? cfg?.lifecycleMaxAgeMs;
   const lifecycleMaxAgeMs = typeof lifecycleMaxAgeOpt === 'number' && Number.isFinite(lifecycleMaxAgeOpt) ? Math.max(0, lifecycleMaxAgeOpt) : 5_000;
@@ -530,7 +530,7 @@ export function createGuard(opts = {}) {
     let sent = false; // the request left this process: a failure from here on may follow a hold the gate committed
     try {
       // This is verified SERVER-SIDE by the gate, which independently reconstructs the signed
-      // message via its own authMessage() (mandate.service.ts) — that function ALSO defaults a
+      // message via its own authMessage() (the issuer's) — that function ALSO defaults a
       // missing amount/currency to 0/'USD' before rebuilding the message, regardless of what the
       // wire body actually contains. So the client signs with that same 0/'USD' default whenever
       // a field is genuinely omitted — matching the gate's reconstruction — while the WIRE body
@@ -602,7 +602,7 @@ export function createGuard(opts = {}) {
    * the gate commits it whether or not anyone is waiting. Nothing could use or settle it, and its budget would stay reserved
    * until the TTL. So it is looked up by this request's nonce (GET .../authorize/by-request) and released with this agent's
    * signed void — retried after each of `orphanReleaseDelaysMs`, since the gate may still be working on it. Best effort, in
-   * the background, and it never keeps the process alive. (Since 0.22.0; pre-beta rerun 3, D-7.)
+   * the background, and it never keeps the process alive. (Since 0.22.0.)
    */
   function releaseOrphan(nonce) {
     let attempt = 0;
@@ -756,8 +756,8 @@ export function createGuard(opts = {}) {
       mandate,
       // currency/merchant/resource are signed fields too, same as action/agentDid/amount —
       // omitting them here means a currency-scoped amount-over/cumulative-over Standards/SOP
-      // atom always sees currency as absent and fires closed. Mirrors mandate.service.ts's
-      // ruleCtx (PR #588) and the same fix in agentsafe-mcp-guard.mjs's verdictFromBundle.
+      // atom always sees currency as absent and fires closed. Mirrors the issuer's own rule
+      // context and the same fix in agentsafe-mcp-guard.mjs's verdictFromBundle.
       context: buildRuleContext({ unsigned: context, signed: { action, agentDid, amount, currency, merchant, resource, ...(jurisdiction ? { jurisdiction } : {}) }, riskFloor: effectiveRiskFloor(mandate, action, amount) }),
       mandateRequest: mandate
         ? {
@@ -774,7 +774,7 @@ export function createGuard(opts = {}) {
               // the same default this file already uses for authorize()/buildSignedRequest().
               'mm:currency': currency,
               // Unprefixed `resource` (not `mm:resource`) to match the constraint's own
-              // leftOperand (ResourceService.scopeConstraint()) — mirrors mandate.service.ts.
+              // leftOperand (ResourceService.scopeConstraint()) — mirrors the issuer.
               resource,
               // The allowed-jurisdictions term: with none signed it fails JURISDICTION_REQUIRED, as at the gate.
               'mm:jurisdiction': jurisdiction,
@@ -876,17 +876,17 @@ export function createGuard(opts = {}) {
     return _anchor;
   }
 
-  // Verdicts the backend's /policy/decisions/local accepts (local-decision.service.ts's LOCAL_DECISIONS). Since 0.31.1 a
+  // Verdicts the issuer's /policy/decisions/local accepts. Since 0.31.1 a
   // containment refusal ('suspend' / 'quarantine', given from the server's own `contained` flag) is reported too: the
-  // containment is the server's state, but that a contained agent kept TRYING was recorded nowhere (pre-beta rerun 5,
-  // N-4). An issuer that predates it refuses the report, which is fire-and-forget, so nothing else changes there.
+  // containment is the server's state, but that a contained agent kept TRYING was recorded nowhere.
+  // An issuer that predates it refuses the report, which is fire-and-forget, so nothing else changes there.
   const REPORTABLE_LOCAL_DECISIONS = new Set(['allow', 'observe', 'block', 'escalate', 'suspend', 'quarantine']);
 
   /**
    * Best-effort, NEVER awaited by the caller: reports a purely-local verdict to the gate
    * for audit VISIBILITY only (Activity Log / fleet decision-mix / regulator log otherwise
    * show nothing for the large majority of decisions under the default local-first mode —
-   * see docs/design/... and this package's own README "Enforcement mode" section for why
+   * see this package's own README "Enforcement mode" section for why
    * that's a deliberate security tradeoff, not a bug, but one that used to leave zero trail
    * anywhere). Silently does nothing if the keyProvider doesn't support it (e.g. the daemon
    * keyProvider, which doesn't implement signLocalDecision in this version) or the verdict
@@ -946,8 +946,8 @@ export function createGuard(opts = {}) {
     const { action, amount = 0 } = input;
     // A local PERMIT, or a local refusal for containment, rests on the agent's live state (suspended, quarantined, the
     // rules as they stand) — which the cached bundle may have outlived: it is kept for its maxStaleness (10 minutes), so a
-    // suspended agent's process kept permitting value-less calls, and a reinstated one kept refusing, for that long
-    // (pre-beta rerun 5, N-1). Such a verdict is only given on a bundle younger than `lifecycleMaxAgeMs` (5 s by default);
+    // suspended agent's process kept permitting value-less calls, and a reinstated one kept refusing, for that long.
+    // Such a verdict is only given on a bundle younger than `lifecycleMaxAgeMs` (5 s by default);
     // an older one is fetched again first, and if that fails the authoritative gate decides. A rule BLOCK is still decided
     // on the cached bundle with no network: refusing on slightly older rules can only refuse more, not run anything.
     const onFreshBundle = async (decide) => {
@@ -1007,8 +1007,8 @@ export function createGuard(opts = {}) {
     // An ESCALATE asks a person to decide, and the person can only see what the gate recorded: the escalation, its
     // escalationId (what escalationStatus() polls) and the evidence event all exist only once the gate has parked the
     // action. Decided here, none of them did — the owner's Escalations queue never showed it, nothing could approve it,
-    // and the scaffold's "approve it in the dashboard and the action resumes" could not come true (2026-10-02 pre-beta
-    // evaluation, H-1). So it goes to the gate, which is authoritative anyway, exactly as an allowed value action is
+    // and the scaffold's "approve it in the dashboard and the action resumes" could not come true.
+    // So it goes to the gate, which is authoritative anyway, exactly as an allowed value action is
     // sealed there. Pure offline (sealValueActions:false) has no gate to park it at, so it stays local there.
     if (local.decision === 'escalate' && sealValueActions) return authorize(input);
     // allow/observe both PERMIT; block/contain (and an offline escalate) are decided locally with no network.
@@ -1136,7 +1136,7 @@ export function createGuard(opts = {}) {
    */
   function guardTool(action, handler, mapArgs = (a) => a, toolOpts = {}) {
     const adapter = toolOpts.executionAdapter ?? defaultExecutionAdapter;
-    // What becomes of the hold an allowed call was granted (since 0.21.0; pre-beta rerun 3, D-2/D-3). Left alone, an unclaimed
+    // What becomes of the hold an allowed call was granted (since 0.21.0). Left alone, an unclaimed
     // hold lapses with its TTL: a tool that RAN gave its budget back after 15 minutes (the cumulative cap could be spent
     // again), and one that FAILED kept the budget reserved until then.
     //   - success → captured at the authorized amount (`settle: 'none'` opts out). Where a gateway claimed the hold it has
@@ -1163,7 +1163,7 @@ export function createGuard(opts = {}) {
     // A capture that cannot reach the gate is retried briefly: one that never lands lets the hold of an action that RAN
     // lapse with its TTL, and its spend stop counting against the cap. A refusal (already settled by a gateway) is final.
     //
-    // A hold a counterparty CLAIMED is not this agent's to settle (0.27.0, pre-beta rerun 4 F-3): the gateway that ran the
+    // A hold a counterparty CLAIMED is not this agent's to settle (since 0.27.0): the gateway that ran the
     // tool claimed it before executing and settles it itself, at what it really charged and attested as its own. Capturing
     // here raced that settlement — an agent's full-amount capture landing first was recorded `unattested` and the gateway's
     // own (possibly lower) charge was refused HOLD_STATE_CHANGED. The claim precedes execution and execution precedes the
@@ -1181,7 +1181,7 @@ export function createGuard(opts = {}) {
     // CLAIMED by it before it executes. So once such a tool returns, an unclaimed hold means the gateway ran nothing: it
     // refused (a body it could not bind, a route mismatch, a replay) and the tool returned its answer instead of throwing.
     // Capturing that hold booked a refusal as spend: the Activity Log showed an agent-side capture beside the gateway's own
-    // refusal report, and the budget counted money that never moved (0.37.0, pre-beta rerun 2026-10-12, D-5). It is released
+    // refusal report, and the budget counted money that never moved (fixed in 0.37.0). It is released
     // instead. A call with no amount is still settled at 0: a non-financial gateway runs it without claiming anything.
     async function settleDelegated(authorizationId, amount) {
       const fx = await effectStatus(authorizationId);
@@ -1195,7 +1195,7 @@ export function createGuard(opts = {}) {
     async function run(args, permit, mapped) {
       let delegated = false;
       // The headers a tool hands a MAGP-protected service (a gateway) to have THIS permitted call executed there
-      // (0.31.0; pre-beta rerun 5, FW N-3): the same request, freshly signed with its payload bound, carrying the
+      // (since 0.31.0): the same request, freshly signed with its payload bound, carrying the
       // authorization it was granted. Python's guarded tools have governance_headers(); a Node tool used to rebuild and
       // re-sign the request by hand. Non-enumerable, so a decision compared or logged as data is unchanged.
       const decision = Object.defineProperty({ ...permit }, 'governanceHeaders', {
@@ -1211,7 +1211,7 @@ export function createGuard(opts = {}) {
         // ExecutionAdapter seam (§19): the adapter runs the real handler (proceed) or substitutes it.
         result = await adapter({ action, args, decision, proceed: () => handler(args, decision) });
       } catch (err) {
-        // A gateway that predates the approved-context binding refused to claim the approval (0.34.0, pre-beta rerun 6 FW6-1).
+        // A gateway that predates the approved-context binding refused to claim the approval (since 0.34.0).
         // Nothing ran there and the hold is unclaimed, so it is KEPT: voiding it left the owner to approve the same request
         // again, and the next resume misreported the voided hold as AUTHORIZATION_ALREADY_USED. The issuer re-opens the one
         // resume for it, so resume() works again once the gateway is upgraded. The error says which gateway to upgrade.
@@ -1227,7 +1227,7 @@ export function createGuard(opts = {}) {
       }
       // A call that names no amount was authorized at 0 and, decided by the remote gate (remote mode, a stale bundle, an
       // approved resume), still got a hold: it is settled at 0 — "it ran, it spent nothing" — or it sat `held` until its TTL
-      // and then read as `expired`, an action that never ran (0.33.1, pre-beta rerun 6 FW6-4). A local permit has no hold.
+      // and then read as `expired`, an action that never ran (fixed in 0.33.1). A local permit has no hold.
       const ranAmount = mapped?.amount ?? 0;
       if (decision.authorizationId && settle === 'capture' && typeof ranAmount === 'number') {
         if (delegated && ranAmount > 0) await settleDelegated(decision.authorizationId, ranAmount);
@@ -1291,7 +1291,7 @@ export function createGuard(opts = {}) {
       }
     };
     // 'claimed' | 'unsupported' (no signer for it, or an issuer that predates it: run as before) | a refusal code.
-    // `digests` (0.32.0, pre-beta rerun 6 F-1-NF-R): { requestDigest, contextDigest } of the request THESE args map to. Signed as
+    // `digests` (since 0.32.0): { requestDigest, contextDigest } of the request THESE args map to. Signed as
     // MAGP-RESUME-CLAIM-v2 when the issuer asks for it (`resumeClaimVersion` >= 2 on the status), so the issuer itself refuses
     // a resume of anything but the approved request and context; an older issuer only knows v1 and gets v1.
     const claimResume = async (escalationId, authorizationId, digests) => {
@@ -1364,7 +1364,7 @@ export function createGuard(opts = {}) {
         const unreachable = fx?.effectState === 'unreachable';
         // A VOIDED hold was never used: it was released (by this agent after a failed run, its owner, a revoke…), and nothing
         // can run under it now. Saying AUTHORIZATION_ALREADY_USED sent the developer looking for a run that never happened
-        // (0.34.0, pre-beta rerun 6 FW6-1): say what became of it, and that the owner must approve again.
+        // (fixed in 0.34.0): say what became of it, and that the owner must approve again.
         if (!unreachable && fx?.spendStatus === 'voided') {
           throw refusal({ decision: 'block', reasonCode: 'AUTHORIZATION_VOIDED', escalationId, authorizationId: st.authorizationId, status: 'approved', outcome: fx.outcome ?? null, hint: "the approval's hold was voided, so nothing can run under it — its owner must approve the request again" });
         }

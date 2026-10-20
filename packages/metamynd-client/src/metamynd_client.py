@@ -181,9 +181,9 @@ __all__ = [
     "ToolNotExecuted",
 ]
 
-__version__ = "0.24.1"
+__version__ = "0.24.2"
 
-DEFAULT_API = "http://localhost:9926/api/v1"
+DEFAULT_API = "https://metamynd.ai/api/v1"
 
 # Identify the client explicitly. urllib otherwise sends "Python-urllib/3.x", which the
 # CDN in front of the production gate blocks outright: every call comes back
@@ -305,7 +305,8 @@ def utc_now_rfc3339() -> str:
 
 
 def _escape_field(value: str) -> str:
-    """Mirrors backend/src/policy-core/canonical.ts's escapeField exactly: `\\` and `|` in a
+    """Mirrors the issuer's escapeField exactly (packages/policy-core/canonical.ts in
+    github.com/Metamynd/agentsafe-guard): `\\` and `|` in a
     field's string form must never be mistaken for the `|` delimiter or another escape."""
     return value.replace("\\", "\\\\").replace("|", "\\|")
 
@@ -325,8 +326,8 @@ def canonical_message(
     """The UTF-8 string that gets signed (MAGP §8.3.1).
 
     EIGHT fields, "|"-delimited, in this order, each escaped so a field value can never be
-    mistaken for the delimiter — mirrors backend/src/policy-core/canonical.ts's
-    buildAuthMessage/escapeField exactly. `resource` was added between merchant and nonce by
+    mistaken for the delimiter — mirrors the issuer's buildAuthMessage/escapeField exactly
+    (packages/policy-core/canonical.ts in github.com/Metamynd/agentsafe-guard). `resource` was added between merchant and nonce by
     a later release; omit it (or pass None) for a non-resource-scoped request, the same ""
     a verifier defaults an absent one to. The verifier reconstructs this string from the
     fields it received rather than trusting a client-sent message (§8.3.2), which is why
@@ -483,7 +484,7 @@ def payload_digest(value: Any) -> str:
     return PAYLOAD_DIGEST_PREFIX + hashlib.sha256(canonical_payload(value).encode("utf-8")).hexdigest()
 
 
-# Effect outcomes after which a hold is final: nothing is left for an agent to capture (F-3).
+# Effect outcomes after which a hold is final: nothing is left for an agent to capture.
 _SETTLED_OUTCOMES = frozenset({"settled", "not_executed", "expired", "reversing", "reversed", "reversal_failed"})
 
 RESUME_BINDING_PREFIX = "MAGP-RESUME-BIND-v1"
@@ -505,7 +506,7 @@ def _resume_amount(amount: Any) -> str:
 
 
 RESUME_CLAIM_PREFIX = "MAGP-RESUME-CLAIM-v1"
-# v2 (0.19.0, pre-beta rerun 6 F-1-NF-R): the claim also signs the digests of the request and context about to run, so the gate
+# v2 (0.19.0): the claim also signs the digests of the request and context about to run, so the gate
 # itself refuses a resume of anything but what the person approved — not only this SDK, which an outdated copy cannot apply.
 RESUME_CLAIM_V2_PREFIX = "MAGP-RESUME-CLAIM-v2"
 
@@ -746,7 +747,7 @@ class EscalationStatus:
 
     @property
     def executed(self) -> Optional[bool]:
-        """Whether something ran, or may have run, under the approval (0.21.0, pre-beta rerun 6 resume-status nit). `status`
+        """Whether something ran, or may have run, under the approval (0.21.0). `status`
         stays `approved` after the action ran, so this says it. None from a gate that predates the field."""
         value = self.raw.get("executed")
         return value if isinstance(value, bool) else None
@@ -1168,7 +1169,7 @@ def decrypt_agent_key(ciphertext: str, passphrase: str, salt: str) -> str:
 # The production gate sits behind a CDN that answers on two IPv6 and two IPv4 addresses. urllib connects through
 # socket.create_connection, which tries them ONE AT A TIME, IPv6 first, each with the full client timeout. On a network
 # that drops some IPv6 SYNs, a call stalled for 15 s or 30 s (one or two dead IPv6 attempts) before IPv4 answered in
-# 80 ms: 6 of 29 authorize calls in the 2026-10-09 pre-beta evaluation (M1). The Node guard never stalled because Node
+# 80 ms, on a noticeable share of authorize calls. The Node guard never stalled because Node
 # races address families (Happy Eyeballs). So does this, after RFC 8305: start the next address 250 ms after the last
 # one if nothing has connected yet, keep every attempt running, take the first that connects. The whole connect phase
 # stays inside the client's `timeout`.
@@ -1304,7 +1305,7 @@ class MetaMyndClient:
         connection), the gate may still have committed a hold nobody can use or settle. After each of these delays (seconds)
         the client looks it up by the request's nonce and releases it with this agent's signed void; `()` turns it off.
         """
-        # Pre-beta rerun 6 FW N-4: refuse a missing api or agent DID here, at construction, as the Node
+        # Refuse a missing api or agent DID here, at construction, as the Node
         # guard's createGuard does (`if (!api || !agentDid) throw`) — the same rule, no stricter, so the two
         # languages agree. Before this, Python built the client and sent an empty DID to the gate, which
         # refused it MALFORMED_REQUEST: fail-closed either way, but a different place and a different error.
@@ -1337,15 +1338,15 @@ class MetaMyndClient:
         (`agentKey`; or `keyProvider: "daemon"` with `daemonSocketPath`; or `agentKeyEncrypted`, decrypted with
         `passphrase`). `signContext: false` in the file turns context signing off. Keyword `overrides` win over the file
         (`api`, `agent_did`, `agent_key`, `daemon_socket`, `timeout`, `sign_context`, ...). A `{success, data}` API
-        response is unwrapped. Pre-beta evaluation 2026-10-09, L5a: there was no loader, so every Python example rebuilt
-        it from environment variables by hand.
+        response is unwrapped. Before this loader existed, every Python example rebuilt the client from environment
+        variables by hand.
 
         `api_base` is accepted as an alias of `api` (0.23.1), matching the Node guard's `{ apiBase }` override; `api` wins
         if both are given. A leading UTF-8 byte-order mark in the file (Notepad and other Windows editors add one) is
-        ignored (pre-beta evaluation 2026-10-11, L5/L6).
+        ignored.
 
             client = MetaMyndClient.from_config("agent.metamynd.json")
-            local = MetaMyndClient.from_config("agent.metamynd.json", api="http://localhost:9926/api/v1")
+            local = MetaMyndClient.from_config("agent.metamynd.json", api="https://gate.example.com/api/v1")
         """
         if isinstance(source, Mapping):
             cfg: Mapping[str, Any] = source
@@ -1669,7 +1670,7 @@ class MetaMyndClient:
         return self._settlement(f"/policy/mandate/authorize/{urllib.parse.quote(authorization_id, safe='')}/void", body)
 
     def _release_orphan(self, nonce: str) -> None:
-        """Release the hold an unanswered authorize may have minted (0.13.0; pre-beta rerun 3, D-7). Looked up by the request's
+        """Release the hold an unanswered authorize may have minted (0.13.0). Looked up by the request's
         nonce (GET .../authorize/by-request), retried after each of `orphan_release_delays`, released with this agent's signed
         void. Best effort, on a daemon thread: the hold's TTL is the backstop."""
         if not nonce or not self.orphan_release_delays:
@@ -1717,7 +1718,7 @@ class MetaMyndClient:
         gate predates it (the resume then runs unclaimed, as before); or the refusal code, e.g. AUTHORIZATION_IN_USE when
         another process took it first, or SIGNER_UNREACHABLE when the daemon cannot sign. Raises GateUnreachable when the gate cannot be reached — never run a resume the gate was not told about.
 
-        With `request_digest` and `context_digest` (0.19.0, pre-beta rerun 6 F-1-NF-R) — the digests of the call about to run —
+        With `request_digest` and `context_digest` (0.19.0) — the digests of the call about to run —
         the claim is signed as MAGP-RESUME-CLAIM-v2 and the gate refuses it unless they are the approved request and context.
         """
         self._resume_refusal_detail = None
@@ -1792,7 +1793,7 @@ class MetaMyndClient:
         message = str(payload.get("message") or data.get("reasonCode") or "")
         # The code, never the sentence: `data.reasonCode` first (the one field every refusal carries, and the only place
         # the code is on a 200 NOT_HELD void), then the bare-code `message` of the standard refusal body (MAGP §8.7.8).
-        # On success, the code the gate gave (a void's `HOLD_VOIDED`, as the Node guard reports it; pre-beta rerun 4, F-10), or
+        # On success, the code the gate gave (a void's `HOLD_VOIDED`, as the Node guard reports it), or
         # "" when it gave none (a capture).
         reason_code = str(data.get("reasonCode") or "") if ok else str(data.get("reasonCode") or payload.get("message") or "REFUSED")
         return SettlementResult(ok=ok, message=message, raw=data, reason_code=reason_code, detail=str(data.get("detail") or ""))
@@ -1897,7 +1898,7 @@ def _loads(raw: bytes, what: str) -> Any:
 
 class GateUnreachable(RuntimeError):
     """The gate could not be reached (0.11.0). Still a RuntimeError, so `except RuntimeError` keeps working; it adds the
-    machine-readable code every other refusal has (L-g, 2026-10-03 pre-beta rerun), the one the Node guard reports.
+    machine-readable code every other refusal has, the one the Node guard reports.
     Fail closed: nothing was decided, so nothing may run."""
 
     reason_code = "GATE_UNREACHABLE"
@@ -1907,7 +1908,7 @@ class GovernanceBlocked(RuntimeError):
     """Raised instead of running a tool the gate did not permit."""
 
     def __init__(self, verdict: Verdict, action: str):
-        # Name the risk the issuer derived, as the Node guard's message does (0.18.1; pre-beta rerun 5, FW N-1): a $200
+        # Name the risk the issuer derived, as the Node guard's message does (0.18.1): a $200
         # "low" booking held for review otherwise reads as an unexplained RISK_REVIEW.
         derived = "; ".join(f"{s.get('signal')}: {s.get('detail') or s.get('level')}" for s in (verdict.risk_signals or []))
         why = f" (risk derived by the issuer: {derived})" if derived else ""
@@ -1926,7 +1927,7 @@ class ToolNotExecuted(Exception):
 
 
 # What a gateway older than the approved-context binding (MAGP 9a.5) answers when asked to run an approval: its claim states
-# no context, and the gate refuses it AUTHORIZATION_CONTEXT_REQUIRED with the hold untouched (pre-beta rerun 6 FW6-1).
+# no context, and the gate refuses it AUTHORIZATION_CONTEXT_REQUIRED with the hold untouched.
 OUTDATED_GATEWAY_CODE = "AUTHORIZATION_CONTEXT_REQUIRED"
 OUTDATED_GATEWAY_HINT = (
     "the gateway this tool called predates the approved-context binding (MAGP 9a.5), so it could not claim the approval and ran "
@@ -1968,8 +1969,8 @@ def _explain_outdated_gateway(exc: BaseException) -> None:
 _NO_DECISION_REASONS = frozenset({"", "UNKNOWN", "REFUSED", "GATE_UNREACHABLE"})
 
 # Refusals by a limit that frees itself over time: the same request can pass later, though no change of arguments makes
-# it pass now. "Do not retry" was wrong for these (pre-beta evaluation 2026-10-03, L-a: the shared sandbox's per-caller
-# share refills as its window rolls).
+# it pass now. "Do not retry" was wrong for these (e.g. the shared sandbox's per-caller share refills as
+# its window rolls).
 _TIME_BOUND_REASONS = frozenset({"SANDBOX_CALLER_SHARE_EXCEEDED", "RATE_LIMIT_EXCEEDED", "CIRCUIT_BREAKER_OPEN"})
 
 
@@ -2032,7 +2033,7 @@ def guard_tool(
 
     Every gate answer, a permit included, reaches `on_verdict(verdict)` when it is given (0.23.0), before the tool runs or
     the refusal is returned: the place to log `verdict.authorization_id` and `verdict.event_id`, which a permitted call's
-    result otherwise hides (pre-beta 2026-10-09, L5b). Inside the running tool, `current_verdict()` returns the same
+    result otherwise hides. Inside the running tool, `current_verdict()` returns the same
     Verdict. A callback that raises is reported as a warning and never changes the outcome. With an async tool it is
     called from the worker thread that made the gate call.
 
@@ -2188,7 +2189,7 @@ def guard_tool(
                 jurisdiction=payload.get("jurisdiction"),
             )
         except GateUnreachable as exc:
-            # No decision is a block (rule 5), and a block with its code like any other (L-g): raised as GovernanceBlocked
+            # No decision is a block (rule 5), and a block with its code like any other: raised as GovernanceBlocked
             # (still a RuntimeError), or under on_refusal="return" handed to the model as a GovernanceRefusal that says
             # the gate gave no decision and the call may be retried later — not a bare framework error.
             raise _guard_refusal(Verdict(decision="block", reason_code=GateUnreachable.reason_code, hint=str(exc))) from exc
@@ -2233,8 +2234,8 @@ def guard_tool(
             raise _guard_refusal(Verdict(decision="block", reason_code=GateUnreachable.reason_code, escalation_id=escalation_id, hint=str(exc))) from exc
         if used.outcome != "not_started":
             # A VOIDED hold was never used: it was released (by this agent after a failed run, its owner, a revoke…) and nothing
-            # can run under it. AUTHORIZATION_ALREADY_USED sent the developer looking for a run that never happened (0.20.0,
-            # pre-beta rerun 6 FW6-1): say what became of it, and that the owner must approve again.
+            # can run under it. AUTHORIZATION_ALREADY_USED sent the developer looking for a run that never happened (0.20.0):
+            # say what became of it, and that the owner must approve again.
             if used.spend_status == "voided":
                 raise _guard_refusal(Verdict(decision="block", reason_code="AUTHORIZATION_VOIDED", authorization_id=state.authorization_id,
                                              escalation_id=escalation_id,
@@ -2283,7 +2284,7 @@ def guard_tool(
         # is refused AUTHORIZATION_IN_USE instead of running an in-process tool twice (the in-process lock covers one process
         # only). Taken last, right before the tool runs: it is at most once, so nothing that could still fail locally comes after.
         try:
-            # v2 (0.19.0, F-1-NF-R): a gate that asks for it gets the digests of THIS call, computed from its args (never echoed
+            # v2 (0.19.0): a gate that asks for it gets the digests of THIS call, computed from its args (never echoed
             # from the status), so the gate itself refuses anything but the approved request and context. An older gate gets v1.
             digests: "dict[str, str]" = {}
             if _int_or_zero(state.raw.get("resumeClaimVersion")) >= 2:
@@ -2333,7 +2334,7 @@ def guard_tool(
     def _after_failure(verdict: "Verdict", exc: BaseException) -> None:
         """Release the hold of a call that cannot have run; keep it otherwise. Best effort: the TTL is the backstop."""
         _take_handed_off(verdict)  # a failure is settled by its exception, not by the hand-off; forget the mark
-        # A gateway that predates the approved-context binding refused to claim the approval (0.20.0, pre-beta rerun 6 FW6-1):
+        # A gateway that predates the approved-context binding refused to claim the approval (0.20.0):
         # nothing ran there and the hold is unclaimed, so it is KEPT. Voiding it left the owner to approve the same request
         # again, and the next resume misreported it as AUTHORIZATION_ALREADY_USED. The gate re-opens the one resume for it, so
         # resume() works again once the gateway is upgraded. The exception says which gateway to upgrade.
@@ -2352,11 +2353,11 @@ def guard_tool(
         """Commit the hold of a call that ran, at the authorized amount. Best effort; a gateway may already have."""
         # A call that names no amount was authorized at 0 (_gate sends `payload.get("amount", 0)`), and the gate holds it all
         # the same: settled here at 0 — "it ran, it spent nothing" — or it sat `held` until its TTL and then read as `expired`,
-        # an action that never ran (0.19.2, pre-beta rerun 6 FW6-4). A zero capture of an unclaimed hold commits no spend.
+        # an action that never ran (0.19.2). A zero capture of an unclaimed hold commits no spend.
         amount = payload.get("amount", 0)
         if settle != "capture" or not verdict.authorization_id or isinstance(amount, bool) or not isinstance(amount, (int, float)):
             return
-        # A hold a counterparty CLAIMED is not this agent's to settle (0.16.0, pre-beta rerun 4 F-3): the gateway that ran the
+        # A hold a counterparty CLAIMED is not this agent's to settle (0.16.0): the gateway that ran the
         # tool claimed it before executing and settles it itself, at what it really charged. Capturing here raced that and
         # left the settlement `unattested`. Only when the gate cannot be asked does the agent capture (the safe side).
         handed_off = _take_handed_off(verdict)
@@ -2366,8 +2367,8 @@ def guard_tool(
                 return
             # A tool that asked for governance_headers() handed the call to a gateway, and a value-bearing call a gateway
             # runs is CLAIMED before it executes. Unclaimed now (the gate says so plainly) means the gateway ran nothing: it
-            # refused, and the tool returned that answer instead of raising. Capturing it booked a refusal as spend (0.24.0,
-            # pre-beta rerun 2026-10-12, D-5), so it is released. A call with no amount is still settled at 0: a
+            # refused, and the tool returned that answer instead of raising. Capturing it booked a refusal as spend (0.24.0),
+            # so it is released. A call with no amount is still settled at 0: a
             # non-financial gateway runs it without claiming anything.
             if handed_off and amount > 0 and state.raw.get("claimed") is False:
                 try:
@@ -2464,7 +2465,7 @@ def guard_tool(
             if on_refusal == "raise":
                 raise
             # Returned, not raised: a framework running sibling sync calls in parallel threads would otherwise abort the
-            # turn on this exception while those siblings run on unobserved (M-5). The tool has not been touched.
+            # turn on this exception while those siblings run on unobserved. The tool has not been touched.
             return _refused(refused)
         # While the tool runs, the signed request is available to it WITHOUT appearing in its
         # signature (which frameworks read to build the tool's schema): a tool that calls a
@@ -2571,7 +2572,7 @@ def guard_langchain_tool(
     """`guard_agent_tool` as a LangChain `StructuredTool` whose refusal is an ERROR tool message (0.23.0).
 
     Given to LangGraph's `ToolNode`, `guard_agent_tool`'s refusal is an ordinary result, so its `ToolMessage` says
-    `status="success"` (pre-beta 2026-10-09, L5c): code that branches on the status reads a refused payment as done. This
+    `status="success"`: code that branches on the status reads a refused payment as done. This
     tool raises a `ToolException` instead and handles it itself (`handle_tool_error=True`), so the refusal is a
     `ToolMessage` with `status="error"` and the refusal JSON as its content, and the turn still completes: the exception
     never reaches `ToolNode`, so sibling calls are unaffected. Needs `langchain-core`.
@@ -2617,7 +2618,7 @@ _VERDICT: "contextvars.ContextVar[Optional[Verdict]]" = contextvars.ContextVar("
 
 def current_verdict() -> Optional[Verdict]:
     """The Verdict of the `guard_tool` call this code is running inside, or None (0.23.0): `authorization_id`,
-    `event_id` and the rest, which a permitted call's result does not carry (pre-beta 2026-10-09, L5b)."""
+    `event_id` and the rest, which a permitted call's result does not carry."""
     return _VERDICT.get()
 
 
@@ -2627,7 +2628,7 @@ def current_governance() -> Optional[SignedRequest]:
 
 
 # The guarded calls (by Verdict identity) whose tool asked for governance_headers(), i.e. handed the call to a gateway
-# (0.24.0, D-5). A Verdict is frozen and holds a dict, so it cannot be a set member itself; it stays alive until its call is
+# (0.24.0). A Verdict is frozen and holds a dict, so it cannot be a set member itself; it stays alive until its call is
 # settled, which is when its mark is taken, so its id is not reused meanwhile. Shared across threads: a sync tool may call
 # governance_headers() from a worker thread, and _after_success runs in one.
 _HANDED_OFF: "set[int]" = set()
@@ -2971,7 +2972,7 @@ def _selftest_gate() -> None:
         assert not again_captured.ok and again_captured.reason_code == "NOT_HELD", "a repeat capture is 409 NOT_HELD — read outcome()"
         assert client.capture("missing", 100).reason_code == "AUTHORIZATION_NOT_FOUND"
         voided = client.void("auth-9")
-        assert voided.ok and voided.reason_code == "HOLD_VOIDED", "a void says HOLD_VOIDED, as the Node guard does (F-10)"
+        assert voided.ok and voided.reason_code == "HOLD_VOIDED", "a void says HOLD_VOIDED, as the Node guard does"
         claimed = client.void("claimed-1")
         assert not claimed.ok and claimed.reason_code == "COUNTERPARTY_MISMATCH", claimed
         assert seen[-1][1] == {} or "reason" not in seen[-1][1]

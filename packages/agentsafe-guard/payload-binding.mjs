@@ -1,4 +1,4 @@
-// GENERATED from backend/src/features/magp/payload-binding.ts - do not edit. Regenerate: npm run build:guard-core
+// GENERATED from the issuer's payload-binding.ts — do not edit.
 
 // src/features/magp/payload-binding.ts
 import { createHash } from "node:crypto";

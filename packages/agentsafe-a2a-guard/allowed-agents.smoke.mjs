@@ -1,5 +1,5 @@
-// allowed-agents.smoke.mjs (A2A receiver; same contract as agentsafe-mcp-guard's) — gateway authority (XT-1, refined by the
-// 2026-10-04 Gateway Authority Refinement Plan; MAGP §16.3): an agent that acts with its owner's credentials names the agents
+// allowed-agents.smoke.mjs (A2A receiver; same contract as agentsafe-mcp-guard's) — gateway authority
+// (MAGP §16.3): an agent that acts with its owner's credentials names the agents
 // it accepts tasks from (unset is a startup error), is bound to the principal that owns those credentials, and may narrow
 // admission per skill.
 //

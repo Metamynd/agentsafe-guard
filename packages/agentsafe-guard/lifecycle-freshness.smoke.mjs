@@ -1,5 +1,4 @@
-// lifecycle-freshness.smoke.mjs — a suspension or a reinstatement reaches a running agent within seconds (0.30.0; pre-beta
-// rerun 5, N-1).
+// lifecycle-freshness.smoke.mjs — a suspension or a reinstatement reaches a running agent within seconds (0.30.0).
 //
 // Before: the local-first guard decided against a bundle cached for its maxStaleness (10 minutes). A process that loaded
 // it while the agent was ACTIVE kept permitting value-less calls after the owner suspended the agent (only a gateway

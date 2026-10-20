@@ -73,7 +73,7 @@ function reasonFor(constraint: Constraint | undefined, req: MandateRequest): str
     return v === undefined || v === null || v === '' ? 'JURISDICTION_REQUIRED' : 'JURISDICTION_NOT_ALLOWED';
   }
   // A constraint denominated in a currency fails on ANY other currency, whatever the amount (constraintSatisfied, strict).
-  // Naming that SPEND_LIMIT_EXCEEDED told the developer to ask for less (pre-beta evaluation 2026-10-09, M2).
+  // Naming that SPEND_LIMIT_EXCEEDED told the developer to ask for less.
   if (constraint.unit && !unitMatches(constraint, req)) return 'CURRENCY_NOT_ALLOWED';
   return ownEntry(REASON_BY_OPERAND, leftOperand) ?? `CONSTRAINT_FAILED:${leftOperand}`;
 }
@@ -245,8 +245,8 @@ export function evaluateMandate(mandate: Mandate, req: MandateRequest): MandateR
 /**
  * Which of several failing constraints to NAME. Same reasoning as isAuthorityFailure above, one level down: a
  * categorical constraint (a merchant, route or counterparty that is not allowed at ANY amount) is why the request
- * failed, even when a budget constraint that happens to come first in the document also fails. A tester's run showed
- * it: with the budget used up, a request to a merchant the mandate never allowed came back SPEND_LIMIT_EXCEEDED —
+ * failed, even when a budget constraint that happens to come first in the document also fails. Otherwise,
+ * with the budget used up, a request to a merchant the mandate never allowed came back SPEND_LIMIT_EXCEEDED —
  * which tells the reader that more budget would have let it through. It would not.
  *
  * Reason only, never the verdict: the decision stays the first failing constraint's `onFail`, and a categorical

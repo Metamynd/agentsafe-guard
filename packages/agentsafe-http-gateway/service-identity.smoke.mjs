@@ -1,4 +1,4 @@
-// service-identity.smoke.mjs — the gateway's own identity without hand-written key code (pre-beta 2026-10-09, M4):
+// service-identity.smoke.mjs — the gateway's own identity without hand-written key code:
 // `service-id` makes a did:key + key file, `accept-challenge` signs the dashboard's registration challenge with it, and the
 // signature verifies against the DID exactly as the issuer checks it.
 //
@@ -51,7 +51,7 @@ test('write then read round-trips; an existing file is not overwritten without f
   if (process.platform !== 'win32') assert.equal(statSync(p).mode & 0o777, 0o600);
 });
 
-test('a service identity file saved with a UTF-8 BOM (Notepad) still reads (pre-beta eval 2026-10-11, L6)', () => {
+test('a service identity file saved with a UTF-8 BOM (Notepad) still reads', () => {
   const p = join(dir, 'id-bom.json');
   const id = createServiceIdentity();
   writeFileSync(p, String.fromCharCode(0xfeff) + JSON.stringify(id, null, 2), 'utf8');

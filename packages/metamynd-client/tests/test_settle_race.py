@@ -1,4 +1,4 @@
-"""A hold the tool's gateway claimed is the gateway's to settle (0.16.0; pre-beta rerun 4, F-3).
+"""A hold the tool's gateway claimed is the gateway's to settle (0.16.0).
 
 Before: guard_tool captured every hold of a call that ran, at the full authorized amount. When the tool was a gateway that
 claimed the hold and settles it itself, the agent's capture raced the gateway's: landing first, it was recorded

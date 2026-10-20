@@ -1,4 +1,4 @@
-"""An agent settling its OWN hold that nobody has claimed (MAGP section 8.7.4; 2026-10-03 pre-beta rerun, N-8).
+"""An agent settling its OWN hold that nobody has claimed (MAGP section 8.7.4).
 
 The gate used to accept an unsigned capture or void of an unclaimed hold from anyone holding the authorization id — which the
 agent hands to every gateway it asks to execute. It now takes one only from the hold's agent (a MAGP-SETTLE-v1 signature) or a
@@ -40,7 +40,7 @@ class SettleSignature(unittest.TestCase):
             return False
 
     def test_the_message_matches_the_issuer_byte_for_byte(self) -> None:
-        # The same vector backend/src/features/policy/mandate/settle-authority.test.ts pins.
+        # The same vector the issuer's own settle-authority test pins.
         self.assertEqual(agent_settle_message("void", "did:x", "a", "n", "t", ["why|not"]), "MAGP-SETTLE-v1|void|did:x|a|n|t|why\\|not")
 
     def test_a_void_is_signed_by_the_agent_over_that_void(self) -> None:

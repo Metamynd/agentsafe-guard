@@ -1,6 +1,6 @@
 // Type declarations for @metamynd/agentsafe-mcp-guard (0.31.0), as .d.mts: the declarations of an ES module
-// (agentsafe-mcp-guard.mjs). Hand-written: the package ships plain ESM with no build step and had no types (pre-beta
-// evaluation 2026-10-09, L5d follow-up). They cover the public surface a Service uses; fields the issuer may add later
+// (agentsafe-mcp-guard.mjs). Hand-written: the package ships plain ESM with no build step and had no types
+// before these. They cover the public surface a Service uses; fields the issuer may add later
 // are allowed through ([key: string]: unknown).
 
 /** MAGP §6 dispositions. A verdict that is neither `allow` nor `observe` is a refusal (§13.3). */

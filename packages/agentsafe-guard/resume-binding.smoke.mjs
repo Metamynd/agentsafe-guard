@@ -1,4 +1,4 @@
-// resume-binding.smoke.mjs — resume() runs only the request the owner approved (0.24.0; pre-beta rerun 4, F-1).
+// resume-binding.smoke.mjs — resume() runs only the request the owner approved (0.24.0).
 //
 // Before: resume() mapped whatever args it was given and ran the tool under the approval's authorization. An owner approved
 // $5 to skyward-air; resume({ amount: 5000 }) or resume({ merchant: 'shadow-broker' }) ran an in-process tool, and the
@@ -111,7 +111,7 @@ await check('an issuer that predates requestDigest: resume behaves as before (th
   assert.equal(r.ran.length, 1);
 });
 
-// F-1-NF (0.29.0, pre-beta rerun 5): the request digest binds what an approval SPENDS. For a value-less action that is little
+// 0.29.0: the request digest binds what an approval SPENDS. For a value-less action that is little
 // more than its name, so an approval of { target: 'record-A', op: 'read' } ran as { target: 'record-B', op: 'delete-all' }. The
 // status now carries a digest of the context the reviewer approved, and resume() refuses any other.
 const recordArgs = (a) => ({ context: { riskLevel: a.riskLevel, target: a.target, op: a.op } });
@@ -154,7 +154,7 @@ await check('an issuer that predates the context binding: resume checks what it 
   assert.equal(r.ran.length, 1);
 });
 
-// F-2 (0.28.0): two PROCESSES resuming one approval with an in-process tool both ran it — the in-process lock covers one
+// 0.28.0: two PROCESSES resuming one approval with an in-process tool both ran it — the in-process lock covers one
 // process. The resume is now taken at the issuer (MAGP-RESUME-CLAIM-v1), atomically: exactly one process runs.
 await check('two guards (two processes) resuming one approval at once: exactly one runs, the other is refused AUTHORIZATION_IN_USE', async () => {
   const real = globalThis.fetch;
@@ -205,10 +205,10 @@ await check('a JSON 404 (a proxy, not an old issuer) is ambiguous, so the resume
   assert.equal(r.ran.length, 0);
 });
 
-// F-1-NF-R (0.32.0, pre-beta rerun 6): the checks above live in THIS SDK, so an outdated one (0.28.4) resumed an approval of
+// 0.32.0: the checks above live in THIS SDK, so an outdated one (0.28.4) resumed an approval of
 // "read record-A" as "delete-all record-B" and it ran. An issuer that asks for it (resumeClaimVersion: 2) now gets a
 // MAGP-RESUME-CLAIM-v2 carrying the digests of the args about to run — computed from them, never echoed from the status — and
-// refuses a difference itself. This fake issuer compares them as the real one does (escalation.service.ts claimResume).
+// refuses a difference itself. This fake issuer compares them as the real one does (the issuer's resume claim).
 async function resumeAgainstV2Issuer(status, approved, args) {
   const real = globalThis.fetch;
   const claims = [];
@@ -236,7 +236,7 @@ async function resumeAgainstV2Issuer(status, approved, args) {
   } finally { globalThis.fetch = real; }
 }
 
-await check('F-1-NF-R: against a v2 issuer the approved context runs once, under a v2 claim the agent signed over both digests', async () => {
+await check('against a v2 issuer the approved context runs once, under a v2 claim the agent signed over both digests', async () => {
   const r = await resumeAgainstV2Issuer(approvedRead, approvedRead, { riskLevel: 'high', target: 'record-A', op: 'read' });
   assert.equal(r.err, undefined, r.err?.message);
   assert.equal(r.ran.length, 1);
@@ -248,7 +248,7 @@ await check('F-1-NF-R: against a v2 issuer the approved context runs once, under
   assert.ok(crypto.verify(null, Buffer.from(msg, 'utf8'), publicKey, Buffer.from(c.signature, 'hex')), 'the v2 claim is signed by the agent');
 });
 
-await check('F-1-NF-R: the claim digests come from the args, so the issuer refuses an altered context even when the SDK could not check it', async () => {
+await check('the claim digests come from the args, so the issuer refuses an altered context even when the SDK could not check it', async () => {
   // A status without contextDigest leaves the SDK nothing to compare locally; the claim still states the altered context.
   const r = await resumeAgainstV2Issuer(valueless, approvedRead, { riskLevel: 'high', target: 'record-B', op: 'delete-all' });
   assert.equal(r.err?.governance?.reasonCode, 'AUTHORIZATION_CONTEXT_MISMATCH');

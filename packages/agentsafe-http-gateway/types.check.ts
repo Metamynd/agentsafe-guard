@@ -1,4 +1,4 @@
-// types.check.ts — compiled by `tsc --noEmit` (backend/scripts/sdk-types.test.ts) to keep the gateway's .d.mts files honest
+// types.check.ts — compiled by `tsc --noEmit` (the SDK type-check test) to keep the gateway's .d.mts files honest
 // against the way an operator embeds the gateway. Never run; never published.
 import { createHttpGateway, type GatewayGuard, type GatewayResponse, type Route } from './gateway.mjs';
 import { matchRoute } from './route-match.mjs';

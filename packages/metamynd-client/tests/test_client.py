@@ -87,13 +87,17 @@ class ReleaseWorkflow(unittest.TestCase):
         pyproject = (PACKAGE / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('authors = [{ name = "MetaMynd" }]', pyproject)
         self.assertIn("github.com/Metamynd/agentsafe-guard", pyproject)
-        # ("AgentSafe" is the product's public name; what must not appear is the personal account that hosts the private repo.)
-        self.assertNotIn("jasim" "p18", pyproject)
+        # ("AgentSafe" is the product's public name.) Every github.com link names the Metamynd org and nothing else, so no
+        # other account (such as one hosting a private repo) can leak into the published metadata.
+        import re
+
+        owners = set(re.findall(r"github\.com/([^/\s\"]+)", pyproject))
+        self.assertEqual(owners, {"Metamynd"})
         self.assertNotIn("§7.3", pyproject, "the signed message is spec §8.3 (§7.3 is 'Reassessment')")
 
 
 class ConstructionRefusal(unittest.TestCase):
-    """Pre-beta rerun 6 FW N-4: the client refuses a missing agent DID or api at construction, as the Node guard's
+    """The client refuses a missing agent DID or api at construction, as the Node guard's
     createGuard does, instead of sending the request and letting the gate answer MALFORMED_REQUEST."""
 
     def test_an_empty_or_missing_agent_did_is_refused_before_any_request(self) -> None:

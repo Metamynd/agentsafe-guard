@@ -1,5 +1,4 @@
-// allowed-agents.smoke.mjs — gateway authority (XT-1 of the 2026-10-03 pre-beta rerun, refined by the 2026-10-04 Gateway
-// Authority Refinement Plan; MAGP §16.3). Every check a Service makes judges the CALLER by the CALLER's own policy, which
+// allowed-agents.smoke.mjs — gateway authority (MAGP §16.3). Every check a Service makes judges the CALLER by the CALLER's own policy, which
 // the caller's owner writes, so a gateway holding one owner's credentials ran them for another tenant's agent. A Service now:
 //   - must name the agents it acts for (`allowedAgents`; unset is a startup error, serving everyone is an explicit 'any');
 //   - is bound to the principal that owns its credentials (`gatewayOwnerPrincipal`): an admitted agent whose SIGNED bundle

@@ -1,6 +1,6 @@
 // bundle-authentication.smoke.mjs — item 5 of the 2026-10-02 open-items list: an A2A guard with no policyPublicKey that
 // fetched its policy bundle over plain http:// trusted whatever came back — for EVERY task, value-bearing included (the MCP
-// guard has refused value-bearing ones since 0.12.0, D-08). A proxy on that path can lift a cap or grant an amount-0
+// guard has refused value-bearing ones since 0.12.0). A proxy on that path can lift a cap or grant an amount-0
 // action the agent never had. Since 0.13.3 such a bundle governs nothing: every task is refused POLICY_BUNDLE_UNVERIFIED
 // unless the integrator opts out explicitly.
 //
@@ -59,7 +59,7 @@ try {
   check('an unpinned guard over plain http warns at construction', warnings.some((w) => w.includes('POLICY_BUNDLE_UNVERIFIED')));
 
   let v = await unpinned.verifyRequest(signed('wire-transfer', 5000));
-  check('$5,000 on a forged bundle over http → refused (was ALLOWED: the A2A guard had no D-08 rule)', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
+  check('$5,000 on a forged bundle over http → refused (was ALLOWED: the A2A guard had no forged-bundle rule)', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
 
   v = await unpinned.verifyRequest(signed('permissions.update', 0));
   check('an amount-0 action the forged bundle granted → refused too', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);

@@ -1,6 +1,6 @@
 // accept-challenge.smoke.mjs — counterparty proof of control (MAGP §8.7.6; Gateway Authority Refinement Plan, phase 2). An
 // owner used to register any DID as its counterparty on the DID's text alone — how an attacker had a victim's gateway claim
-// and run the attacker's hold (XT-1). Now the service signs an acceptance the owner obtained from the issuer:
+// and run the attacker's hold. Now the service signs an acceptance the owner obtained from the issuer:
 //
 //   MAGP-COUNTERPARTY-ACCEPT-v1 | registrant | serviceDid | purpose | nonce | expiresAt
 //

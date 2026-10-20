@@ -1,4 +1,4 @@
-// GENERATED from backend/src/features/magp/resume-binding.ts - do not edit. Regenerate: npm run build:guard-core
+// GENERATED from the issuer's resume-binding.ts — do not edit.
 
 // src/features/magp/resume-binding.ts
 import { createHash as createHash2 } from "node:crypto";

@@ -1,4 +1,4 @@
-// bundle-authentication.smoke.mjs — D-08 (independent pre-beta eval, 2026-09-20; rerun 2026-09-24): a guard with no
+// bundle-authentication.smoke.mjs — before: a guard with no
 // policyPublicKey that fetches its policy bundle over plain http:// trusted whatever came back. A proxy on that path
 // dropped the SOP spend cap and a $5,000 over-cap purchase executed. Nothing authenticates such a bundle, so a
 // value-bearing action on it is refused (POLICY_BUNDLE_UNVERIFIED) unless the integrator opts out explicitly — and since
@@ -59,7 +59,7 @@ try {
   check('an unpinned guard over plain http warns at construction', warnings.some((w) => w.includes('POLICY_BUNDLE_UNVERIFIED')));
 
   let v = await unpinned.verifyRequest(signed(5000));
-  check('THE D-08 ATTACK: $5,000 on a forged bundle over http → refused', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
+  check('THE FORGED-BUNDLE ATTACK: $5,000 on a forged bundle over http → refused', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);
 
   v = await unpinned.verifyRequest(signed(0));
   check('0.18.3: an amount-0 action on the same unauthenticated bundle is refused too (an amount-0 action is not a read)', v.decision === 'block' && v.reasonCode === 'POLICY_BUNDLE_UNVERIFIED', `${v.decision}/${v.reasonCode}`);

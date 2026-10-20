@@ -14,8 +14,8 @@ import { buildAuthMessage } from './canonical.js';
  * the fix. The other half is integrations/metamynd-client/tests/test_protocol_vectors.py, which reads the SAME file:
  * change the message format here and the vectors (and therefore the Python client's test) fail until both agree.
  */
-// backend/src/policy-core here, packages/policy-core in the public mirror (scripts/oss/publish-guard-repo.mjs, which
-// mirrors docs/protocol too): the repository root is found from this file, never from the cwd.
+// This file runs both in the policy core's development tree and at packages/policy-core in the public repository (which
+// carries docs/protocol too): the repository root is found from this file, never from the cwd.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = basename(dirname(HERE)) === 'packages' ? join(HERE, '..', '..') : join(HERE, '..', '..', '..');
 const FILE = join(REPO, 'docs', 'protocol', 'authorize-vectors.json');

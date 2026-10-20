@@ -1,7 +1,7 @@
 {
   "_comment": [
-    "MAGP context-signature conformance vectors (context-claim binding, docs/design/context-claim-binding.md Tier 1).",
-    "Generated from backend/src/features/policy/mandate/governance-envelope.ts (backend/scripts/generate-context-signature-vectors.ts), which is the source of truth.",
+    "MAGP context-signature conformance vectors (context-claim binding, Tier 1).",
+    "Generated from the issuer's governance-envelope builder (the same source each guard's governance-envelope.mjs is generated from), which is the source of truth.",
     "`envelopeSignature` is an Ed25519 signature by the agent key over the UTF-8 bytes of `envelopeHash`, the lower-case hex SHA-256 of `canonicalEnvelope`: the GovernanceEnvelope built from the WIRE request (no defaults), minus its integrity block, with object keys sorted recursively and undefined values dropped.",
     "Every verifier (the gate, agentsafe-mcp-guard, agentsafe-a2a-guard) MUST reproduce `canonicalEnvelope` and `envelopeHash` from `request`, and MUST refuse CONTEXT_SIGNATURE_INVALID if any of itinerary, trace, materiality, amount, currency, merchant, action, nonce or issuedAt differs. A signer MUST reproduce `envelopeSignature` under `seed`.",
     "The seed is the public RFC 8032 section 7.1 test vector 1 key. It is a test key, never a secret, and must never be used for a real agent. The requests are fixed in time, so a live verifier answers REQUEST_EXPIRED once both signatures verify."

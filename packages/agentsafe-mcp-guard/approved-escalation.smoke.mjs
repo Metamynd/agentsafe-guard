@@ -1,4 +1,4 @@
-// approved-escalation.smoke.mjs — MAGP §8.7.18 (defect N-2 of the 2026-10-03 pre-beta evaluation). The agent escalated
+// approved-escalation.smoke.mjs — MAGP §8.7.18. The agent escalated
 // a high-risk purchase, its owner approved it, and the approval minted a hold. The agent then presented that hold to its
 // gateway with the same context that escalated it — and the gateway's own policy said "escalate" again and refused
 // RISK_REVIEW, so the approved action could only run if the agent re-signed it at a LOWER risk. Now the gateway asks the
@@ -200,7 +200,7 @@ test('...but a loopback development issuer over http is fine', async () => {
   } finally { io.restore(); }
 });
 
-// F-1-NF (pre-beta rerun 5): an owner approved { target: 'record-A', op: 'read' }; the agent presented the hold with
+// Approved-context binding: an owner approved { target: 'record-A', op: 'read' }; the agent presented the hold with
 // { target: 'record-B', op: 'delete-all' } and this gateway ran it — the claim bound only what the hold spends. The claim now
 // states the digest of the context this gateway is about to execute, and a person-approved grant must name the same one.
 const contextDigestOf = (itinerary) => payloadDigestOf({ 'MAGP-APPROVED-CONTEXT-v1': itinerary ?? {} });

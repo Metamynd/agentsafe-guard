@@ -347,7 +347,7 @@ function decodeFully(s) {
 const QUERY_KEY = /^[A-Za-z0-9_.~-]+$/;
 
 /**
- * Check the request target of a GOVERNED route for anything the agent's signature does not cover (M-7). The signed request
+ * Check the request target of a GOVERNED route for anything the agent's signature does not cover. The signed request
  * and the payload binding cover the BODY; the URL query string reaches the upstream verbatim, so an upstream that reads
  * `?amount=4000&merchant=attacker-llc` would act on values nobody signed. Returns null when the target is clean, or a short
  * reason string when it must be refused (`QUERY_NOT_BOUND`):
@@ -786,7 +786,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     t.unref?.();
   }
 
-  // Refusals are aggregated (refinement plan phase 3; A-1 review, M2): the first refusal of a caller for a reason is reported
+  // Refusals are aggregated : the first refusal of a caller for a reason is reported
   // at once, and the repeats within `refusalWindowMs` become ONE report carrying their count when the window closes —
   // nothing is dropped, and a flood of junk to a governed route cannot bury the owner's log. Executions are never coalesced.
   const refusalWindows = new Map(); // `${callerDid}|${reasonCode}` -> { until, extra, latest, timer }
@@ -810,7 +810,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     const reasonCode = executed ? (thrown ? 'UPSTREAM_ERROR' : 'EXECUTED') : (result?.body?.reasonCode ?? trace.decision?.reasonCode ?? 'BLOCKED');
     // Only an authorization this gateway CLAIMED is reported as the one the request ran under; one the request merely named
     // (a low-risk call allowed on its own merits, carrying an approved escalation's id) is reported as presented, never
-    // attributed (0.26.1, pre-beta rerun 6 FW6-3).
+    // attributed (since 0.26.1).
     const params = { signed: trace.request, outcome: executed ? 'executed' : 'refused', reasonCode, httpStatus, ...(claimed ? { claimedAuthorizationId: claimed } : {}) };
     if (!executed) {
       const key = `${trace.request.agentDid}|${reasonCode}`;
@@ -855,7 +855,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     // (or one smuggled into the path) the route has not explicitly allowed — before anything is claimed or consumed.
     const queryProblem = queryRefusal(req.path, route);
     if (queryProblem) {
-      // Reported like every other refusal of a signed request (0.30.1, pre-beta 2026-10-09 L1): it used to return before
+      // Reported like every other refusal of a signed request (since 0.30.1): it used to return before
       // the request was read, so the owner's Activity Log never saw it. Reading the header claims and consumes nothing; a
       // call with no signed request (or one that cannot be read) names no agent and stays unreported, as MISSING_GOVERNANCE.
       try {
@@ -874,7 +874,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     }
     // The route pins the action — a client cannot relabel a governed call as something cheaper. A request signed for another
     // action is refused here, by name: substituting the route's action made the signature fail, and the agent was told
-    // SIGNATURE_INVALID — a key problem — for calling the wrong route (pre-beta evaluation 2026-10-09, M2). Nothing is claimed
+    // SIGNATURE_INVALID — a key problem — for calling the wrong route. Nothing is claimed
     // and no nonce consumed; the refusal is reported under the request as the agent signed it, so it still verifies.
     if (route.action && typeof signed.action === 'string' && signed.action !== route.action) {
       trace.request = signed;
@@ -969,7 +969,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
 
     // allow + observe both PERMIT the upstream call (observe = permit-but-flag, SAFR §11).
     if (decision?.decision !== 'allow' && decision?.decision !== 'observe') {
-      // The issuer's sentence for a refused claim rides along (0.28.0, pre-beta rerun 6 FW6-1): the bare code was all the agent
+      // The issuer's sentence for a refused claim rides along (since 0.28.0): the bare code was all the agent
       // saw of, say, AUTHORIZATION_CONTEXT_REQUIRED. Only the issuer's own `detail` — never a stack or an internal error.
       const detail = typeof decision?.detail === 'string' && decision.detail ? decision.detail : undefined;
       return { status: 403, body: { decision: decision?.decision ?? 'block', reasonCode: decision?.reasonCode ?? 'BLOCKED', ...(detail ? { detail } : {}) }, governance: decision };
@@ -1013,7 +1013,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       upstream = await forward(forwardReq);
     } catch (err) {
       // The connection was never made (refused, no such host, connect timeout): not one byte of the request left this
-      // process, so nothing can have executed (0.32.2, pre-beta 2026-10-11 L7). Release the hold — the same close-out as a
+      // process, so nothing can have executed (since 0.32.2). Release the hold — the same close-out as a
       // vault that released no credential — and tell the caller so, instead of parking it UNKNOWN for an owner to reconcile.
       // `releaseOnConnectFailure: false` opts out, for a forward() that makes more than one upstream call.
       if (releaseOnConnectFailure !== false && requestNeverSent(err)) {

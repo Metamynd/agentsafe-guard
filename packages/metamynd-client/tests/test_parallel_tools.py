@@ -1,4 +1,4 @@
-"""M-5: parallel SYNC tool calls, and `guard_tool(..., on_refusal=...)` (0.8.0).
+"""Parallel SYNC tool calls, and `guard_tool(..., on_refusal=...)` (0.8.0).
 
 PydanticAI and LangGraph's default `ToolNode` run the sync tool calls of one model turn in worker threads. A refused
 call that RAISES aborts the turn, while the sibling calls already in their threads keep going: authorized, run, and
@@ -65,7 +65,7 @@ class OnRefusalReturn(_Base):
         self.assertEqual(self.ran, [])
 
     def test_a_call_that_states_no_risk_is_held_not_allowed(self) -> None:
-        # M-4's counterpart: this client never invents a riskLevel, so a call without one reaches the gate as missing.
+        # Like the scaffolder: this client never invents a riskLevel, so a call without one reaches the gate as missing.
         result = guard_tool(self.client, "flight-purchase", self.tool, NO_RISK, on_refusal="return")("skyward-air", 100)
         self.assertIsInstance(result, GovernanceRefusal)
         self.assertEqual(result["decision"], "escalate")
@@ -124,7 +124,7 @@ class OnRefusalReturn(_Base):
         self.assertIn("Do not retry it with different arguments", real["message"])
 
     def test_a_limit_that_refills_says_it_is_temporary_not_never_retry(self) -> None:
-        # L-a (2026-10-03 eval): the shared sandbox's per-caller share refills as its window rolls, so "do not retry"
+        # The shared sandbox's per-caller share refills as its window rolls, so "do not retry"
         # was wrong. Time-bound limits say the same request may pass later; arguments still cannot make it pass now.
         from metamynd_client import Verdict
 
@@ -154,7 +154,7 @@ class OnRefusalReturn(_Base):
             guard_tool(self.client, "flight-purchase", self.tool, CTX, on_refusal="retrun")
 
     def test_an_unreachable_gate_is_a_GATE_UNREACHABLE_refusal_and_never_runs_the_tool(self) -> None:
-        # 0.11.0 (L-g): an unreachable gate is a block with its own code, returned like any other refusal under
+        # 0.11.0: an unreachable gate is a block with its own code, returned like any other refusal under
         # on_refusal="return" — it used to escape as a bare RuntimeError with no code, crashing the framework's turn.
         guarded = guard_tool(self.client, "flight-purchase", self.tool, CTX, on_refusal="return")
         self.gate.stop()
@@ -178,7 +178,7 @@ class ParallelSyncCalls(_Base):
         self.assertEqual(sorted(a for _, a, _ in self.ran), [100, 150], "the permitted siblings ran once each, and their results came back")
 
     def test_with_raise_the_first_refusal_aborts_collection_while_siblings_run_on(self) -> None:
-        """The M-5 finding, pinned as the reason `on_refusal="return"` exists (default behaviour is unchanged)."""
+        """Pinned as the reason `on_refusal="return"` exists (default behaviour is unchanged)."""
         self.gate.delay = 0.2
         book = guard_tool(self.client, "flight-purchase", self.tool, CTX)
         raise_limit = guard_tool(self.client, "permissions.update", self.tool, CTX)
@@ -189,7 +189,7 @@ class ParallelSyncCalls(_Base):
 
 
 class GuardAgentTool(_Base):
-    """`guard_agent_tool` (0.9.0): the named entry point for tools handed to an agent framework (M-5)."""
+    """`guard_agent_tool` (0.9.0): the named entry point for tools handed to an agent framework."""
 
     def test_it_is_guard_tool_with_refusals_returned(self) -> None:
         result = guard_agent_tool(self.client, "permissions.update", self.tool, CTX)("skyward-air", 100)
@@ -199,7 +199,7 @@ class GuardAgentTool(_Base):
         self.assertEqual(permitted["pnr"], "PNR-1")
 
     def test_a_turn_of_parallel_sync_calls_completes_with_every_outcome(self) -> None:
-        """The M-5 shape, fixed by the entry point every framework example now uses."""
+        """The parallel-call shape, fixed by the entry point every framework example now uses."""
         self.gate.delay = 0.2
         book = guard_agent_tool(self.client, "flight-purchase", self.tool, CTX)
         raise_limit = guard_agent_tool(self.client, "permissions.update", self.tool, CTX)

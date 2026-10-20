@@ -1,4 +1,4 @@
-// query-binding.smoke.mjs — a governed route refuses a URL query the agent's signature does not cover (M-7, 0.17.1).
+// query-binding.smoke.mjs — a governed route refuses a URL query the agent's signature does not cover (0.17.1).
 //
 // The payload binding covers the BODY. Before 0.17.1 the query string rode through to the upstream verbatim: a body bound
 // to a $250 skyward-air booking plus `?amount=4000&merchant=attacker-llc` was authorized, the hold claimed, and the query

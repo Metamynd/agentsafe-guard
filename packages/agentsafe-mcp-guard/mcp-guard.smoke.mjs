@@ -68,7 +68,7 @@ const guard = createMcpGuard({ allowedAgents: 'any', serviceDid: service.did, se
 
 /** Build a signed authorize request the way the agent guard would. */
 // An honest client states its risk: the bundle's Standard has a risk rule, and a request that leaves `riskLevel`
-// out is escalated, not waved through (see the D-03 section below).
+// out is escalated, not waved through (see the risk-rule section below).
 function signedRequest({ amount, currency = 'USD', merchant = 'amadeus', context = { riskLevel: 'low' }, issuedAt = new Date().toISOString(), tamper = false }) {
   const action = 'flight-purchase';
   const nonce = crypto.randomUUID();
@@ -98,7 +98,7 @@ await check('a few seconds in the future (ordinary clock skew) → allow', signe
 await check('minutes in the future → block (was accepted before this was fixed)', signedRequest({ amount: 100, issuedAt: new Date(Date.now() + 4 * 60 * 1000).toISOString() }), ['block', 'REQUEST_EXPIRED']);
 await check('forged itinerary cannot shadow signed $600 → block', signedRequest({ amount: 600, context: { riskLevel: 'low', 'mm:payAmount': 1 } }), ['block', 'SOP_SPEND_CAP']);
 
-console.log('\n— D-03: the agent cannot skip a risk rule by hiding, garbling or understating its risk (spec §6.4.3) —');
+console.log('\n— the agent cannot skip a risk rule by hiding, garbling or understating its risk (spec §6.4.3) —');
 {
   await check('OMITTING riskLevel → escalate (was allow)', signedRequest({ amount: 100, context: {} }), ['escalate', 'CONTEXT_UNVERIFIABLE']);
   await check('"HIGH" upper-case is read as high → escalate RISK_REVIEW (was allow)', signedRequest({ amount: 100, context: { riskLevel: 'HIGH' } }), ['escalate', 'RISK_REVIEW']);

@@ -1,4 +1,4 @@
-// refusal-codes.smoke.mjs — defect N-6 of the 2026-10-03 pre-beta evaluation, on the agent side. The owner revoked the
+// refusal-codes.smoke.mjs — a revoked mandate is named as revoked, on the agent side. The owner revoked the
 // agent's mandate; the agent's local evaluation said NO_MANDATE ("never granted") while the Activity Log said
 // MANDATE_REVOKED. The bundle now lists the revoked actions (`revokedActions`, §6.2.6) and the local refusal names them.
 // Only the reason code changes: every case here was, and still is, a block.

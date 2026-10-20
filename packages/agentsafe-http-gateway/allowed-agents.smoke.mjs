@@ -1,5 +1,5 @@
-// allowed-agents.smoke.mjs — gateway authority end to end through the gateway shape every scaffolded agent ships (XT-1 of the
-// 2026-10-03 pre-beta rerun, refined by the 2026-10-04 Gateway Authority Refinement Plan; MAGP §16.3): another tenant's
+// allowed-agents.smoke.mjs — gateway authority end to end through the gateway shape every scaffolded agent ships
+// (MAGP §16.3): another tenant's
 // agent, whose OWN owner granted it the same action, sent a validly signed request to an agent's own gateway and the tool
 // ran (HTTP 200). With the REAL agentsafe-mcp-guard admitting only its own agents and bound to their owner, the gateway
 // answers 403 AGENT_NOT_ADMITTED and never forwards; a route can admit fewer agents than the gateway (a credential

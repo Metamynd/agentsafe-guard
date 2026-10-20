@@ -1,5 +1,4 @@
-// governance-headers.smoke.mjs — decision.governanceHeaders(): the headers a guarded Node tool hands a gateway (0.31.0;
-// pre-beta rerun 5, FW N-3).
+// governance-headers.smoke.mjs — decision.governanceHeaders(): the headers a guarded Node tool hands a gateway (0.31.0).
 //
 // Before: a Node guardTool handler received only the decision, so calling a gateway meant rebuilding and re-signing the
 // request by hand (about a dozen lines in every scaffold) — Python's guarded tools have governance_headers(). Now the

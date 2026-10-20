@@ -1,7 +1,6 @@
 /**
  * Canonical signed-message builder for a signer daemon's log-checkpoint anchor request
- * (docs/design/agent-key-custody-local-signer-daemon-plan.md, T11 — periodically hash-chaining
- * the daemon's own local log and anchoring a digest through the platform's existing HCS evidence
+ * (periodically hash-chaining the daemon's own local log and anchoring a digest through the platform's existing HCS evidence
  * infrastructure).
  *
  * The signature is an Ed25519 signature over the UTF-8 string formed by joining these six

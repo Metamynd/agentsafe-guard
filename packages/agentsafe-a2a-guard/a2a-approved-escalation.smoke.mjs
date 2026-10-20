@@ -60,7 +60,7 @@ test('the issuer says a person approved it: the escalated task executes, once', 
   } finally { io.restore(); }
 });
 
-// F-1-NF (pre-beta rerun 5): a person-approved hold runs only the context that person approved (§9a.5).
+// A person-approved hold runs only the context that person approved (§9a.5).
 const contextDigestOf = (itinerary) => payloadDigestOf({ 'MAGP-APPROVED-CONTEXT-v1': itinerary ?? {} });
 test('the claim states the context digest; a person-approved grant naming another context (or none) is refused and released', async () => {
   for (const contextDigest of [contextDigestOf({ riskLevel: 'high', target: 'other' }), undefined]) {
@@ -93,7 +93,7 @@ test('an issuer that ignores the flag: never executes, the claim is released', a
   } finally { io.restore(); }
 });
 
-// Pre-beta rerun 6 FW6-1 (as agentsafe-mcp-guard 0.29.0): an issuer's refusal of the claim carries a `detail` (for
+// As agentsafe-mcp-guard 0.29.0: an issuer's refusal of the claim carries a `detail` (for
 // AUTHORIZATION_CONTEXT_REQUIRED, which gateway to upgrade). The receiver logs it in one line, the block carries it, and the
 // refusal TaskStatus relays it in its MAGP metadata.
 const withWarnings = async (fn) => { const warn = console.warn; const lines = []; console.warn = (...a) => lines.push(a.join(' ')); try { await fn(); } finally { console.warn = warn; } return lines; };

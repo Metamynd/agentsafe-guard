@@ -1,4 +1,4 @@
-// refusal-codes.smoke.mjs (A2A receiver; same contract as agentsafe-mcp-guard's) — defect N-6 of the 2026-10-03 pre-beta evaluation: two refusals named the wrong cause.
+// refusal-codes.smoke.mjs (A2A receiver; same contract as agentsafe-mcp-guard's) — two refusals that used to name the wrong cause.
 //   • A revoked mandate was refused NO_MANDATE ("never granted") while the owner's Activity Log said MANDATE_REVOKED. The
 //     bundle now lists the revoked actions (`revokedActions`, §6.2.6) and the refusal names them.
 //   • An issuer outage was refused GUARD_ERROR, which reads as a fault in this Service. A network failure or a 5xx on the

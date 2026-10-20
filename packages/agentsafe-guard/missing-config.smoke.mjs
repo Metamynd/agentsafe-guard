@@ -1,5 +1,5 @@
 // missing-config.smoke.mjs — proves a fresh clone (which never contains the gitignored
-// agent.metamynd.json) gets the NEXT STEP, not a bare ENOENT (beta regression 2026-09-20, BR-004).
+// agent.metamynd.json) gets the NEXT STEP, not a bare ENOENT.
 //
 //   node missing-config.smoke.mjs   → PASS when every case matches.
 import assert from 'node:assert/strict';

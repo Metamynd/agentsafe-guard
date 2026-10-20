@@ -1,4 +1,4 @@
-// GENERATED from backend/src/features/policy/mandate/governance-envelope.ts - do not edit. Regenerate: npm run build:mcp-guard-core
+// GENERATED from the issuer's governance-envelope.ts — do not edit.
 
 // src/features/policy/mandate/governance-envelope.ts
 import { createHash } from "node:crypto";

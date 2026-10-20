@@ -60,9 +60,9 @@ async function main() {
 
   console.log('\n--- REGRESSION: buildSignedRequest() with amount/currency BOTH genuinely omitted must verify against the real gate\'s own convention ---');
   // A non-financial action (e.g. resource-scoped, no spend concept at all) — amount/currency
-  // are not just falsy, they're not passed AT ALL. This is exactly the case a tester found
-  // broken: the client used to sign with amount/currency left undefined, but the backend's
-  // authMessage() (mandate.service.ts) unconditionally defaults a missing amount/currency to
+  // are not just falsy, they're not passed AT ALL. This is exactly the case that used to break:
+  // the client used to sign with amount/currency left undefined, but the backend's
+  // authMessage() (the issuer's) unconditionally defaults a missing amount/currency to
   // 0/'USD' before reconstructing — so the OLD signature could never verify against the real
   // gate, only against a hypothetical verifier that (incorrectly) reconstructed from the raw,
   // undefined wire values. Fixed: sign with that same 0/'USD' default, unconditionally.

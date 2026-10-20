@@ -2,7 +2,7 @@
 // counterparty acceptance with. Zero dependencies beyond agentsafe-mcp-guard.
 //
 // Putting a payment tool behind the gateway (so the API key lives with the gateway, never with the agent) used to take a
-// hand-written did:key encoder and a signature produced in a REPL (pre-beta evaluation 2026-10-09, M4). This is that,
+// hand-written did:key encoder and a signature produced in a REPL. This is that,
 // once: `createServiceIdentity()` makes one, `writeServiceIdentity()` / `readServiceIdentity()` keep it in a file the
 // server reads (SERVICE_IDENTITY_FILE), and `acceptChallenge()` signs the dashboard's registration challenge with it.
 

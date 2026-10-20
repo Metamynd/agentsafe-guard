@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // cli.mjs — `npx @metamynd/agentsafe-http-gateway <command>`: the two steps of putting a tool behind the gateway that used
-// to need hand-written code (pre-beta evaluation 2026-10-09, M4).
+// to need hand-written code.
 //
 //   service-id [--out service-identity.json] [--force]
 //       Make the gateway's own identity (a did:key and its key) and save it, owner-readable only. Prints the DID to register.

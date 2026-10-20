@@ -15,7 +15,7 @@
 // built-in fetch unchanged.
 //
 // Tests that stub `globalThis.fetch` keep working: when the global has been replaced since this module loaded, calls go
-// to the replacement. So does a stub installed BEFORE this module loaded (pre-beta rerun 4, F-9): the global seen at load
+// to the replacement. So does a stub installed BEFORE this module loaded: the global seen at load
 // is then not Node's own fetch, and every call goes to whatever the global is at call time.
 
 import http from 'node:http';

@@ -13,7 +13,7 @@ import {
 } from './index.js';
 
 /**
- * Owner-keyed context values (pre-beta rerun 6, NF-RISK-SELF). For a non-financial action the only escalation input was
+ * Owner-keyed context values. For a non-financial action the only escalation input was
  * the riskLevel the agent declares about itself: {riskLevel:'low', target:'record-B', op:'delete-all'} ran unreviewed.
  * These atoms let the owner key a rule on WHAT is being done, so the agent's self-label no longer decides.
  */

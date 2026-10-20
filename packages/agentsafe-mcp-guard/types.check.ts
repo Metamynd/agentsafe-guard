@@ -1,4 +1,4 @@
-// types.check.ts — compiled by `tsc --noEmit` (backend/scripts/sdk-types.test.ts) to keep agentsafe-mcp-guard.d.mts honest
+// types.check.ts — compiled by `tsc --noEmit` (the SDK type-check test) to keep agentsafe-mcp-guard.d.mts honest
 // against the way a Service uses the package. Never run; never published.
 import { createMcpGuard, payloadDigestOf, type GovernanceBlocked, type ServiceVerdict, type SignedRequest } from './agentsafe-mcp-guard.mjs';
 

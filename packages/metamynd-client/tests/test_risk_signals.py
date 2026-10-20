@@ -1,4 +1,4 @@
-"""A refusal names the risk the issuer derived (0.15.0; pre-beta rerun 4, F-4).
+"""A refusal names the risk the issuer derived (0.15.0).
 
 Before: a "low" $105 payment on a $150 cap came back escalate/RISK_REVIEW exactly like a call the agent itself flagged high,
 and nothing told the agent (or the model reading the refusal) that the gate had derived the risk. The gate now returns
@@ -35,7 +35,7 @@ class RiskSignals(unittest.TestCase):
         self.assertNotIn("riskSignals", GovernanceRefusal(v, "flight-purchase"), "every other refusal keeps its shape")
 
     def test_the_raised_exception_names_it_too(self) -> None:
-        # FW N-1 (pre-beta rerun 5): Node's thrown message named the derived risk, Python's raised one did not.
+        # Node's thrown message named the derived risk; Python's raised one must too.
         raised = str(GovernanceBlocked(escalated(riskSignals=[SIGNAL]), "flight-purchase"))
         self.assertIn("escalate/RISK_REVIEW (risk derived by the issuer: amount-share: 70% of the 150 per-transaction cap", raised)
         self.assertEqual(str(GovernanceBlocked(escalated(), "flight-purchase")), "flight-purchase refused: escalate/RISK_REVIEW")

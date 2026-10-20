@@ -112,8 +112,7 @@ $5,000" protection never engaged, verifier configured or not. New `requireCapabi
 an omitted capability a hard block (`CAPABILITY_REQUIRED`) instead of a silent pass-through. Both
 off by default — existing embeds are unchanged.
 
-**0.5.0 — the `keyProvider` seam
-([docs/design/agent-key-custody-local-signer-daemon-plan.md](../../docs/design/agent-key-custody-local-signer-daemon-plan.md)).**
+**0.5.0 — the `keyProvider` seam (agent key custody).**
 `serviceKey` no longer has to be a raw hex key living in this process. Pass
 `keyProvider: 'daemon'` + `daemonSocketPath` instead, and `handshakeChallenge` gets its signature
 from a separate `@metamynd/agentsafe-signer` daemon (`role: 'service'`) over a local socket — the
@@ -149,10 +148,8 @@ unenforced at the claim step itself, not just untested:
   skip-when-absent tolerance as every other field here). Now refused with
   `AUTHORIZATION_ACTION_MISMATCH`.
 
-All three are backend-side (`MandateService.markEffect`) except the action check, which also
-needed this guard to compare the new field. See
-[`docs/design/mcp-reverification-quickstart.md`](../../docs/design/mcp-reverification-quickstart.md) (§7)
-for the end-to-end trial these gaps were found and closed against.
+All three are enforced by the issuer when the hold is claimed, except the action check, which also
+needed this guard to compare the new field.
 
 **0.5.1 — `keyProvider: 'daemon'` retries a transient connect failure.** Same fix as
 `@metamynd/agentsafe-guard` 0.9.1: on Windows the signer daemon's socket is a pool of independent
@@ -170,7 +167,7 @@ an authorization the agent did not bind (`PAYLOAD_BINDING_REQUIRED`). A payload 
 (`PAYLOAD_NOT_CANONICALIZABLE`), not skipped, and a grant that does not echo the digest (an issuer that predates binding) is
 refused too. Both options are off by default; `verifyRequest(signed, { payloadDigest, requirePayloadBinding })` is the lower-level form.
 
-**0.10.0 — the agent can no longer skip a risk rule by hiding or understating its risk (D-03).** The rules
+**0.10.0 — the agent can no longer skip a risk rule by hiding or understating its risk.** The rules
 now judge `riskLevel` with provenance (MAGP §6.3), identically to the issuer's gate:
 
 - A missing or unrecognised `riskLevel` **escalates** (`CONTEXT_UNVERIFIABLE`) for any rule that uses the
@@ -365,7 +362,7 @@ Every check above judges the **caller** by the **caller's own** mandate and SOPs
 "may this agent do this?", never "is this an agent I act for?". So a Service that holds one owner's credentials (an agent's
 own tool gateway) and does not say whom it acts for runs them for **any** agent on the platform whose own owner granted it
 an action of the same name — and with `requireAuthorization` the claim does not stop it, because the hold belongs to the
-caller. An independent tester did exactly this (XT-1, 2026-10-03). MAGP §16.3:
+caller: another tenant's agent can execute through your gateway. MAGP §16.3:
 
 ```js
 const guard = createMcpGuard({ serviceDid, issuerApi, policyPublicKey, requireAuthorization: true,
@@ -405,7 +402,7 @@ const signature = await guard.acceptCounterpartyChallenge(message); // hex; give
 It signs only a `MAGP-COUNTERPARTY-ACCEPT-v1` message naming this Service's own `serviceDid`, a known purpose and an
 unexpired time — never anything else — and logs whom you accepted. Needs a `serviceKey` (a daemon-held key cannot sign it
 yet). Before this, any owner could register any DID on its text, which let an attacker register a victim's gateway as
-their own counterparty (XT-1).
+their own counterparty.
 
 ### Report what you did (`reportOutcome`) — since 0.21.0
 
@@ -431,8 +428,8 @@ gateways pin it for you.
 
 **0.18.1 — a pinned key now refuses an unsigned or stale bundle for an amount-0 action too.** Before, the pin only
 failed closed for a value-bearing call, so an interceptor on the bundle fetch could strip the proof, add an action the
-agent was never granted, and have a non-financial gateway execute it (`permissions.update` reached upstream in the
-2026-10-02 pre-beta evaluation); or replay a bundle from before a revoke. An amount-0 action is not a read: every tool
+agent was never granted, and have a non-financial gateway execute it (`permissions.update` could reach upstream that
+way); or replay a bundle from before a revoke. An amount-0 action is not a read: every tool
 of a non-financial agent carries no amount. MetaMynd never serves an unsigned bundle and re-issues every copy it
 serves, so nothing legitimate is refused. Without a pin nothing changes (the guard warns at startup that it is
 trusting its transport).
@@ -442,8 +439,8 @@ const guard = createMcpGuard({ serviceDid, issuerApi: 'https://metamynd.ai/api/v
 ```
 
 **Since 0.12.0** a guard with no pinned key says so at startup, and one that fetches its bundle over plain `http://`
-refuses value-bearing calls (`POLICY_BUNDLE_UNVERIFIED`): nothing authenticates that bundle, and an independent tester
-used exactly that path to drop the spend cap and run a $5,000 over-cap purchase. Over `https://` it warns and carries
+refuses value-bearing calls (`POLICY_BUNDLE_UNVERIFIED`): nothing authenticates that bundle, and an interceptor on
+that path can drop the spend cap and run an over-cap purchase. Over `https://` it warns and carries
 on (TLS authenticates the issuer). **Since 0.18.3** that refusal covers every call, amount 0 included: an amount-0
 call is not a read (`permissions.update`, every non-financial tool), and a rewritten bundle can grant one. For local
 development only, `allowUnverifiedBundle: true` restores the old behaviour. A custom `fetchBundle` is your own source

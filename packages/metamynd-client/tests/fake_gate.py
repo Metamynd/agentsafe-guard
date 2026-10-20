@@ -88,7 +88,7 @@ class FakeGate:
         self.resume_binding = True  # a gate that predates MAGP 9a.5 returns no requestDigest; False plays that gate
         self.context_binding = True  # a gate that predates the approved-context binding returns no contextDigest; False plays it
         self.resume_claims = True  # a gate that predates MAGP 9a.6 has no /resume-claim route (404); False plays that gate
-        self.resume_claim_version: Optional[int] = 2  # MAGP-RESUME-CLAIM-v2 required (F-1-NF-R); None plays a gate that knows only v1
+        self.resume_claim_version: Optional[int] = 2  # MAGP-RESUME-CLAIM-v2 required; None plays a gate that knows only v1
         self._lock = threading.Lock()
         self.echo_payload_digest = True  # a gate that predates binding (or a proxy that strips it) does not acknowledge the digest
         self.holds: Dict[str, Dict[str, Any]] = {}
@@ -197,7 +197,7 @@ class FakeGate:
             return refuse("SIGNATURE_INVALID", 401)
         if e["status"] != "approved":
             return refuse("ESCALATION_NOT_APPROVED", 409)
-        # A v2 gate (F-1-NF-R) refuses a v1 claim, and a v2 claim for another request or context — before taking the resume.
+        # A v2 gate refuses a v1 claim, and a v2 claim for another request or context — before taking the resume.
         if self.resume_claim_version is not None and self.resume_claim_version >= 2:
             if not v2:
                 return refuse("AUTHORIZATION_CONTEXT_REQUIRED")

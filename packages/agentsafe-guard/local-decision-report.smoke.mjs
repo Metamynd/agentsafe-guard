@@ -106,7 +106,7 @@ async function main() {
   const cut = localReceiptDetailOf({ amount: 1, merchant: long }).merchant;
   check(cut.length <= 120 && !/[\uD800-\uDBFF]$/.test(cut), 'a merchant is cut at 120 UTF-16 units without splitting a surrogate pair');
 
-  // N-4 (pre-beta rerun 5): a CONTAINED agent's attempt, refused locally from the bundle's `contained` flag, is reported
+  // A CONTAINED agent's attempt, refused locally from the bundle's `contained` flag, is reported
   // too (0.31.1) — the containment is the server's state, but that the agent kept trying was recorded nowhere.
   {
     const contained = [];

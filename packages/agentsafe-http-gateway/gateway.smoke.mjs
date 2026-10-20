@@ -63,7 +63,7 @@ async function main() {
   }
 
   // The route pins the action: a request signed for ANOTHER action is refused by name, before the guard is asked
-  // (it used to be relabelled, and the relabelled signature failed as SIGNATURE_INVALID — pre-beta 2026-10-09, M2).
+  // (it used to be relabelled, and the relabelled signature failed as SIGNATURE_INVALID).
   {
     forwarded.length = 0;
     let asked = 0;
@@ -174,7 +174,7 @@ async function main() {
     ok(res.status === 502 && res.body.decision === 'block' && res.body.reasonCode === 'GOVERNANCE_ERROR' && forwarded.length === before, 'a throwing trustedContext deriver fails CLOSED (502 GOVERNANCE_ERROR) and forwards nothing');
   }
 
-  // Pre-beta rerun 6 FW6-1: an issuer's refusal sentence (the guard's `detail`) reaches the agent in the 403 body; a block
+  // An issuer's refusal sentence (the guard's `detail`) reaches the agent in the 403 body; a block
   // without one stays exactly as before.
   {
     const detail = 'AUTHORIZATION_CONTEXT_REQUIRED: ... Upgrade the gateway: @metamynd/agentsafe-mcp-guard >= 0.27.0';

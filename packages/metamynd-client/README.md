@@ -310,8 +310,8 @@ ToolNode([guard_langchain_tool(client, "flight-purchase", book_flight, map_args)
 ```
 
 `from_config` reads what the Node guard's `createGuardFromConfig` reads (`apiBase`, `agentDid`, `agentKey`, a daemon, or
-`agentKeyEncrypted` with `passphrase`). Keyword overrides win over the file: point it at a staging or local gate with
-`api="http://localhost:9926/api/v1"` (or its alias `api_base=`, 0.23.1). A leading UTF-8 byte-order mark in the file is
+`agentKeyEncrypted` with `passphrase`). Keyword overrides win over the file: point it at another gate with
+`api="https://gate.example.com/api/v1"` (or its alias `api_base=`, 0.23.1). A leading UTF-8 byte-order mark in the file is
 ignored (0.23.1). `on_verdict` sees every gate answer, a permit included; a callback that raises is a
 warning, never a different outcome. `guard_langchain_tool` is `guard_agent_tool` as a LangChain tool whose refusal is a
 `ToolMessage` with `status="error"`; the turn still completes.

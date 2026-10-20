@@ -1,4 +1,4 @@
-// key-providers.mjs — the keyProvider seam (docs/design/agent-key-custody-local-signer-daemon-plan.md).
+// key-providers.mjs — the keyProvider seam (agent key custody: where the signing key lives).
 // A KeyProvider has four REQUIRED async methods, matching the four places this package always
 // signs something (see agentsafe-guard.mjs: buildSignedRequest/authorize, the opt-in envelope
 // signature, the mutual-handshake PROVE step, and BYOK key-control-proof) — every built-in
@@ -57,7 +57,7 @@ export function createStaticKeyProvider(agentKeyHex) {
       return rawSign(buildLocalReceiptMessage(fields));
     },
     // The resume claim (0.28.0, MAGP-RESUME-CLAIM-v1; v2 since 0.32.0 when `fields` carry requestDigest and contextDigest, which
-    // binds the approved request and context — pre-beta rerun 6 F-1-NF-R): takes the one resume of an approved escalation.
+    // binds the approved request and context): takes the one resume of an approved escalation.
     // OPTIONAL: without it a resume runs unclaimed, as before (the signer daemon has it since signer 0.23.0).
     async signResumeClaim(fields) {
       return rawSign(buildResumeClaimMessage(fields));
@@ -240,9 +240,9 @@ export function createDaemonKeyProvider({ socketPath }) {
 }
 
 /**
- * Passphrase-encrypted key delivery (docs/design/passphrase-encrypted-key-delivery-plan.md).
- * A byte-for-byte reimplementation of the backend's `decryptWithPassword`
- * (backend/src/util/encryption.ts) using only node:crypto — PBKDF2-SHA512/100k-iterations/
+ * Passphrase-encrypted key delivery.
+ * A byte-for-byte reimplementation of the issuer's `decryptWithPassword`
+ * using only node:crypto — PBKDF2-SHA512/100k-iterations/
  * 32-byte key derived from (password, salt), then AES-256-GCM decrypt of the `iv:tag:encrypted`
  * hex-joined triple `encryptWithPassword` produces. MUST stay in lockstep with that function:
  * two independently-written implementations of "the same algorithm" silently diverging is

@@ -7,7 +7,7 @@ compliance team edits in the dashboard, changeable live with no redeploy.
 
 - **Zero dependencies.** Uses Node's built-in Ed25519 (`node:crypto`) + `fetch` (Node 18+), plus
   `policy-core.mjs` — the deterministic evaluator, itself dependency-free, generated from
-  `backend/src/policy-core` (regenerate with `npm run build:guard-core`).
+  the policy core (`packages/policy-core` in this repository).
 - **Deterministic + tamper-resistant.** Every call is Ed25519-signed over a canonical message with a
   single-use nonce; the gate is server-authoritative and cannot be bypassed. No LLM at the gate.
 - **Fail-closed.** A network/gate failure returns `block`, so the agent never proceeds blind.
@@ -116,8 +116,7 @@ OWN recorded spend history — a baseline the platform's trust-graph engine lear
 threshold a human pre-sets. Opt-in (`SPEND_ANOMALY_MODE=on`), off by default. Nothing in this
 package's own evaluation changes; documented here because the count moved again.
 
-**0.9.0 — the `keyProvider` seam
-([docs/design/agent-key-custody-local-signer-daemon-plan.md](../../docs/design/agent-key-custody-local-signer-daemon-plan.md)).
+**0.9.0 — the `keyProvider` seam (agent key custody).**
 `agentKey` no longer has to be a raw hex key living in this process. Pass
 `keyProvider: 'daemon'` + `daemonSocketPath` instead, and every signature is produced by a
 separate `@metamynd/agentsafe-signer` daemon over a local socket — the key never enters this
@@ -147,8 +146,7 @@ has had since 0.9.4 — `createDaemonKeyProvider` gained the fifth, optional `si
 method, and `@metamynd/agentsafe-signer`'s daemon gained the matching `sign-local-decision`
 signing-socket operation. No change for a `createGuard({ agentKey })` caller.
 
-**0.12.0 — passphrase-encrypted managed key delivery**
-([docs/design/passphrase-encrypted-key-delivery-plan.md](../../docs/design/passphrase-encrypted-key-delivery-plan.md)).
+**0.12.0 — passphrase-encrypted managed key delivery.**
 A managed key can now be delivered as ciphertext instead of plaintext: set a passphrase at
 issuance, and `agent.metamynd.json` carries `agentKeyEncrypted` (`agentKey: null`) instead of a
 raw key. `createGuardFromConfig(source, { passphrase })` decrypts it in memory before building
@@ -205,7 +203,7 @@ return `payload`. The gate echoes the digest it stored, and an agent that sent o
 it** (`PAYLOAD_BINDING_NOT_CONFIRMED`, releasing the hold) — so a proxy that strips the fields, or a backend that predates
 MAGP §8.3.9, is a loud failure, not a silently unbound request.
 
-**0.13.0 — a risk rule can no longer be skipped by staying silent about risk (D-03).** The rule layer
+**0.13.0 — a risk rule can no longer be skipped by staying silent about risk.** The rule layer
 now labels every context field with where it came from (`agent_asserted`, `agent_signed`,
 `gateway_derived`, `authoritative`, `attested`; MAGP §6.3) and judges `riskLevel` accordingly:
 

@@ -1,6 +1,6 @@
 """What guard_tool does with the hold a permitted call was granted, and resuming an approved escalation (0.12.0).
 
-Pre-beta rerun 3 (D-2/D-3/E-1): an unclaimed hold lapses with its TTL, so a tool that RAN handed its budget back after
+Before: an unclaimed hold lapses with its TTL, so a tool that RAN handed its budget back after
 15 minutes and a tool that FAILED kept it reserved until then; the examples stranded every hold they were granted; and an
 approved escalation took ~15 lines of hand-written code to run. Each case here talks to `fake_gate.py`.
 """
@@ -109,7 +109,7 @@ class HoldSettlement(unittest.TestCase):
         self.assertEqual(self.states(), ["held"], "the outer tool may have acted: its hold is neither released nor captured")
 
     def test_a_call_with_no_amount_that_ran_is_settled_at_zero(self) -> None:
-        # Pre-beta rerun 6 FW6-4: a non-financial call is authorized at 0 and the gate holds it all the same. Nothing settled
+        # A non-financial call is authorized at 0 and the gate holds it all the same. Nothing settled
         # it, so it stayed `held` (and after its TTL read as `expired`: an action that never ran). It ran: captured at 0.
         self.gate.grants["records.read"] = 0.0
         read = guard_tool(self.client, "records.read", lambda target: {"target": target},
@@ -161,7 +161,7 @@ class Resume(unittest.TestCase):
         self.assertEqual(book.resume(esc, "skyward-air", 90, "high"), "booked")
         self.assertEqual(len(seen), 1)
         self.assertIn(self.gate.escalations[esc]["authorizationId"], seen[0]["x-magp-request"])
-        # Handed to a gateway that claimed it: the gateway settles it, so the agent neither captures nor voids (0.24.0, D-5).
+        # Handed to a gateway that claimed it: the gateway settles it, so the agent neither captures nor voids (0.24.0).
         self.assertEqual(self.gate.holds[self.gate.escalations[esc]["authorizationId"]]["state"], "held")
         # Once only: the approval's authorization is used now, so a second resume never touches the tool.
         with self.assertRaises(GovernanceBlocked) as again:
@@ -170,7 +170,7 @@ class Resume(unittest.TestCase):
         self.assertEqual(len(seen), 1)
 
     def test_a_resumed_call_with_no_amount_is_settled_at_zero(self) -> None:
-        # FW6-4: the approval's hold of a non-financial action is settled once the tool ran, like any other.
+        # The approval's hold of a non-financial action is settled once the tool ran, like any other.
         self.gate.grants["records.delete"] = 0.0
         ran = []
         delete = guard_tool(self.client, "records.delete", lambda target: ran.append(target) or "deleted",
@@ -284,7 +284,7 @@ class OrphanAndRace(unittest.TestCase):
 
 
 class HandOffToAGateway(unittest.TestCase):
-    """D-5 (0.24.0, pre-beta rerun 2026-10-12): a tool that handed its call to a gateway (governance_headers()) and RETURNED
+    """(0.24.0) A tool that handed its call to a gateway (governance_headers()) and RETURNED
     the gateway's refusal had its hold captured, booking spend for money that never moved. A value-bearing call a gateway
     runs is claimed before it executes, so an unclaimed hold after such a tool returns means nothing ran: it is released."""
 

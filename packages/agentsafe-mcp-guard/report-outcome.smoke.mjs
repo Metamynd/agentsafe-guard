@@ -1,6 +1,6 @@
-// report-outcome.smoke.mjs — A-1 of the 2026-10-03 pre-beta rerun: a gateway that claims nothing (every non-financial
+// report-outcome.smoke.mjs — before: a gateway that claims nothing (every non-financial
 // agent's) ran requests the issuer never saw, so its owner's audit trail was empty even when another tenant's agent used
-// it (XT-1). `guard.reportOutcome()` reports what this Service did, signed as this Service (MAGP-SERVICE-v1, action
+// it. `guard.reportOutcome()` reports what this Service did, signed as this Service (MAGP-SERVICE-v1, action
 // `report`), to POST /policy/gateway-reports (MAGP §16.4). This checks the wire: the report is filed for the right agent,
 // signed over exactly the fields the issuer verifies, and never sent without a signing identity.
 //
@@ -118,7 +118,7 @@ test('a report carries a reportId and its count; a retry with the same reportId 
   assert.equal(fresh[0].body.occurrences, 1);
 });
 
-// Pre-beta rerun 6 FW6-3: a non-financial gateway ran a low-risk request on its own merits that NAMED an approved
+// A non-financial gateway ran a low-risk request on its own merits that NAMED an approved
 // escalation's authorization (never claimed), and the report filed it under that authorization.
 test('an authorization the request only NAMED is reported as presented, never as the one it ran under', async () => {
   const signed = { ...mine.sign('records-update'), authorizationId: 'auth-approved-1' };

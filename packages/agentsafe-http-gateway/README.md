@@ -65,7 +65,7 @@ holds one owner's upstream credential must therefore say whom it acts for (MAGP 
 The issuer sees an execution only when the gateway **claims** an authorization. A bundle-only route (no claim, every
 non-financial agent's) runs requests nobody else ever sees, and a refusal the gateway decides itself (`AGENT_NOT_ADMITTED`,
 a rule, a binding failure) is just as invisible — which is how another tenant's agent used an agent's gateway with nothing
-in its owner's Activity Log (XT-1). **Since 0.32.0 this is on by default**; pass `reportOutcomes: false` (or set
+in its owner's Activity Log. **Since 0.32.0 this is on by default**; pass `reportOutcomes: false` (or set
 `AGENTSAFE_REPORT_OUTCOMES=false` for `server.mjs`) to turn it off. From 0.20.0 to 0.31.x it was off unless set, so a gateway
 run from the guide kept every refusal it decided itself out of the owner's audit trail. With it on, the gateway reports each governed request it answers through `guard.reportOutcome()` (agentsafe-mcp-guard ≥ 0.21.0), signed as
 its own service identity, into the audit trail of the owner of the agent it acts for (MAGP §16.4):

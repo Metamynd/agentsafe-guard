@@ -1,4 +1,4 @@
-// risk-signals.smoke.mjs — a refusal names the risk the issuer derived (0.25.0; pre-beta rerun 4, F-4).
+// risk-signals.smoke.mjs — a refusal names the risk the issuer derived (0.25.0).
 //
 // Before: a "low" $105 payment on a $150 cap came back ESCALATE RISK_REVIEW, exactly like a call the agent itself flagged
 // high, and nothing on the refusal said the gate had derived the risk (70% of the cap). The gate now returns riskSignals;

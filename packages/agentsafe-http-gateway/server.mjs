@@ -56,12 +56,12 @@ const REQUIRE_AUTHORIZATION = process.env.AGENTSAFE_REQUIRE_AUTHORIZATION !== 'f
 const DENY_BY_DEFAULT = process.env.AGENTSAFE_DENY_BY_DEFAULT === 'true';
 // The agents this gateway acts for (MAGP §16.3): comma-separated DIDs, or `any`. Every check the guard makes judges the
 // caller by the caller's OWN policy, so a gateway holding one owner's upstream credential, left unpinned, runs it for any
-// agent on the platform whose owner granted it a matching action (XT-1). Unset keeps serving every agent, with a warning.
+// agent on the platform whose owner granted it a matching action. Unset keeps serving every agent, with a warning.
 // `any` is right only where each call's credential is resolved per tenant (the Credential Vault below) or the upstream is
 // public.
 // Set but blank (an unfilled compose/k8s variable) is a startup error, never "unset": reading it as unset would quietly
 // serve every agent — the very gap the variable exists to close.
-// Required (pre-beta refinement plan, 2026-10-04): a gateway names whom it acts for. Unset or blank is a startup error.
+// Required: a gateway names whom it acts for. Unset or blank is a startup error.
 const ALLOWED_AGENTS = (() => {
   const raw = (process.env.AGENTSAFE_ALLOWED_AGENTS ?? '').trim();
   if (!raw) throw new Error('AGENTSAFE_ALLOWED_AGENTS is required: the agent DID(s) this gateway acts for (comma-separated), or `any` for a gateway that holds no one owner\'s credentials (the Credential Vault, a public tool).');
@@ -88,13 +88,13 @@ const GATEWAY_OWNER = (process.env.AGENTSAFE_GATEWAY_OWNER || '').trim() || unde
 // the Action Passport bound to the request's own claimed authorizationId, so ONE shared gateway
 // deployment correctly serves MANY tenants (each running many agents) against the same
 // connector, and a misconfigured or compromised gateway process can never misroute — or spoof —
-// which tenant's credential a call receives. See credential-vault.service.ts's
-// resolveForGateway for the full design.
+// which tenant's credential a call receives. The issuer's vault resolve endpoint
+// documents the full design.
 const CREDENTIAL_VAULT_URL = (process.env.CREDENTIAL_VAULT_URL || '').replace(/\/$/, '');
 const CREDENTIAL_VAULT_GATEWAY_TOKEN = process.env.CREDENTIAL_VAULT_GATEWAY_TOKEN || '';
 const CREDENTIAL_VAULT_CONNECTOR_ID = process.env.CREDENTIAL_VAULT_CONNECTOR_ID || '';
 const CREDENTIAL_VAULT_HEADER_NAME = process.env.CREDENTIAL_VAULT_HEADER_NAME || 'Authorization';
-// The simplest way to keep an upstream API key out of the agent (0.30.0, pre-beta 2026-10-09 M4): the gateway holds it and
+// The simplest way to keep an upstream API key out of the agent (since 0.30.0): the gateway holds it and
 // adds it to every call it forwards, after the guard has permitted it. The agent never sees it. One owner's credential, so it
 // requires AGENTSAFE_ALLOWED_AGENTS to name that owner's agents (see buildResolveCredential).
 //   AGENTSAFE_UPSTREAM_CREDENTIAL="Bearer sk_live_..."   AGENTSAFE_UPSTREAM_CREDENTIAL_HEADER=Authorization (the default)
@@ -103,8 +103,7 @@ const STATIC_CREDENTIAL_HEADER = process.env.AGENTSAFE_UPSTREAM_CREDENTIAL_HEADE
 
 // Only a routes file that does not EXIST means "nothing governed" (a plain pass-through proxy). One that exists but cannot
 // be read or parsed stops the gateway: it used to be logged as "no routes file" and the gateway ran with zero governed
-// routes, so a typo in the file (or a UTF-8 BOM) silently let every request through ungoverned (pre-beta evaluation
-// 2026-10-11, follow-up to L6).
+// routes, so a typo in the file (or a UTF-8 BOM) silently let every request through ungoverned.
 function loadRoutes() {
   let text;
   try {
@@ -146,7 +145,7 @@ function readBody(req) {
  * CREDENTIAL_VAULT_URL is unset (the default — feature off, zero behavior change).
  * Calls the backend's gateway-only `/credential-vault/resolve` endpoint, authenticated
  * by CREDENTIAL_VAULT_GATEWAY_TOKEN (a secret this process holds and the agent never
- * does — see credential-vault.service.ts's resolveForGateway for why that extra factor
+ * does — see the issuer's vault resolve endpoint for why that extra factor
  * exists). Keyed off `request.authorizationId`, the signed request's own claimed
  * authorization — present only when the caller went through `requireAuthorization`'s
  * claim flow first, which is exactly the "currently-authorized action" the vault requires.
@@ -159,7 +158,7 @@ function buildResolveCredential() {
   if (STATIC_CREDENTIAL) {
     if (CREDENTIAL_VAULT_URL) throw new Error('Set AGENTSAFE_UPSTREAM_CREDENTIAL or CREDENTIAL_VAULT_URL, not both: one source for the upstream credential.');
     // One owner's credential, so this gateway must act for that owner's agents only. With `any`, every agent on the
-    // platform whose owner granted a matching action would run on it (the XT-1 confused deputy, MAGP §16.3).
+    // platform whose owner granted a matching action would run on it (a confused deputy, MAGP §16.3).
     if (ALLOWED_AGENTS === 'any') throw new Error('AGENTSAFE_UPSTREAM_CREDENTIAL is one owner\'s credential: set AGENTSAFE_ALLOWED_AGENTS to that owner\'s agent DID(s), not `any` (use the Credential Vault for a gateway that serves many owners).');
     return async function resolveCredential() {
       return { header: STATIC_CREDENTIAL_HEADER, value: STATIC_CREDENTIAL };

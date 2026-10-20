@@ -31,7 +31,7 @@ function withoutUnsignedJurisdiction(itinerary) {
 }
 
 /**
- * The context-signature refusals (context-claim binding, docs/design/context-claim-binding.md), both hard blocks returned
+ * The context-signature refusals (context-claim binding, MAGP §8.3.13), both hard blocks returned
  * before any rule is evaluated: CONTEXT_SIGNATURE_INVALID (an `envelopeSignature` is present and does not verify — the
  * same code the issuer's gate answers) and CONTEXT_SIGNATURE_REQUIRED (none, on a guard with `requireContextSignature`;
  * receiver-only, the gate has no such option).
@@ -61,7 +61,7 @@ import { verifyBundle } from './magp-policy.mjs';
 import { resolveKeyProvider } from './key-providers.mjs';
 import { PAYLOAD_DIGEST_HEADER, buildPayloadBindingMessage, claimDigestField, isPayloadDigest, payloadDigestOf, toWireJson } from './payload-binding.mjs';
 
-// The approved-context binding (MAGP §9a.5, pre-beta rerun 5 F-1-NF): a hold a PERSON approved is bound to the context
+// The approved-context binding (MAGP §9a.5): a hold a PERSON approved is bound to the context
 // (itinerary) that person was shown. The claim states the digest of the context this Service is about to execute; the issuer
 // refuses any other. RFC 8785 canonical JSON under its own domain key, pinned by docs/protocol/resume-binding-vectors.json.
 const APPROVED_CONTEXT_DOMAIN = 'MAGP-APPROVED-CONTEXT-v1';
@@ -132,7 +132,7 @@ export function agentAllowList(allowedAgents, label) {
     console.warn(`[${label}] allowedAgents: 'any' — this Service acts for EVERY governed agent, each judged only by its own owner's rules. Right only for a public tool, or one that resolves each caller's own credential (the Credential Vault); never for a Service that holds one owner's credentials (MAGP §16.3).`);
     return { serves: () => true, pinned: 'any' };
   }
-  // Unset is a startup error (pre-beta refinement plan, 2026-10-04): a Service that holds credentials must name whom it
+  // Unset is a startup error: a Service that holds credentials must name whom it
   // acts for, and serving everyone has to be said out loud ('any') — it is never what an omission means.
   if (allowedAgents === undefined || allowedAgents === null) {
     throw new Error(`${label}: allowedAgents is required — the agent DIDs this Service acts for (MAGP §16.3), or 'any' for a Service that holds no one owner's credentials`);
@@ -171,7 +171,7 @@ export function profileAdmits(list, agentDid) {
 
 /**
  * The issuer could not be reached — a network failure or a 5xx on the bundle fetch. Tagged so verifyRequest refuses it
- * GATE_UNREACHABLE, the agent guard's code for the same outage, instead of the catch-all GUARD_ERROR (eval 2026-10-03, N-6).
+ * GATE_UNREACHABLE, the agent guard's code for the same outage, instead of the catch-all GUARD_ERROR.
  * A 4xx is an answer, not an outage, and stays an ordinary error.
  */
 function gateUnreachable(cause) {
@@ -186,7 +186,7 @@ const FRESHNESS_MS = 5 * 60 * 1000;
 /** How far a signed request's `issuedAt` may be AHEAD of server time — clock skew, not a window
  *  to pre-sign a request for later use. Checked separately from FRESHNESS_MS so `Math.abs()`
  *  can't fold both directions into one 10-minute window (found live: a request signed up to 5
- *  minutes in the future was accepted). Mirrors mandate.service.ts's CLOCK_SKEW_TOLERANCE_MS. */
+ *  minutes in the future was accepted). Mirrors the issuer's CLOCK_SKEW_TOLERANCE_MS. */
 const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
 
 /**
@@ -213,8 +213,8 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   0.18.3: an amount-0 action is not a read (`permissions.update`, `records-update`, every non-financial tool), and a
  *   proxy that can rewrite the bundle can grant it.
  * @param {boolean} [cfg.allowUnverifiedBundle] accept actions on a bundle fetched over plain http:// with no
- *   `policyPublicKey` pinned. Off by default: a proxy on that path can rewrite the rules (an independent tester raised
- *   an over-cap $5,000 purchase that way, and a rewritten bundle can grant any amount-0 action). For local development only.
+ *   `policyPublicKey` pinned. Off by default: a proxy on that path can rewrite the rules (lifting a spend cap so an
+ *   over-cap purchase runs, and a rewritten bundle can grant any amount-0 action). For local development only.
  * @param {boolean} [cfg.requireAuthorization] when true, a PERMIT verdict (allow/observe) is only
  *   actually granted if `signed.authorizationId` atomically claims single-use execution against the
  *   stateful issuer gate (see claimAuthorization below) — this is what closes REPLAY and CUMULATIVE
@@ -236,7 +236,7 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   integrator's un-capability-aware callers must keep working); set true on any Service where
  *   capability binding is meant to be mandatory, not opt-in.
  * @param {boolean} [cfg.requireContextSignature] when true, a request that carries no `envelopeSignature` (the agent's
- *   own signature over its context — context-claim binding, docs/design/context-claim-binding.md) is refused
+ *   own signature over its context — context-claim binding, MAGP §8.3.13) is refused
  *   `CONTEXT_SIGNATURE_REQUIRED` before any rule is evaluated. Off by default: the signature is optional (agentsafe-guard
  *   >= 0.17.0 sends it unless `signContext: false`), and a PRESENT one is always verified either way. Turn it on where the
  *   agent's context drives a decision and anything can sit between the agent and this Service — without it, a relay can
@@ -244,8 +244,8 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  * @param {string[]|'any'} [cfg.allowedAgents] the agent DIDs this Service acts for (MAGP §16.3). A request signed by any
  *   other agent is refused `AGENT_NOT_ADMITTED` before its policy is fetched or any authorization is claimed. Every check
  *   below judges the CALLER against the CALLER's own policy — so without this, a Service that holds one owner's
- *   credentials runs them for any agent on the platform whose own owner granted it an action of the same name (found
- *   by an independent tester, XT-1: another tenant's agent executed through an agent's own gateway). Set it whenever
+ *   credentials runs them for any agent on the platform whose own owner granted it an action of the same name
+ *   (another tenant's agent could execute through an agent's own gateway). Set it whenever
  *   this Service works for one owner. `'any'` serves every governed agent on purpose — a public tool server. Left unset,
  *   it serves every agent, as before 0.20.0, and says so once at startup.
  * @param {boolean} [cfg.honourApprovals] (0.25.0) for a Service that runs WITHOUT `requireAuthorization` — a value-less
@@ -275,7 +275,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         : '[mcp-guard] no policyPublicKey: the policy bundle is trusted on the strength of TLS alone. Pin policyPublicKey (GET /magp/policy/pubkey, out of band) so a rewritten bundle is refused.',
     );
   }
-  // keyProvider seam (docs/design/agent-key-custody-local-signer-daemon-plan.md): null when
+  // keyProvider seam (agent key custody; see key-providers.mjs): null when
   // neither `serviceKey` nor `keyProvider` is configured — handshakeChallenge throws its own
   // clear error only if actually called, matching the original lazy-throw behavior exactly.
   const keyProvider = resolveKeyProvider({ keyProvider: keyProviderOpt, serviceKey, daemonSocketPath });
@@ -325,7 +325,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
 
   /**
    * Atomically claim a stateful authorization for single execution (AUTHORIZED -> DISPATCHING,
-   * the effect-safety state machine in backend/src/features/policy/mandate/effect-machine.ts). A
+   * the issuer's effect-safety state machine). A
    * SECOND claim of the SAME authorizationId — a replay, or a race — fails: that transition is only
    * legal once. This is what actually stops replay and enforces the mandate's cumulative budget at
    * a Service, because the authorizationId only exists because the agent's own authorize() call
@@ -444,7 +444,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         if (ambiguous && attempt < attempts) { lastError = `HTTP ${res.status}`; await sleep(150); continue; }
         if (!res.ok) {
           const reasonCode = refusalCode(body, `AUTHORIZATION_CLAIM_HTTP_${res.status}`);
-          // The issuer's sentence for the refusal (0.29.0, pre-beta rerun 6 FW6-1): an older gateway relayed only the code and
+          // The issuer's sentence for the refusal (since 0.29.0): an older gateway relayed only the code and
           // logged nothing, so "AUTHORIZATION_CONTEXT_REQUIRED" was all a developer saw. One line in this Service's log, and the
           // detail travels with the refusal. ESCALATION_NOT_APPROVED is routine here (the request still needs a person): no line.
           const detail = typeof body?.data?.detail === 'string' && body.data.detail ? body.data.detail.slice(0, 600) : undefined;
@@ -512,8 +512,8 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * Report what this Service did with a governed request, into the audit trail of the owner of the agent it acts for
    * (MAGP §16.4). The issuer only sees an execution when a hold is CLAIMED; a Service that runs a request without one (a
    * bundle-only, non-financial gateway), or refuses one itself (AGENT_NOT_ADMITTED, a local rule block), is otherwise
-   * invisible to the owner — which is how another tenant's agent ran an agent's tool with nothing in the victim's log (XT-1,
-   * A-1). Signed as this Service (MAGP-SERVICE-v1, action `report`), so it needs a self-certifying `serviceDid` and its key;
+   * invisible to the owner — which is how another tenant's agent ran an agent's tool with nothing in the victim's log.
+   * Signed as this Service (MAGP-SERVICE-v1, action `report`), so it needs a self-certifying `serviceDid` and its key;
    * the issuer records it only if the served agent's owner registered that DID as an active counterparty.
    *
    * `servedAgentDid` defaults to the caller when this Service serves it, else to the one agent `allowedAgents` pins — so a
@@ -522,7 +522,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    *
    * An authorization the request NAMES is reported as `presentedAuthorizationId` — evidence of what was asked, never an
    * attribution. It is reported as the request's `authorizationId` only when the caller passes `claimedAuthorizationId`
-   * (the id on a decision this Service CLAIMED) and it is the same id (0.27.1, pre-beta rerun 6 FW6-3): a non-financial
+   * (the id on a decision this Service CLAIMED) and it is the same id (since 0.27.1): a non-financial
    * gateway that ran a low-risk request on its own merits, naming an approved escalation's authorization it never claimed,
    * filed the row under that authorization, and the audit then showed it twice, under two contexts, once the approved call
    * ran. The issuer links a row only to an authorization the effect chain shows this Service claimed in any case.
@@ -775,7 +775,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     const itinerary = withoutUnsignedJurisdiction(req.itinerary ?? {});
     const mandates = bundle.mandates ?? [];
     const mandate = mandates.find((m) => m.action === action)?.document;
-    // No mandate covers this action at all — refuse outright, matching mandate.service.ts's
+    // No mandate covers this action at all — refuse outright, matching the issuer's
     // own first check (before signature/standards/anything else). Without this, `evaluate()`
     // treats an omitted `mandate` as "skip the mandate layer" (its own documented, intentional
     // behavior for a caller that never resolves one at all) — found live: an ungranted action
@@ -796,7 +796,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // omitting them here (found live: they were) means a currency-scoped amount-over/
       // cumulative-over Standards/SOP atom always sees currency as absent and fires closed
       // (SOP_SPEND_CAP on a genuinely in-cap request), and a resource-scope atom never runs
-      // at all. Mirrors mandate.service.ts's ruleCtx (PR #588), the parity target for this.
+      // at all. Mirrors the issuer's own rule context, the parity target for this.
       context: buildRuleContext({
         unsigned: itinerary,
         signed: { action, agentDid, amount, currency, merchant, resource, ...(jurisdiction ? { jurisdiction } : {}) },
@@ -817,7 +817,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
               // Defaults to 'USD', matching verifyRequest()'s own default for this field.
               'mm:currency': currency,
               // Unprefixed `resource` (not `mm:resource`) to match the constraint's own
-              // leftOperand (ResourceService.scopeConstraint()) — mirrors mandate.service.ts.
+              // leftOperand (ResourceService.scopeConstraint()) — mirrors the issuer.
               resource,
               // The allowed-jurisdictions term: with none signed it fails JURISDICTION_REQUIRED, as at the gate.
               'mm:jurisdiction': jurisdiction,
@@ -942,7 +942,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         const v = verifyBundle(bundle, { publicKey: policyPublicKey, valueBearing: Number(amount) > 0 });
         if (!v.ok) return { decision: 'block', reasonCode: v.reasonCode };
       } else if (bundleUnauthenticated && !allowUnverifiedBundle) {
-        // Nothing authenticates these rules (no pinned key, no TLS): moving value on them is the D-08 attack, and since 0.18.3
+        // Nothing authenticates these rules (no pinned key, no TLS): moving value on them is the forged-bundle attack, and since 0.18.3
         // an amount-0 action is refused too — a rewritten bundle could grant `permissions.update` as easily as raise a cap.
         return { decision: 'block', reasonCode: 'POLICY_BUNDLE_UNVERIFIED' };
       }
@@ -1038,7 +1038,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
     } catch (err) {
       // The issuer could not be reached for the bundle: say so (GATE_UNREACHABLE), as the agent guard does — GUARD_ERROR
-      // read as a fault in this Service during an issuer outage (eval 2026-10-03, N-6). Anything else stays GUARD_ERROR.
+      // read as a fault in this Service during an issuer outage. Anything else stays GUARD_ERROR.
       return { decision: 'block', reasonCode: err?.code === 'GATE_UNREACHABLE' ? 'GATE_UNREACHABLE' : 'GUARD_ERROR', error: String(err?.message ?? err) };
     }
   }

@@ -1,5 +1,5 @@
 // hold-settlement.smoke.mjs — what guardTool() does with the hold an allowed call was granted, guard.void(), and
-// resuming an approved escalation (0.21.0; pre-beta rerun 3, D-1/D-2/D-3/E-1).
+// resuming an approved escalation (0.21.0).
 //
 // Before: an unclaimed hold lapsed with its TTL whatever happened — a tool that RAN handed its budget back after 15
 // minutes, a tool that FAILED kept it reserved until then — and the only documented way to release one (a raw unsigned
@@ -67,7 +67,7 @@ await check('a tool that RAN has its hold captured at the authorized amount, sig
   } finally { f.restore(); }
 });
 
-// FW6-4 (0.33.1): a call with no amount that the gate decided (remote mode) still got a hold. Nothing settled it, so it sat
+// 0.33.1: a call with no amount that the gate decided (remote mode) still got a hold. Nothing settled it, so it sat
 // `held` until its TTL and then read as `expired` — an action that never ran. It ran: captured at 0, signed as the agent.
 await check('a call with no amount that RAN has its hold captured at 0', async () => {
   const f = fakeIssuer();
@@ -86,7 +86,7 @@ await check('a call with no amount that RAN has its hold captured at 0', async (
   } finally { f.restore(); }
 });
 
-// F-3 (0.27.0): a hold the tool's gateway CLAIMED is the gateway's to settle. The agent capturing it too raced the gateway's
+// 0.27.0: a hold the tool's gateway CLAIMED is the gateway's to settle. The agent capturing it too raced the gateway's
 // own settlement — the agent's full-amount capture landed first, recorded `unattested`, and the gateway's real charge was refused.
 for (const [label, effect] of [
   ['claimed by the gateway that ran the tool', { outcome: 'in_flight', effectState: 'dispatching', claimed: true }],
@@ -135,7 +135,7 @@ await check('a capture the issuer refuses (a gateway already settled it) never c
   } finally { globalThis.fetch = real; f.restore(); }
 });
 
-// D-5 (0.37.0, pre-beta rerun 2026-10-12): a tool that handed its call to a gateway (governanceHeaders()) and RETURNED the
+// 0.37.0: a tool that handed its call to a gateway (governanceHeaders()) and RETURNED the
 // gateway's refusal used to have its hold captured: spend booked for money that never moved. A value-bearing call a gateway
 // runs is claimed before it executes, so an unclaimed hold after such a tool returns means nothing ran: it is released.
 const withEffect = (effect) => {
@@ -275,8 +275,8 @@ await check('a second .resume() of the same approved escalation is refused AUTHO
   } finally { f.restore(); }
 });
 
-// Pre-beta rerun 6 (resume-status nit): an in-process resume of an action that spends nothing used to leave its hold unsettled,
-// so a repeat resume reached the issuer's claim and was told AUTHORIZATION_IN_USE. Since 0.33.1 (FW6-4) the hold is settled
+// Resume status: an in-process resume of an action that spends nothing used to leave its hold unsettled,
+// so a repeat resume reached the issuer's claim and was told AUTHORIZATION_IN_USE. Since 0.33.1 the hold is settled
 // at 0 once the tool ran, and the repeat is AUTHORIZATION_ALREADY_USED without a claim.
 await check('a resume of an action that spends nothing settles its hold at 0, so a repeat resume is AUTHORIZATION_ALREADY_USED', async () => {
   const f = fakeIssuer({ escalation: [{ status: 'approved', reasonCode: 'ESCALATION_APPROVED', authorizationId: 'auth-nf' }] });

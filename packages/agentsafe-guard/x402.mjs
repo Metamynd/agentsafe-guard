@@ -1,4 +1,4 @@
-// GENERATED from backend/src/features/magp/x402-binding.ts — do not edit. Regenerate: npm run build:guard-core
+// GENERATED from the issuer's x402-binding.ts — do not edit.
 
 // src/features/magp/x402-binding.ts
 function toMinorUnits(amount, decimals) {

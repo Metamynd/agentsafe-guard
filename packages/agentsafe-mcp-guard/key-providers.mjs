@@ -1,5 +1,5 @@
-// key-providers.mjs — the keyProvider seam for the SERVICE side (docs/design/
-// agent-key-custody-local-signer-daemon-plan.md). Much smaller than agentsafe-guard's own copy:
+// key-providers.mjs — the keyProvider seam for the SERVICE side (agent
+// key custody). Much smaller than agentsafe-guard's own copy:
 // serviceKey is only ever used for one thing (signing a handshake nonce, MAGP §8.2), so there is
 // only one provider method here, not four.
 import crypto from 'node:crypto';

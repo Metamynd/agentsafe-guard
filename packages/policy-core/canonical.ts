@@ -73,7 +73,7 @@ export function buildAuthMessage(f: AuthMessageFields): string {
  * The PRE-`resource` (seven-field) canonical message this repo signed before the 7→8 field
  * change documented above. Exists ONLY so the gate can tell a genuinely-invalid signature
  * apart from a still-valid keypair on an SDK old enough to predate `resource` (see
- * mandate.service.ts's SIGNATURE_INVALID handling: a request that verifies against THIS but
+ * the issuer's SIGNATURE_INVALID handling: a request that verifies against THIS but
  * not `buildAuthMessage` gets a `CLIENT_PROTOCOL_VERSION_UNSUPPORTED` diagnosis instead of
  * the generic, misleading `SIGNATURE_INVALID` a rotated/broken key also produces). A match
  * here is NEVER treated as authorization — the caller still blocks either way; the old

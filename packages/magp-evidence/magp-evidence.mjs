@@ -19,7 +19,7 @@ import { Buffer } from 'node:buffer';
 const sha256Hex = (data) => createHash('sha256').update(data).digest('hex');
 const hashNodes = (a, b) => sha256Hex(Buffer.concat([Buffer.from(a, 'hex'), Buffer.from(b, 'hex')]));
 
-// ── Merkle inclusion (mirrors backend/src/features/magp/merkle.ts) ────────────────────────────
+// ── Merkle inclusion (mirrors the issuer's evidence Merkle tree) ──────────────────────────────
 /** Verify a leaf's inclusion proof reproduces the anchored root. `proof` = [{sibling, position}]. */
 export function verifyMerkleProof(leaf, proof, root) {
   let computed = leaf;
@@ -29,7 +29,7 @@ export function verifyMerkleProof(leaf, proof, root) {
   return computed === root;
 }
 
-// ── Evidence leaf (mirrors backend/src/features/magp/evidence-batch.ts) ───────────────────────
+// ── Evidence leaf (mirrors the issuer's evidence-batch leaf encoding) ─────────────────────────
 /** Canonical JSON: keys sorted, undefined→null, as an array of [k, v] pairs — hash-stable. */
 function canonical(obj) {
   return JSON.stringify(Object.keys(obj).sort().map((k) => [k, obj[k] ?? null]));

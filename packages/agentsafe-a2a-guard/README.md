@@ -1,10 +1,8 @@
 # AgentSafe A2A Guard — MAGP governance for the Agent2Agent protocol
 
 The A2A sibling to [`agentsafe-mcp-guard`](../agentsafe-mcp-guard): MCP governs *tool calls*,
-this governs *agent-to-agent task delegation*. Full design rationale and citations against the
-real A2A protobuf spec (not the paraphrased prose docs) live in
-[`docs/design/a2a-compatibility-scope.md`](../../docs/design/a2a-compatibility-scope.md) —
-read that first if anything here seems under-explained.
+this governs *agent-to-agent task delegation*. The design is cited against the real A2A
+protobuf spec (not the paraphrased prose docs).
 
 A2A already gives you transport-level auth (`AgentCard.securitySchemes`) and a task-lifecycle
 state machine. What it explicitly leaves as "application-level responsibility" is spend limits, a
@@ -14,8 +12,8 @@ independently re-verifies a signed MAGP envelope against the calling agent's own
 policy — it never trusts the caller's claim about what it's authorized to do.
 
 - **Zero external dependencies.** Node's built-in Ed25519 (`node:crypto`) + `fetch`, plus two
-  generated bundles (`policy-core.mjs`, `magp-did.mjs` — regenerate with
-  `npm run build:a2a-guard-core` in `backend/`) and one hand-written one (`magp-policy.mjs`,
+  generated bundles (`policy-core.mjs`, `magp-did.mjs` — generated from the policy core,
+  `packages/policy-core`) and one hand-written one (`magp-policy.mjs`,
   an identical copy of the MCP guard's own — see that file's header for why it's duplicated).
 - **No mutual handshake.** Unlike the MCP guard, this does **not** port MAGP §8.2's
   challenge-response identity proof — A2A already has transport-level auth and a discovery-time

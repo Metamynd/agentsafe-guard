@@ -1,4 +1,4 @@
-// GENERATED from backend/src/features/magp/local-receipt.ts - do not edit. Regenerate: npm run build:guard-core
+// GENERATED from the issuer's local-receipt.ts — do not edit.
 
 // src/policy-core/canonical.ts
 function escapeField(v) {

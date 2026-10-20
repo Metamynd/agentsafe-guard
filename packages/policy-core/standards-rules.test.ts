@@ -47,7 +47,7 @@ describe('molecule combinators', () => {
   });
 });
 
-describe('a currency-scoped cap names the currency, not an overspend (pre-beta 2026-10-09, M2)', () => {
+describe('a currency-scoped cap names the currency, not an overspend', () => {
   const usdCap = (predicate: string, combinator: Molecule['combinator'] = 'any'): Molecule => ({
     id: 'cap',
     combinator,

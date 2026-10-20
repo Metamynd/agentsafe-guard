@@ -1,8 +1,8 @@
 // context-signature.smoke.mjs — proves the Tier 1 context-claim binding opt-in
-// (docs/design/context-claim-binding.md): with signContext:true the guard signs the
+// (MAGP §8.3.13): with signContext:true the guard signs the
 // GovernanceEnvelope hash (context included) with the same agent key, the signature
-// genuinely verifies against that hash, and it changes when context changes — the
-// property the original tester report found missing. Off by default: no network.
+// genuinely verifies against that hash, and it changes when context changes — so
+// context swapped after signing is detectable. Off by default: no network.
 //
 //   node context-signature.smoke.mjs
 //
@@ -55,7 +55,7 @@ function check(ok, name) {
   });
   check(verifies(expectedHash, req.envelopeSignature), 'envelopeSignature genuinely verifies against the envelope hash (same key as the action signature)');
 
-  // The exact case the external tester found unsigned: swap context after the fact.
+  // The attack the binding exists to catch: swap context after the fact.
   const tamperedHash = envelopeHashFor({
     agentDid, action: req.action, amount: req.amount, currency: req.currency, merchant: req.merchant,
     itinerary: { riskLevel: 'high' }, trace: req.trace, materiality: req.materiality, nonce: req.nonce, issuedAt: req.issuedAt,

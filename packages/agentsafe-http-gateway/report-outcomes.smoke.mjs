@@ -1,4 +1,4 @@
-// report-outcomes.smoke.mjs — A-1 of the 2026-10-03 pre-beta rerun, at the gateway: with `reportOutcomes`, every governed
+// report-outcomes.smoke.mjs — outcome reporting at the gateway: with `reportOutcomes`, every governed
 // request the gateway answers is reported through the guard (MAGP §16.4) — what it ran WITHOUT a claim, and what it refused
 // itself — in the background, without changing a response. A claimed execution is not reported (the claim already put it
 // on the effect chain), and a request that named no agent has nobody to attribute it to.
@@ -38,7 +38,7 @@ await check('an unclaimed execution is reported as executed, with the agent\'s s
   assert.deepEqual([reports[0].outcome, reports[0].reasonCode, reports[0].httpStatus, reports[0].signed.agentDid], ['executed', 'EXECUTED', 200, 'did:key:zMine']);
 });
 
-// Pre-beta rerun 6 FW6-3: a low-risk request allowed on its own merits, naming an approved escalation's authorization it
+// A low-risk request allowed on its own merits, naming an approved escalation's authorization it
 // never claimed, must not be reported as having run under that authorization.
 await check('an unclaimed execution that NAMES an authorization is reported without claiming it ran under it', async () => {
   const gw = gatewayWith({ reportOutcomes: true });
@@ -75,7 +75,7 @@ await check('a binding refusal before the guard runs is reported too (it named a
   assert.deepEqual([reports[0].outcome, reports[0].reasonCode], ['refused', 'PAYLOAD_UNBINDABLE']);
 });
 
-// Pre-beta 2026-10-09, L1: a query-string refusal returned before the request was read, so it never reached the owner's
+// A query-string refusal used to be returned before the request was read, so it never reached the owner's
 // Activity Log. It names an agent like any other signed request; one with no signed request still names nobody.
 await check('a query-string refusal of a signed request is reported (QUERY_NOT_BOUND)', async () => {
   const gw = gatewayWith({ reportOutcomes: true });
@@ -163,7 +163,7 @@ await check('a request that named no agent, or an unrouted path, has nobody to a
   assert.equal(reports.length, 0);
 });
 
-// On by default since 0.32.0 (pre-beta evaluation 2026-10-11, H1): a gateway set up from the guide reported none of the
+// On by default since 0.32.0: a gateway set up from the guide reported none of the
 // refusals it decided itself, so tampering and replays at the enforcement point never reached the owner's audit trail.
 await check('on by default: an execution and a refusal are both reported', async () => {
   const gw = gatewayWith();

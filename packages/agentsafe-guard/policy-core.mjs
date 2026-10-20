@@ -1,4 +1,4 @@
-// GENERATED from backend/src/policy-core — do not edit. Regenerate: npm run build:guard-core
+// GENERATED from the policy core (packages/policy-core) — do not edit.
 
 // src/policy-core/provenance.ts
 var PROVENANCE_LEVELS = ["agent_asserted", "agent_signed", "gateway_derived", "authoritative", "attested"];
@@ -318,7 +318,7 @@ ${c.output ?? ""}`.toLowerCase();
   // The score is server-derived (signed-last) so the agent's itinerary can't fake it; when no score
   // is present (e.g. no counterparty resolved) the atom simply does not fire — no guidance.
   "hol-trust-below-review": (c, cfg) => typeof c.holTrustScore === "number" && c.holTrustScore < Number(cfg?.reviewBelow ?? 60),
-  // --- Owner-keyed context atoms (pre-beta rerun 6, NF-RISK-SELF). For a non-financial action the only risk input
+  // --- Owner-keyed context atoms. For a non-financial action the only risk input
   //     used to be the riskLevel the agent declares about itself: {riskLevel:'low', op:'delete-all'} ran unreviewed.
   //     These let the owner key a rule on WHAT is being done — a field of the context the executor acts on — so the
   //     agent's label no longer decides. See contextValueMatch below for the matching and fail-closed rules. ---
@@ -575,7 +575,7 @@ var ATOM_SPECS = [
     config: [{ key: "min", type: "number", required: true, description: "Minimum evidence confidence (0\u20131) required" }],
     requiredContext: ["evidenceConfidence"]
   },
-  // Owner-keyed context values (pre-beta rerun 6, NF-RISK-SELF). requiredContext is EMPTY on purpose: the field these
+  // Owner-keyed context values. requiredContext is EMPTY on purpose: the field these
   // read is chosen per atom instance (`field`), which a per-predicate list cannot express — the same reason amount-over's
   // optional `currency` is not listed. sop-compiler.input-semantics.ts reads the configured field instead, so the
   // review screen still says what an absent one does.

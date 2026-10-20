@@ -187,7 +187,7 @@ await check('--sandbox --non-financial says when a config file scope is not used
   assert.match(r.out, /the scope "send-customer-notice" in the config file is not used/);
 });
 
-await check('a --config file saved with a UTF-8 BOM (Notepad) is read, not refused as invalid JSON (pre-beta eval 2026-10-11, L6)', async () => {
+await check('a --config file saved with a UTF-8 BOM (Notepad) is read, not refused as invalid JSON', async () => {
   modern = true;
   const dir = fresh(); const cfg = join(dir, 'bom.json');
   writeFileSync(cfg, String.fromCharCode(0xfeff) + JSON.stringify({ name: 'x', scope: 'send-customer-notice' }), 'utf8');

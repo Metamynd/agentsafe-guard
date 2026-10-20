@@ -1,0 +1,3 @@
+# Keep the sdist to the package itself: the test suite and its fixtures are not shipped.
+prune tests
+global-exclude *.py[cod] __pycache__

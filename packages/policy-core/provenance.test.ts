@@ -204,7 +204,7 @@ describe('review findings: hostile keys and documents never throw and never chan
   });
 });
 
-describe('D-03: a risk rule no longer passes when the agent hides or garbles the field', () => {
+describe('a risk rule no longer passes when the agent hides or garbles the field', () => {
   const judge = (unsigned: Record<string, unknown>, extra?: Parameters<typeof buildRuleContext>[0]) =>
     evaluateStandardRules([riskMolecule()], ctxOf(unsigned, extra));
 

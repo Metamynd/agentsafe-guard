@@ -48,7 +48,7 @@ function scaffoldAndCheck(label, extraArgs) {
       check(false, `${label}: ${f.slice(outDir.length + 1)} — ${err.stderr?.toString().slice(0, 300) ?? err.message}`);
     }
   }
-  // Fresh-clone journey (BR-004/BR-005): agent.metamynd.json is gitignored, so a clone never has
+  // Fresh-clone journey: agent.metamynd.json is gitignored, so a clone never has
   // it. The generated entry point must say what to do rather than throw a bare ENOENT, and must
   // warn when a committed lockfile pins a guard older than this scaffold expects.
   const index = readFileSync(join(outDir, 'index.mjs'), 'utf8');

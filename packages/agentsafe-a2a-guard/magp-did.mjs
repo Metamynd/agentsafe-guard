@@ -1,4 +1,4 @@
-// GENERATED from backend/src/features/magp/did.ts — do not edit. Regenerate: npm run build:a2a-guard-core
+// GENERATED from the issuer's did.ts — do not edit.
 
 // src/features/magp/did.ts
 import crypto from "node:crypto";

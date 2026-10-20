@@ -1,6 +1,6 @@
 // upstream-unreachable.smoke.mjs — an upstream that never took the connection releases the hold (0.32.2).
 //
-// Pre-beta evaluation 2026-10-11, L7: with the upstream stopped, an allowed payment through `agentsafe-gateway serve`
+// Before: with the upstream stopped, an allowed payment through `agentsafe-gateway serve`
 // answered 502 GATEWAY_ERROR and the owner's Activity Log showed the hold's effect `unknown` (RESPONSE_LOST:UPSTREAM_ERROR),
 // still committed to the budget — although the TCP connection was refused before any byte was sent. A connect failure is
 // now told apart from a failure after the request may have been delivered: the first releases the hold and answers

@@ -1,4 +1,4 @@
-"""resume() runs only the request the owner approved (0.14.0, MAGP 9a.5; pre-beta rerun 4, F-1).
+"""resume() runs only the request the owner approved (0.14.0, MAGP 9a.5).
 
 Before: resume() signed and ran whatever args it was given under the approval's authorization. An owner approved $5 to
 skyward-air; resume(..., 5000) or resume with merchant 'shadow-broker' ran an in-process tool while the ledger recorded $5.
@@ -34,7 +34,7 @@ class Vectors(unittest.TestCase):
                 self.assertEqual(approved_context_digest(v["context"]), v["digest"])
 
     def test_reproduces_every_resume_claim_vector(self) -> None:
-        # MAGP-RESUME-CLAIM-v2 (0.19.0, pre-beta rerun 6 F-1-NF-R) binds the request and context digests; v1 binds neither.
+        # MAGP-RESUME-CLAIM-v2 (0.19.0) binds the request and context digests; v1 binds neither.
         for v in json.loads(VECTORS.read_text(encoding="utf-8"))["claimVectors"]:
             f = v["fields"]
             with self.subTest(v["name"]):
@@ -79,7 +79,7 @@ class ResumeBinding(unittest.TestCase):
                 self.assertEqual(hold["state"], "held", "the approved hold is left for the right request")
 
     def test_the_approved_context_is_bound_too_its_risk_level_included(self) -> None:
-        # F-1-NF (0.18.0): the context the owner approved is bound, so a resume that lowers the agent's risk claim is refused.
+        # 0.18.0: the context the owner approved is bound, so a resume that lowers the agent's risk claim is refused.
         esc = self.approved_escalation()
         with self.assertRaises(GovernanceBlocked) as refused:
             self.book.resume(esc, "skyward-air", 5, "low")
@@ -108,7 +108,7 @@ class ResumeBinding(unittest.TestCase):
 
 
 class ValuelessContextBinding(unittest.TestCase):
-    """F-1-NF (pre-beta rerun 5): an approval of read record-A was resumed as delete-all record-B and ran."""
+    """An approval of read record-A must never be resumed as delete-all record-B."""
 
     def setUp(self) -> None:
         key, seed = new_agent_key()

@@ -1,7 +1,7 @@
 // policy-demo.smoke.mjs — proves the NON-financial scaffold's demo is derived from the caller's own
 // policy and that every case it generates behaves as labelled against the REAL evaluator
-// (BR-006, beta regression 2026-09-20: a customer-communications policy used to produce a flight
-// demo with spend limits nobody asked for and no case for its own privacy/content rules).
+// (a customer-communications policy used to produce a flight demo with spend limits nobody
+// asked for and no case for its own privacy/content rules).
 //
 // No network, no npm install: it drives the real agentsafe-guard's guardToolLocal from source.
 //
@@ -111,7 +111,7 @@ await check('a multi-atom "all" molecule is tripped only when EVERY atom fires; 
   assert.deepEqual(notDemonstrated, []);
 });
 
-// ---- Review findings (BR-006 code review): each of these produced a demo that contradicted the
+// ---- Review findings: each of these produced a demo that contradicted the
 // ---- evaluator. The generator must now either stage them truthfully or say it cannot.
 
 await check('tiered rules on ONE atom (0.9 escalate + 0.5 block): the passing request passes, the tiers are reported not mislabelled', async () => {
@@ -244,7 +244,7 @@ await check('rules the demo cannot drive are reported, not silently dropped or f
   assert.match(notDemonstrated[2].why, /observe/);
 });
 
-await check('the runtime inputs each rule reads are listed (BR-008: a rule needs its field supplied)', () => {
+await check('the runtime inputs each rule reads are listed (a rule needs its field supplied)', () => {
   const { inputs } = buildPolicyCases(POLICIES['customer communications (PII, consent, content, risk)'].map(ruleToMolecule));
   const fields = Object.fromEntries(inputs.map((i) => [i.field, i.rules]));
   assert.deepEqual(Object.keys(fields).sort(), ['consent', 'piiPresent', 'prompt / output', 'riskLevel']);
@@ -254,7 +254,7 @@ await check('the runtime inputs each rule reads are listed (BR-008: a rule needs
 await check('the non-financial default SOP passes an ordinary request and reviews a high-risk one — no amount rule', async () => {
   const doc = harnessDefaultSopNeutral();
   assert.ok(!JSON.stringify(doc).includes('amount'), 'no amount atom in the default');
-  // D-03: an ordinary request STATES its risk. One that leaves it out is no longer waved through — a missing
+  // an ordinary request STATES its risk. One that leaves it out is no longer waved through — a missing
   // riskLevel is unverifiable and escalates (spec §6.4.3), exactly like a high one, so an agent cannot skip the
   // review by staying silent.
   const results = await runCases(doc, [
@@ -315,7 +315,7 @@ await check('a policy component the scaffolder cannot inspect is never assumed t
   assert.equal(resolveFinancial({ config: 'c.json', merchants: 'acme' }, { name: 'x', rules: [rule('PII', 'pii-present', {}, 'escalate')] }).financial, true, 'a --merchants flag');
 });
 
-// ---- The real CLI, end to end: what actually lands on disk for the tester's kind of policy. ----
+// ---- The real CLI, end to end: what actually lands on disk for a non-financial policy. ----
 const workdir = mkdtempSync(join(tmpdir(), 'metamynd-policy-demo-'));
 const cliEnv = { ...process.env, CREATE_METAMYND_AGENT_NO_MAIN: '' }; // '' = falsy: let the child run main()
 function scaffold(name, args) {

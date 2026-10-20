@@ -1,4 +1,4 @@
-"""Authorize calls do not stall on a dead address, and a timed-out authorize never runs twice (M1, 2026-10-09 pre-beta).
+"""Authorize calls do not stall on a dead address, and a timed-out authorize never runs twice.
 
 6 of 29 authorize calls took 15-32 s: whole multiples of the 15 s timeout. Not a retry: the client never retries an
 authorize. urllib tried the CDN's two IPv6 addresses before IPv4, one at a time, each with the full timeout, and the

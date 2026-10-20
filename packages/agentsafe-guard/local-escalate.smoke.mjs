@@ -1,4 +1,4 @@
-// local-escalate.smoke.mjs — H-1 (pre-beta evaluation, 2026-10-02): a local-first guard decided ESCALATE in-process, so
+// local-escalate.smoke.mjs — before: a local-first guard decided ESCALATE in-process, so
 // the gate never parked the action. There was no escalationId to poll, nothing in the owner's Escalations queue, and the
 // scaffold's "approve it in the dashboard and the action resumes" could not happen. An escalate now goes to the gate —
 // for a value action and an amount-0 one alike — and only pure offline (sealValueActions:false) keeps it local.

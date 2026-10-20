@@ -244,7 +244,7 @@ test('the issuer being unreachable fails CLOSED', async () => {
   } finally { globalThis.fetch = realFetch; }
 });
 
-// Pre-beta rerun 6 FW6-1: an issuer's refusal of the claim carries a `detail` (for AUTHORIZATION_CONTEXT_REQUIRED, which gateway
+// An issuer's refusal of the claim carries a `detail` (for AUTHORIZATION_CONTEXT_REQUIRED, which gateway
 // to upgrade). The gateway logs it in one line and the block carries it, so the agent's tool can surface it.
 test('a refused claim carries the issuer detail on the block and logs one line', async () => {
   const detail = 'AUTHORIZATION_CONTEXT_REQUIRED: ... Upgrade the gateway: @metamynd/agentsafe-mcp-guard >= 0.27.0';

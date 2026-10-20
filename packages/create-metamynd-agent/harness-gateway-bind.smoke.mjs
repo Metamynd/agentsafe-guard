@@ -103,7 +103,7 @@ try {
     assert.equal(fin.toolRuns(), before + 1);
   });
 
-  // Tester rerun 2026-09-24: the same signed bytes were accepted twice. The gateway now remembers each nonce.
+  // The same signed bytes used to be accepted twice. The gateway now remembers each nonce.
   await check('a byte-identical replay of an honest request is refused (REPLAY_DETECTED) and the tool runs once', async () => {
     const before = fin.toolRuns();
     const body = { amount: 250, currency: 'USD', merchant: 'skyward-air' };
@@ -194,7 +194,7 @@ try {
     assert.equal(fin.toolRuns(), before);
   });
 
-  // M-4: the scaffolded agent no longer defaults a missing riskLevel to 'low'. What it now sends when the tool call states no
+  // the scaffolded agent no longer defaults a missing riskLevel to 'low'. What it now sends when the tool call states no
   // risk is a context WITHOUT one, and that must reach the policy as missing: held for review, the tool never runs.
   await check('a request whose context states NO riskLevel is held for review, not allowed as low, and the tool never runs', async () => {
     const before = fin.toolRuns();
@@ -253,15 +253,15 @@ await check('hosted financial scaffold: agent body and gateway allowedFields agr
   assert.doesNotMatch(agent, /body: JSON\.stringify\(args\)/, 'the agent must not ship its whole argument object to the gateway');
   // Payload binding is ON: the body the agent sends is signed as the payload, the authorization made by guardTool is bound to the
   // same body, and the gateway refuses a request that bound none.
-  // The request handed to the gateway is the guarded call's own (decision.governanceHeaders(), guard 0.31; pre-beta rerun 6,
-  // FW6-2), so the payload it signs is the one in the guardTool mapping below.
+  // The request handed to the gateway is the guarded call's own (decision.governanceHeaders(), guard 0.31),
+  // so the payload it signs is the one in the guardTool mapping below.
   assert.match(agent, /\.\.\.\(await decision\.governanceHeaders\(\)\)/, 'the request handed to the gateway is the decision\'s own, payload bound');
   assert.match(agent, /payload: \{ amount: a\.amount, merchant: a\.merchant, currency: a\.currency \?\? /, 'the authorization is bound to the same body');
   assert.match(gw, /requirePayloadBinding: true/, 'the gateway refuses an unbound request');
   rmSync(out, { recursive: true, force: true });
 });
 
-// M-4: every financial template used to map `riskLevel: a.riskLevel ?? 'low'`, turning "the agent did not say" into "low" (allowed,
+// every financial template used to map `riskLevel: a.riskLevel ?? 'low'`, turning "the agent did not say" into "low" (allowed,
 // no review). The gate escalates a missing risk by design, so the scaffold must pass it through unchanged — and say so in its README.
 await check('no financial scaffold defaults a missing riskLevel to low, and each README says riskLevel is the agent\'s own claim', async () => {
   process.env.CREATE_METAMYND_AGENT_NO_MAIN = '1';

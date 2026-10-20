@@ -1,5 +1,5 @@
 // Type declarations for @metamynd/agentsafe-guard (0.36.0), as .d.mts: the declarations of an ES module (agentsafe-guard.mjs). Hand-written against agentsafe-guard.mjs: the package ships
-// plain ESM with no build step, and had no types at all (pre-beta evaluation 2026-10-09, L5d). They cover the public
+// plain ESM with no build step, and had no types at all before these. They cover the public
 // surface a TypeScript agent uses; fields the issuer may add later are allowed through ([key: string]: unknown).
 
 /** MAGP §6 dispositions. A verdict that is neither `allow` nor `observe` is a refusal (§13.3). */

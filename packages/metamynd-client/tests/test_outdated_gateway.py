@@ -1,4 +1,4 @@
-"""An approval resumed through a gateway that predates the approved-context binding (0.20.0; pre-beta rerun 6, FW6-1).
+"""An approval resumed through a gateway that predates the approved-context binding (0.20.0).
 
 Before: the old gateway's claim was refused AUTHORIZATION_CONTEXT_REQUIRED (nothing ran there), the tool relayed that
 refusal, and resume() VOIDED the approved hold as "tool did not run". The resume after upgrading the gateway then said

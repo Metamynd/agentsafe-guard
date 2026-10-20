@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import * as source from './index.js';
 
 /**
- * Bundle parity for the owner-keyed context atoms (pre-beta rerun 6, NF-RISK-SELF). A gateway evaluates SOPs locally with
+ * Bundle parity for the owner-keyed context atoms. A gateway evaluates SOPs locally with
  * the policy-core bundle it ships; if a bundle were not regenerated, the hosted gate would escalate `op: delete-all` and a
  * gateway judging from its bundle would let it run. Each committed bundle must reach the same verdict, the same signal
  * and the same normalisation as the source on every vector below.
@@ -18,9 +18,8 @@ const ALL_BUNDLES = [
 ];
 
 /**
- * This file runs in two layouts: backend/src/policy-core here, packages/policy-core in the public mirror
- * (scripts/oss/publish-guard-repo.mjs), where each mirrored integrations/<pkg> lives at packages/<pkg> and the signer
- * and frontend bundles are not published. Here every bundle is required; the mirror checks the ones it carries.
+ * This file runs in two layouts: the policy core's development tree, and packages/policy-core in the public repository,
+ * where each published package lives at packages/<pkg> and the signer and frontend bundles are not carried. Here every bundle is required; the mirror checks the ones it carries.
  */
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIRROR = basename(dirname(HERE)) === 'packages';

@@ -1,8 +1,8 @@
-"""Two processes resuming one approval run it once (0.17.0, MAGP 9a.6; pre-beta rerun 4, F-2).
+"""Two processes resuming one approval run it once (0.17.0, MAGP 9a.6).
 
 Before: the client's resume lock was per client object, so two processes (two clients) resuming the same approved escalation
 with an in-process tool both ran it. resume() now takes the one resume at the gate (MAGP-RESUME-CLAIM-v1; v2 since 0.19.0, binding the approved request and
-context — pre-beta rerun 6 F-1-NF-R) before running.
+context) before running.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ class ResumeClaim(unittest.TestCase):
         self.gate.resume_claims = False
         esc = self.approved()
         self.assertEqual(self.process().resume(esc, "skyward-air", 90), "booked")
-    # ---- F-1-NF-R (0.19.0, pre-beta rerun 6): the claim binds the approved request and context at the GATE -----------------
+    # ---- v2 (0.19.0): the claim binds the approved request and context at the GATE -----------------
 
     def claims(self) -> list:
         return [b for p, b in zip(self.gate.paths, self.gate.bodies) if p.endswith("/resume-claim")]

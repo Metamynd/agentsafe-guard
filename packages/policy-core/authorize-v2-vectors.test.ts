@@ -10,8 +10,8 @@ import { AUTH_MESSAGE_V2_TAG, buildAuthMessage } from './canonical.js';
  * from the v1 vectors on purpose — every client that pins authorize-vectors.json asserts eight fields, and must keep passing
  * until it implements v2. An SDK that signs `jurisdiction` reproduces these before it is trusted with a real request.
  */
-// backend/src/policy-core here, packages/policy-core in the public mirror (scripts/oss/publish-guard-repo.mjs, which
-// mirrors docs/protocol too): the repository root is found from this file, never from the cwd.
+// This file runs both in the policy core's development tree and at packages/policy-core in the public repository (which
+// carries docs/protocol too): the repository root is found from this file, never from the cwd.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = basename(dirname(HERE)) === 'packages' ? join(HERE, '..', '..') : join(HERE, '..', '..', '..');
 const doc = JSON.parse(readFileSync(join(REPO, 'docs', 'protocol', 'authorize-v2-vectors.json'), 'utf8')) as {

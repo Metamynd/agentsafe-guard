@@ -1,6 +1,6 @@
 // a2a-guard.smoke.mjs — end-to-end proof that guardA2ATask independently re-verifies a signed
 // MAGP envelope carried in an A2A Message's metadata, and that the decision->TaskState mapping
-// (docs/design/a2a-compatibility-scope.md §5) is exactly what it claims: a REFUSAL IS A RETURNED
+// (the A2A compatibility scope, §5) is exactly what it claims: a REFUSAL IS A RETURNED
 // TaskStatus, never a thrown error — the deliberate divergence from agentsafe-mcp-guard's
 // throw-based guardIncomingTool, because A2A tasks have a formal state machine.
 //
@@ -52,7 +52,7 @@ const bundle = {
 const guard = createA2aGuard({ allowedAgents: 'any', fetchBundle: async () => bundle });
 
 // An honest client states its risk: the bundle's SOP has a risk rule, and an envelope that leaves `riskLevel` out is
-// escalated, not waved through (see the D-03 section below).
+// escalated, not waved through (see the risk-rule section below).
 function signedEnvelope(action, amount = 0, context = { riskLevel: 'low' }) {
   const nonce = crypto.randomUUID();
   const issuedAt = new Date().toISOString();
@@ -69,7 +69,7 @@ function messageWithEnvelope(envelope, { contextId = 'ctx-1', taskId = 'task-1' 
 let failed = 0;
 const ok = (cond, name, extra = '') => { if (!cond) failed++; console.log(`${cond ? 'ok  ' : 'FAIL'}  ${name}${extra ? '  →  ' + extra : ''}`); };
 
-console.log('— D-03: the agent cannot skip a risk rule by hiding, garbling or understating its risk (spec §6.4.3) —');
+console.log('— the agent cannot skip a risk rule by hiding, garbling or understating its risk (spec §6.4.3) —');
 {
   const verdict = async (envelope, opts, g = guard) => { const d = await g.verifyRequest(envelope, opts); return `${d.decision}/${d.reasonCode}`; };
   ok((await verdict(signedEnvelope('summarize-report', 0, {}))) === 'escalate/CONTEXT_UNVERIFIABLE', 'OMITTING riskLevel -> escalate (was allow)');

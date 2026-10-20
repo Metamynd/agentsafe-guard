@@ -216,7 +216,7 @@ export const ATOM_SPECS: AtomSpec[] = [
     config: [{ key: 'min', type: 'number', required: true, description: 'Minimum evidence confidence (0–1) required' }],
     requiredContext: ['evidenceConfidence'],
   },
-  // Owner-keyed context values (pre-beta rerun 6, NF-RISK-SELF). requiredContext is EMPTY on purpose: the field these
+  // Owner-keyed context values. requiredContext is EMPTY on purpose: the field these
   // read is chosen per atom instance (`field`), which a per-predicate list cannot express — the same reason amount-over's
   // optional `currency` is not listed. sop-compiler.input-semantics.ts reads the configured field instead, so the
   // review screen still says what an absent one does.

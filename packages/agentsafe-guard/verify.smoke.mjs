@@ -89,7 +89,7 @@ console.log('\n  verify — the sandbox bug: an omitted merchant constraint\n');
   ok('reported NOT CONFIGURED, not passed', status(r, 'merchants') === 'not-configured');
   ok('says every merchant is permitted', /EVERY merchant is permitted/.test(r.output));
   ok('still exits 0 without --require', r.ok === true);
-  // F-5r (pre-beta rerun 5): the scaffold's demo then escalates its first payment (new merchant, a gate-side check), so
+  // The scaffold's demo then escalates its first payment (new merchant, a gate-side check), so
   // the baseline line says so rather than a bare "allow".
   ok('the baseline says the first payment to a new merchant is held', /FIRST payment to each new merchant/.test(r.output));
 }
@@ -173,7 +173,7 @@ console.log('\n  verify — a risk rule at the "low" threshold vs the hard-coded
   // verify's baseline sends riskLevel "low". A rule whose threshold IS "low" ("escalate on ANY risk") fires on
   // that, so a healthy agent reads as failing — which is the truth: that rule sends every action to a human.
   // There used to be a way out: --context riskLevel=null meant "no risk level", which never fired a risk rule.
-  // That was D-03 by another name (hiding the field skipped the rule), so it is gone: a missing or null risk is
+  // That was the same hole by another name (hiding the field skipped the rule), so it is gone: a missing or null risk is
   // now UNVERIFIABLE and escalates too (spec §6.4.3).
   const lowRisk = [{ id: 'sop', document: { molecules: [{ id: 'r', name: 'Any risk', combinator: 'all', atoms: [{ id: 'a', predicate: 'risk-at-or-above', config: { level: 'low' } }], decision: 'escalate', reasonCode: 'ANY_RISK' }] } }];
   const withRiskSops = async (opts = {}) => {

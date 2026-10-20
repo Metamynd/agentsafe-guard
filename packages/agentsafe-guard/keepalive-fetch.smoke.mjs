@@ -107,7 +107,7 @@ test('a stubbed globalThis.fetch is honoured (the packages\' tests rely on this)
   assert.equal((await (await fetch(`${base}/echo`)).json()).method, 'GET', 'restored: back to the keep-alive path');
 });
 
-test('F-9: a stub installed BEFORE the module loads is honoured too, and so is whatever replaces it later', async () => {
+test('a stub installed BEFORE the module loads is honoured too, and so is whatever replaces it later', async () => {
   const real = globalThis.fetch;
   globalThis.fetch = async () => new Response('stubbed-first', { status: 200 });
   try {

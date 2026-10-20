@@ -1,6 +1,6 @@
 // Type declarations for @metamynd/agentsafe-http-gateway (0.31.1), as .d.mts: the declarations of an ES module
-// (gateway.mjs). Hand-written: the package ships plain ESM with no build step and had no types (pre-beta evaluation
-// 2026-10-09, L5d follow-up). route-match.d.mts and service-identity.d.mts declare the other entry points.
+// (gateway.mjs). Hand-written: the package ships plain ESM with no build step and had no types
+// before these. route-match.d.mts and service-identity.d.mts declare the other entry points.
 
 // The guard shapes the gateway relies on, declared here so these types stand alone whatever agentsafe-mcp-guard version
 // is installed (its own declarations, 0.31.0+, are a superset).

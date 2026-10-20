@@ -1,10 +1,10 @@
 {
   "_comment": [
     "MAGP payload-binding conformance vectors (spec section 8.3.9).",
-    "Generated from backend/src/features/magp/payload-binding.ts (backend/scripts/generate-payload-vectors.ts), which is the source of truth.",
+    "Generated from the issuer's payload-binding module (the same source each guard's payload-binding.mjs is generated from), which is the source of truth.",
     "Every implementation MUST reproduce `canonical` and `digest` from `jsonText` (RFC 8785 canonical JSON, SHA-256 of its UTF-8 bytes, prefixed \"sha256:\"), MUST refuse every `reject` case, and for `binding` MUST reproduce `message` and the Ed25519 `signature` under `seed`.",
     "The seed is the public RFC 8032 section 7.1 test vector 1 key. It is a test key, never a secret, and must never be used for a real agent.",
-    "The suites that read this file: backend/src/features/magp/payload-binding.test.ts and integrations/metamynd-client/tests/test_payload_vectors.py."
+    "The suites that read this file: the issuer's payload-binding tests and packages/metamynd-client/tests/test_payload_vectors.py."
   ],
   "algorithm": "Ed25519",
   "canonicalization": "RFC 8785 (JCS)",

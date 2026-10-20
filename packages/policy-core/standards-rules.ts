@@ -23,7 +23,7 @@ const CURRENCY_SCOPED_CAPS = new Set(['amount-over', 'cumulative-over']);
 /**
  * Whether a FIRED molecule fired because the request's currency is outside a cap's scope. Such a cap fires whatever the
  * amount (fail closed), so its own code ("over the cap", SOP_SPEND_CAP) named the wrong cause: EUR 10 against a USD 200 cap
- * read as an overspend (pre-beta evaluation 2026-10-09, M2). A `none` molecule fires when its atoms do NOT, so a currency
+ * read as an overspend. A `none` molecule fires when its atoms do NOT, so a currency
  * scope there is never the cause.
  */
 function firedOnCurrency(m: Molecule, ctx: EvaluationContext): boolean {
@@ -120,7 +120,7 @@ export interface StandardRuleResult {
   /**
    * Present when a molecule that refuses or escalates fired on an owner-keyed context value (`context-value-in` /
    * `context-value-not-in`): which field, which value, and why — so the issuer can say the risk was DERIVED from what
-   * the agent is doing, not taken from the agent's own label (pre-beta rerun 6, NF-RISK-SELF; see contextRiskSignals).
+   * the agent is doing, not taken from the agent's own label (see contextRiskSignals).
    * Collected from every such firing molecule, not only the winning one. Absent otherwise.
    */
   contextSignals?: ContextSignal[];
@@ -160,7 +160,7 @@ function contextSignalsOf(m: Molecule, ctx: EvaluationContext, decision: FireDec
  * The derived risk signals a rule result carries for owner-keyed context values, in the same shape as the financial
  * ones (`riskSignalsFor`): `{ signal: 'context-value', level: 'high', detail }`, e.g. "op=delete-all is owner-marked
  * for review". So a review raised this way says it was derived by MetaMynd from the request, not from the riskLevel
- * the agent declared (pre-beta rerun 6, NF-RISK-SELF). Deduplicated by detail.
+ * the agent declared. Deduplicated by detail.
  */
 export function contextRiskSignals(result: Pick<StandardRuleResult, 'contextSignals'> | null | undefined): { signal: 'context-value'; level: 'high'; detail: string }[] {
   const out = new Map<string, { signal: 'context-value'; level: 'high'; detail: string }>();
@@ -377,7 +377,7 @@ function validateAtomConfig(predicate: string, config: Record<string, unknown> |
       errors.push(`atom '${predicate}' config '${field.key}' must be a ${field.type}`);
     } else if (field.required && field.type === 'string' && String(cfg[field.key]).trim() === '') {
       // A blank required string (a context-value atom's `field`) validates as a string but names nothing: the atom
-      // would never fire, so the rule would look active and restrict nothing (NF-RISK-SELF).
+      // would never fire, so the rule would look active and restrict nothing.
       errors.push(`atom '${predicate}' config '${field.key}' must not be blank`);
     }
   }

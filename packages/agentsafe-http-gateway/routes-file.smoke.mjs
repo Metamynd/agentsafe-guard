@@ -1,6 +1,5 @@
 // routes-file.smoke.mjs — a routes file that exists but cannot be parsed stops server.mjs instead of starting it with zero
-// governed routes (pre-beta evaluation 2026-10-11, follow-up to L6: an unparseable file used to read as "no routes file",
-// so every request passed through ungoverned). Only a MISSING file means "nothing governed".
+// governed routes (an unparseable file used to read as "no routes file", so every request passed through ungoverned). Only a MISSING file means "nothing governed".
 //
 //   node routes-file.smoke.mjs
 import assert from 'node:assert/strict';

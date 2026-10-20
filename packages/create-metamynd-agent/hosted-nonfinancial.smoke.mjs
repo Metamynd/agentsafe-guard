@@ -1,4 +1,4 @@
-// hosted-nonfinancial.smoke.mjs — the HOSTED non-financial scaffold, run for real (BR-006).
+// hosted-nonfinancial.smoke.mjs — the HOSTED non-financial scaffold, run for real.
 //
 // The hosted flow needs a live login, so this stands in for the platform with the smallest thing
 // the generated project actually talks to: an issuer that serves the agent's policy bundle. It then
@@ -72,8 +72,8 @@ const POLICY_KEY = rawPublicKeyHex(issuerKeys.publicKey);
 const servedBundle = () => signBundle({ ...bundle, issuedAt: new Date().toISOString() }, issuerKeys.privateKey);
 const provisionBodies = []; // what the hosted CLI actually POSTed to /onboarding/agent
 // The rule-pack catalog the stand-in platform serves, in the shapes a CLI can meet: 'current' (says which
-// packs need spend limits — FA-001 onward), 'legacy' (no requiresSpend: packs apply only with spend
-// limits), 'none' (endpoint unavailable). Molecules mirror backend/src/features/onboarding/rule-packs.ts.
+// packs need spend limits), 'legacy' (no requiresSpend: packs apply only with spend
+// limits), 'none' (endpoint unavailable). Molecules mirror the hosted platform's rule packs.
 const PACKS = {
   comms: {
     label: 'Communications', requiresSpend: false,
@@ -412,7 +412,7 @@ try {
     return f;
   };
 
-  await check('hosted CLI: --non-financial with a no-spend pack APPLIES it and holds the platform to the shown rules (FA-001)', async () => {
+  await check('hosted CLI: --non-financial with a no-spend pack APPLIES it and holds the platform to the shown rules', async () => {
     provisionBodies.length = 0;
     catalogMode = 'current';
     const r = await cli(['--non-financial', '--config', packFile('comms'), '--out', join(workdir, 'cli-pack-comms'), '--no-gateway']);

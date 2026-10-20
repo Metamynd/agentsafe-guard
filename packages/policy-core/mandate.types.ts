@@ -12,8 +12,6 @@
  * prohibition or constraint can therefore be authored to CONTAIN the agent, not just
  * block one action, via its `enforcement` / `onFail`. 'decommission' is reserved for
  * the owner-initiated agent-identity containment state (never fired by a rule).
- *
- * See docs/design/agent-mandates-and-standards-layer.md §3.
  */
 
 export type MandateDecision = 'allow' | 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine' | 'decommission';

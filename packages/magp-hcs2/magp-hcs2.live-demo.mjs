@@ -12,9 +12,9 @@
  *
  *   HEDERA_OPERATOR_ID=... HEDERA_OPERATOR_KEY=... node magp-hcs2.live-demo.mjs
  *
- * or point it at backend/.env's existing dev testnet credentials:
+ * or point it at a .env file that already holds testnet operator credentials:
  *
- *   MAGP_HCS2_DOTENV_PATH=../../backend/.env node magp-hcs2.live-demo.mjs
+ *   MAGP_HCS2_DOTENV_PATH=/path/to/.env node magp-hcs2.live-demo.mjs
  *
  * Uses TESTNET HBAR, which has no real-world value.
  */

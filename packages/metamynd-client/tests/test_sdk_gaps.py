@@ -1,4 +1,4 @@
-"""Python SDK gaps from the 2026-10-09 pre-beta evaluation (L5), each pinned here.
+"""Python SDK gaps, each pinned here.
 
   a. There was no loader for the agent.metamynd.json the deploy screen hands out: every example rebuilt the client
      from environment variables. `MetaMyndClient.from_config` reads it, a passphrase-encrypted key included.
@@ -72,7 +72,7 @@ class FromConfig(unittest.TestCase):
         self.assertEqual((client.api, client.agent_did, client.timeout, client.sign_context), (self.base, "did:key:z6MkA", 3, False))
 
     def test_an_api_base_override_wins_over_the_file_like_api(self) -> None:
-        # Pre-beta evaluation 2026-10-11, L5: the Node guard dropped { apiBase } and called the file's apiBase
+        # The Node guard once dropped { apiBase } and called the file's apiBase
         # (production); Python takes the same override as `api_base=`, and `api=` still wins when both are given.
         path = self.write({"apiBase": "http://production.invalid/api/v1", "agentDid": "did:key:z6MkOverride", "agentKey": self.seed})
         client = MetaMyndClient.from_config(path, api_base=self.base)
@@ -82,7 +82,7 @@ class FromConfig(unittest.TestCase):
         self.assertEqual(both.api, self.base)
 
     def test_a_file_with_a_utf8_bom_loads(self) -> None:
-        # Pre-beta evaluation 2026-10-11, L6: a file saved by Notepad starts with a BOM, which json.load rejected.
+        # A file saved by Notepad starts with a BOM, which json.load rejected.
         path = self.dir / "agent.metamynd.json"
         path.write_text(json.dumps({"apiBase": self.base, "agentDid": "did:key:z6MkBom", "agentKey": self.seed}), encoding="utf-8-sig")
         self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"))

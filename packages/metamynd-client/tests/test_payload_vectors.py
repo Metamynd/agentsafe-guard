@@ -2,7 +2,7 @@
 
 Payload binding (MAGP section 8.3.9) only works if the agent's language and the executing service's language compute the
 SAME digest for the same payload. The vectors are generated from the TypeScript implementation (the source of truth) and
-checked by BOTH suites — backend/src/features/magp/payload-binding.test.ts and this file — so a canonicalisation
+checked by BOTH suites — the issuer's TypeScript payload-binding test and this file — so a canonicalisation
 difference (number spelling, key order beyond the BMP, string escapes) fails a test instead of silently making every bound
 request unclaimable.
 

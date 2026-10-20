@@ -1,6 +1,6 @@
 // agentsafe-a2a-guard.mjs — governance for the A2A (Agent2Agent) protocol, the receiving
-// agent's own task boundary. See docs/design/a2a-compatibility-scope.md for the full design
-// rationale and citations; this file implements exactly what that scope names.
+// agent's own task boundary. README.md summarises the design rationale (MetaMynd's A2A
+// compatibility scope, cited against the A2A protobuf spec); this file implements exactly that scope.
 //
 // A2A already gives agents transport-level auth (AgentCard `securitySchemes`) and task-lifecycle
 // states — what it explicitly leaves as "application-level responsibility" is spend limits, a
@@ -69,7 +69,7 @@ export function unsignedContextOf(signed) {
 }
 
 /**
- * The context-signature refusals (context-claim binding, docs/design/context-claim-binding.md), both hard blocks returned
+ * The context-signature refusals (context-claim binding, MAGP §8.3.13), both hard blocks returned
  * before any rule is evaluated, answered as TASK_STATE_AUTH_REQUIRED: CONTEXT_SIGNATURE_INVALID (an `envelopeSignature` is
  * present and does not verify — the same code the issuer's gate answers) and CONTEXT_SIGNATURE_REQUIRED (none, on a guard
  * with `requireContextSignature`; receiver-only, the gate has no such option).
@@ -98,7 +98,7 @@ import { envelopeHashFor } from './governance-envelope.mjs';
 import { verifyBundle } from './magp-policy.mjs';
 import { PAYLOAD_DIGEST_HEADER, buildPayloadBindingMessage, claimDigestField, isPayloadDigest, payloadDigestOf, toWireJson } from './payload-binding.mjs';
 
-// The approved-context binding (MAGP §9a.5, pre-beta rerun 5 F-1-NF): a hold a PERSON approved is bound to the context
+// The approved-context binding (MAGP §9a.5): a hold a PERSON approved is bound to the context
 // (itinerary) that person was shown. The claim states the digest of the context this Service is about to execute; the issuer
 // refuses any other. RFC 8785 canonical JSON under its own domain key, pinned by docs/protocol/resume-binding-vectors.json.
 const APPROVED_CONTEXT_DOMAIN = 'MAGP-APPROVED-CONTEXT-v1';
@@ -119,7 +119,7 @@ export const MAGP_A2A_EXTENSION_URI = 'https://schemas.metamynd.ai/a2a-extension
 
 /**
  * The issuer could not be reached — a network failure or a 5xx on the bundle fetch. Tagged so verifyRequest refuses it
- * GATE_UNREACHABLE, the agent guard's code for the same outage, instead of the catch-all GUARD_ERROR (eval 2026-10-03, N-6).
+ * GATE_UNREACHABLE, the agent guard's code for the same outage, instead of the catch-all GUARD_ERROR.
  * A 4xx is an answer, not an outage, and stays an ordinary error.
  */
 function gateUnreachable(cause) {
@@ -262,7 +262,7 @@ export function buildTaskStatus({ decision, reasonCode, escalationId, contextId,
       taskId: taskId ?? null,
       role: 'agent',
       parts: [{ text: summary }],
-      // `detail` (0.19.1, pre-beta rerun 6 FW6-1): the issuer's sentence for a refused claim, e.g. which gateway to upgrade for
+      // `detail` (since 0.19.1): the issuer's sentence for a refused claim, e.g. which gateway to upgrade for
       // AUTHORIZATION_CONTEXT_REQUIRED. Present only when there is one; branch on `reasonCode`, never on it.
       metadata: { [MAGP_A2A_EXTENSION_URI]: { decision, reasonCode, escalationId: escalationId ?? null, ...(typeof detail === 'string' && detail ? { detail } : {}) } },
     },
@@ -304,7 +304,7 @@ export function buildTaskStatus({ decision, reasonCode, escalationId, contextId,
  * @param {string[]|'any'} [cfg.allowedAgents] the agent DIDs this agent accepts tasks from (MAGP §16.3). A task signed by
  *   any other agent is refused `AGENT_NOT_ADMITTED` before its policy is fetched or any authorization is claimed. Every check
  *   judges the CALLER against the CALLER's own policy, so without this an agent that acts with its owner's credentials
- *   does so for any agent on the platform whose own owner granted it a matching action (XT-1, ported from
+ *   does so for any agent on the platform whose own owner granted it a matching action (ported from
  *   agentsafe-mcp-guard). `'any'` accepts every governed agent on purpose. Left unset, it accepts every agent, as before
  *   0.15.0, and says so once at startup.
  */
@@ -319,7 +319,7 @@ export function agentAllowList(allowedAgents, label) {
     console.warn(`[${label}] allowedAgents: 'any' — this Service acts for EVERY governed agent, each judged only by its own owner's rules. Right only for a public tool, or one that resolves each caller's own credential (the Credential Vault); never for a Service that holds one owner's credentials (MAGP §16.3).`);
     return { serves: () => true, pinned: 'any' };
   }
-  // Unset is a startup error (pre-beta refinement plan, 2026-10-04): a Service that holds credentials must name whom it
+  // Unset is a startup error: a Service that holds credentials must name whom it
   // acts for, and serving everyone has to be said out loud ('any') — it is never what an omission means.
   if (allowedAgents === undefined || allowedAgents === null) {
     throw new Error(`${label}: allowedAgents is required — the agent DIDs this Service acts for (MAGP §16.3), or 'any' for a Service that holds no one owner's credentials`);
@@ -373,7 +373,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
   const issuerChannelAuthenticated = !!base && (/^https:\/\//i.test(base) || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(base));
   // With no policyPublicKey, nothing but the transport vouches for the policy bundle. Over plain http:// nothing does: a
   // proxy on the path can rewrite the rules and the guard would enforce the forged ones. A custom fetchBundle is the
-  // integrator's own source, so it is left to them. (agentsafe-mcp-guard's D-08 rule, which this guard lacked until 0.13.3.)
+  // integrator's own source, so it is left to them. (agentsafe-mcp-guard has the same forged-bundle rule; this guard gained it in 0.13.3.)
   const bundleUnauthenticated = !policyPublicKey && typeof fetchBundle !== 'function' && !!base && !/^https:\/\//i.test(base);
   if (!policyPublicKey && base) {
     console.warn(
@@ -446,7 +446,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         if (ambiguous && attempt < attempts) { lastError = `HTTP ${res.status}`; await new Promise((r) => setTimeout(r, 150)); continue; }
         if (!res.ok) {
           const reasonCode = refusalCode(body, `AUTHORIZATION_CLAIM_HTTP_${res.status}`);
-          // The issuer's sentence for the refusal (0.19.1, pre-beta rerun 6 FW6-1, as agentsafe-mcp-guard 0.29.0): this guard
+          // The issuer's sentence for the refusal (since 0.19.1, as agentsafe-mcp-guard 0.29.0): this guard
           // relayed only the code and logged nothing, so "AUTHORIZATION_CONTEXT_REQUIRED" was all a developer saw. One line in this
           // Service's log, and the detail travels with the refusal. ESCALATION_NOT_APPROVED is routine here (the request still
           // needs a person): no line.
@@ -790,7 +790,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
       }
       return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
     } catch (err) {
-      // The issuer could not be reached for the bundle: GATE_UNREACHABLE, as the agent guard says it (eval 2026-10-03, N-6).
+      // The issuer could not be reached for the bundle: GATE_UNREACHABLE, as the agent guard says it.
       return { decision: 'block', reasonCode: err?.code === 'GATE_UNREACHABLE' ? 'GATE_UNREACHABLE' : 'GUARD_ERROR', error: String(err?.message ?? err) };
     }
   }

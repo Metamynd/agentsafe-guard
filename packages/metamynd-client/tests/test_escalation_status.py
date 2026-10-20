@@ -1,4 +1,4 @@
-"""EscalationStatus reports what became of an approval (0.21.0, pre-beta rerun 6 resume-status nit).
+"""EscalationStatus reports what became of an approval (0.21.0).
 
 The gate keeps `status: approved` after the approved action ran, because SDKs key on it, and adds `executed`,
 `executedAt` and `outcome` beside it. An older gate sends none of them: the properties are None, never a guess.

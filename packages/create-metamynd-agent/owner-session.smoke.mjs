@@ -1,5 +1,5 @@
-// owner-session.smoke.mjs — the hosted CLI survives an expired owner access token (pre-beta rerun 6, CLI login
-// expiry follow-up to #926: an owner access token now lives 15 minutes; the refresh token renews it).
+// owner-session.smoke.mjs — the hosted CLI survives an expired owner access token (an
+// owner access token lives 15 minutes; the refresh token renews it).
 //
 // A stand-in platform answers the endpoints the hosted CLI calls with an owner token (provisioning, verify-key,
 // counterparty registration) with 401 for any token it has marked expired. The REAL CLI (main()) runs against it:

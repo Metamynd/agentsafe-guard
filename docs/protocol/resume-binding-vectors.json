@@ -1,9 +1,9 @@
 {
   "_comment": [
     "MAGP resume-binding conformance vectors (spec section 9a.5).",
-    "Generated from backend/src/features/magp/resume-binding.ts (backend/scripts/generate-resume-vectors.ts), which is the source of truth.",
+    "Generated from the issuer's resume-binding module (the same source agentsafe-guard's resume-binding.mjs is generated from), which is the source of truth.",
     "Every implementation MUST reproduce `message` and `digest` from `fields`.",
-    "The suites that read this file: backend/src/features/magp/resume-binding.test.ts and integrations/metamynd-client/tests/test_resume_binding.py."
+    "The suites that read this file: the issuer's resume-binding tests and packages/metamynd-client/tests/test_resume_binding.py."
   ],
   "messageFormat": "MAGP-RESUME-BIND-v1|authorizationId|action|amount|currency|merchant|resource|payloadDigest  (amount: ECMAScript number text, empty for none or 0; currency empty when amount is; each field \"\\\" then \"|\" backslash-escaped)",
   "digestFormat": "sha256:<64 lower-case hex> of the UTF-8 message",

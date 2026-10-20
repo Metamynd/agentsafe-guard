@@ -1,5 +1,5 @@
 // context-signature.smoke.mjs — a Service re-verifies the agent's context signature (context-claim binding,
-// docs/design/context-claim-binding.md Tier 1) before it judges the agent's unsigned `itinerary`, as the issuer's gate does.
+// Tier 1) before it judges the agent's unsigned `itinerary`, as the issuer's gate does.
 // The requests are built by the real agentsafe-guard (`signContext: true`), cross-package, no hand-rolled signer.
 //
 // Before mcp-guard 0.17.0 the Service never looked at `envelopeSignature`: a relay between agent and Service could rewrite

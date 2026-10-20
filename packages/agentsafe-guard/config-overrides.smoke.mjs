@@ -1,7 +1,7 @@
-// config-overrides.smoke.mjs — the config loader's two pre-beta findings (independent eval 2026-10-11):
-//   L5  createGuardFromConfig(path, { apiBase }) silently ignored apiBase and kept calling the file's apiBase
+// config-overrides.smoke.mjs — two config-loader regressions:
+//   1.  createGuardFromConfig(path, { apiBase }) silently ignored apiBase and kept calling the file's apiBase
 //       (production), so a developer pointing at staging or a local gate hit production instead.
-//   L6  an agent.metamynd.json saved with a UTF-8 BOM (Notepad, other Windows tools) failed as "not valid JSON".
+//   2.  an agent.metamynd.json saved with a UTF-8 BOM (Notepad, other Windows tools) failed as "not valid JSON".
 //
 //   node config-overrides.smoke.mjs   → PASS when every case matches.
 import assert from 'node:assert/strict';
@@ -34,29 +34,29 @@ try {
   const path = join(dir, 'agent.metamynd.json');
   writeFileSync(path, JSON.stringify(CONFIG));
 
-  await check('L5: with no override the guard calls the config file\'s apiBase (no regression)', async () => {
+  await check('with no override the guard calls the config file\'s apiBase (no regression)', async () => {
     const url = await authorizeUrl(await createGuardFromConfig(path, { mode: 'remote' }));
     assert.ok(url.startsWith(FILE_API + '/'), url);
   });
 
-  await check('L5: createGuardFromConfig(path, { apiBase }) calls the override, not the file\'s apiBase', async () => {
+  await check('createGuardFromConfig(path, { apiBase }) calls the override, not the file\'s apiBase', async () => {
     const url = await authorizeUrl(await createGuardFromConfig(path, { mode: 'remote', apiBase: 'http://127.0.0.1:9/api/v1' }));
     assert.ok(url.startsWith('http://127.0.0.1:9/api/v1/'), url);
   });
 
-  await check('L5: the { api } alias still overrides too, and wins when both are given', async () => {
+  await check('the { api } alias still overrides too, and wins when both are given', async () => {
     const url = await authorizeUrl(await createGuardFromConfig(path, { mode: 'remote', api: 'http://localhost:9926/api/v1' }));
     assert.ok(url.startsWith('http://localhost:9926/api/v1/'), url);
     const both = await authorizeUrl(await createGuardFromConfig(path, { mode: 'remote', api: 'http://a.test/api/v1', apiBase: 'http://b.test/api/v1' }));
     assert.ok(both.startsWith('http://a.test/api/v1/'), both);
   });
 
-  await check('L5: createGuard({ configPath, apiBase }) honours the override as well', async () => {
+  await check('createGuard({ configPath, apiBase }) honours the override as well', async () => {
     const url = await authorizeUrl(createGuard({ configPath: path, mode: 'remote', apiBase: 'http://127.0.0.1:9/api/v1' }));
     assert.ok(url.startsWith('http://127.0.0.1:9/api/v1/'), url);
   });
 
-  await check('L6: a config file that starts with a UTF-8 BOM loads', async () => {
+  await check('a config file that starts with a UTF-8 BOM loads', async () => {
     const bom = join(dir, 'bom.json');
     writeFileSync(bom, '\uFEFF' + JSON.stringify(CONFIG, null, 2), 'utf8');
     const url = await authorizeUrl(await createGuardFromConfig(bom, { mode: 'remote' }));
@@ -65,7 +65,7 @@ try {
     assert.equal(g.agentDid, CONFIG.agentDid);
   });
 
-  await check('L6: a BOM in the middle of the file is still invalid JSON (only the leading mark is stripped)', async () => {
+  await check('a BOM in the middle of the file is still invalid JSON (only the leading mark is stripped)', async () => {
     const mid = join(dir, 'mid.json');
     writeFileSync(mid, '{\uFEFF"agentDid": "x"}', 'utf8');
     let err;

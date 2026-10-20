@@ -101,8 +101,8 @@ check('hosted financial agent: one `body`, and the signed payload is the body it
     const agent = readFileSync(join(out, 'index.mjs'), 'utf8');
     const decls = agent.match(/^\s*const body\b/gm) ?? [];
     assert.ok(decls.length <= 1, `\`const body\` is declared ${decls.length} times`);
-    // The request the gateway gets is the guarded call's own, via decision.governanceHeaders() (guard 0.31; pre-beta
-    // rerun 6, FW6-2): the gatedBookFlight mapping signs the payload, and bookFlightViaGateway sends that same body.
+    // The request the gateway gets is the guarded call's own, via decision.governanceHeaders() (guard 0.31):
+    // the gatedBookFlight mapping signs the payload, and bookFlightViaGateway sends that same body.
     const PAYLOAD = "{ amount: a.amount, merchant: a.merchant, currency: a.currency ?? 'USD' }";
     assert.ok(agent.includes('payload: ' + PAYLOAD), 'the guarded call signs the body as its `payload`');
     assert.ok(agent.includes("const payload = { amount: args.amount, merchant: args.merchant, currency: args.currency ?? 'USD' };"), 'the gateway call builds the same body');
@@ -129,7 +129,7 @@ for (const [label, extra] of [
     } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
   });
 
-  // XT-1 (pre-beta evaluation 2026-10-03, rerun on v1.78.0): an unpinned gateway ran its owner's tool for another tenant's
+  // An unpinned gateway ran its owner's tool for another tenant's
   // agent whose own owner granted it the same action. Each gateway acts for the agent it was scaffolded for, and nobody else.
   check(`${label}: allowedAgents pins it to the provisioned agent, on a guard that enforces the pin`, () => {
     const out = mkdtempSync(join(tmpdir(), 'metamynd-parse-'));
@@ -141,7 +141,7 @@ for (const [label, extra] of [
       const server = readFileSync(join(out, 'gateway', 'server.mjs'), 'utf8');
       assert.ok(server.includes(`allowedAgents: ['${config.agentDid}'], gatewayOwnerPrincipal: '${config.ownerPrincipal}'`), 'the gateway admits exactly the agent it was scaffolded for, bound to its owner');
       assert.ok(server.includes('if (!Array.isArray(guard.allowedAgents) || !guard.gatewayOwnerPrincipal) throw'), 'and refuses to start on a guard that would ignore either');
-      // A-1: what it runs or refuses reaches the owner's Activity Log, signed with its own registered identity (MAGP §16.4).
+      // What it runs or refuses reaches the owner's Activity Log, signed with its own registered identity (MAGP §16.4).
       assert.ok(server.includes('reportOutcomes: true'), 'the gateway reports its outcomes');
       assert.ok(server.includes('serviceKey: identity.serviceKey'), 'signed with its own key');
       const svc = JSON.parse(readFileSync(join(out, 'gateway', 'service.metamynd.json'), 'utf8'));
@@ -200,8 +200,8 @@ check('...but the single-process scaffold (withGateway: false) needs no key', ()
   } finally { rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
-// "Change the rules" points at the dashboard path that exists (L-1: it said "Legal Entity → SOPs", which no menu has), and a
-// --sandbox scaffold — the SHARED agent, which nobody has dashboard access to — says how to get an agent you can change (L-7).
+// "Change the rules" points at the dashboard path that exists (it said "Legal Entity → SOPs", which no menu has), and a
+// --sandbox scaffold — the SHARED agent, which nobody has dashboard access to — says how to get an agent you can change.
 for (const [label, extra] of [
   ['hosted financial, in-process', {}],
   ['hosted non-financial, in-process', { demo: mod.defaultNeutralDemo() }],

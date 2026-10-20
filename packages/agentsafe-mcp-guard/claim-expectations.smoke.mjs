@@ -1,4 +1,4 @@
-// claim-expectations.smoke.mjs — MAGP §8.7.19 (defect N-3 of the 2026-10-03 pre-beta evaluation). Agent B presented
+// claim-expectations.smoke.mjs — MAGP §8.7.19. Agent B presented
 // agent A's authorization id at A's gateway. The gateway CLAIMED A's hold, then noticed the grant was A's and refused
 // AUTHORIZATION_AGENT_MISMATCH — leaving A's hold stuck `dispatching` against A's cap with nothing executed. Now the claim
 // states what it is about to execute (`expect`) so the issuer refuses BEFORE claiming; and a mismatch found only after a

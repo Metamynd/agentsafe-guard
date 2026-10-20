@@ -1,9 +1,9 @@
 // passphrase-key.smoke.mjs — proves createGuardFromConfig's passphrase-encrypted managed key
-// support (docs/design/passphrase-encrypted-key-delivery-plan.md): a config carrying
+// support: a config carrying
 // `agentKeyEncrypted` (no plaintext `agentKey`) is decrypted in memory when `{ passphrase }` is
 // given, produces a guard that actually signs with the real recovered key, and fails clearly
-// when the passphrase is wrong or missing. Byte-compatibility with the REAL backend
-// encryptWithPassword is proven separately in backend/src/util/encryption.interop.test.ts — this
+// when the passphrase is wrong or missing. Byte-compatibility with the REAL issuer's
+// encryptWithPassword is proven separately by the issuer's own interop test — this
 // file only needs internally-consistent test ciphertext to exercise createGuardFromConfig's own
 // wiring, so it builds that fixture with a local, self-contained encrypt matching the same
 // PBKDF2-SHA512 + AES-256-GCM shape decryptAgentKeyWithPassword expects.

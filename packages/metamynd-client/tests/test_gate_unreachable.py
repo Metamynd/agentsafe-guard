@@ -1,4 +1,4 @@
-"""An unreachable gate carries a machine-readable code (L-g, 2026-10-03 pre-beta rerun).
+"""An unreachable gate carries a machine-readable code.
 
 It used to be a bare RuntimeError("gate unreachable ...") with no reason code, so a framework tool crashed the turn and an
 agent could not tell "the gate is down" from any other failure. It is now `GateUnreachable` (still a RuntimeError), and a

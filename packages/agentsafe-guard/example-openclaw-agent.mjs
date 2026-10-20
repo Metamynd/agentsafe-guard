@@ -1,8 +1,8 @@
 // example-openclaw-agent.mjs — a runnable demo of the guard against a seeded bound agent.
 //
 // Simulates how an OpenClaw agent's TOOL is wrapped: the raw tool only runs if the
-// AgentSafe gate returns `allow`. Run it after seeding an agent with
-// backend/scripts/demo-seed-governance.ts:
+// AgentSafe gate returns `allow`. Run it with a bound agent's DID and key (from
+// `npx create-metamynd-agent` or the dashboard):
 //
 //   $env:AGENTSAFE_API="http://localhost:9926/api/v1"
 //   $env:AGENT_DID="did:hedera:testnet:..."

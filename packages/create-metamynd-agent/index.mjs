@@ -34,8 +34,8 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.8.0 adds an optional `currency` scope to the amount-over/cumulative-over atoms
 // (harnessDefaultSop, below, now sets it) — a guard below this version can't evaluate that
 // field, so a scaffolded currency-scoped cap would silently never fire on a currency mismatch.
-// 0.9.0 makes buildSignedRequest() async (the keyProvider seam, docs/design/
-// agent-key-custody-local-signer-daemon-plan.md) — this scaffold's own bookFlightViaGateway/
+// 0.9.0 makes buildSignedRequest() async (the keyProvider seam,
+// agent key custody) — this scaffold's own bookFlightViaGateway/
 // callGateway templates now `await` it, so a guard below this version would hand back a
 // Promise object where a signed request is expected instead of failing loudly.
 // 0.10.0 adds `resource` as a genuinely signed field (mirrors the mandate's own
@@ -49,7 +49,7 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // `{ passphrase }`) — no scaffolded template passes one yet, but the floor must still cover
 // the real current version regardless, per this repo's standing internal-pin invariant.
 // 0.12.2 makes a missing/garbled agent.metamynd.json fail with the next step instead of a bare
-// ENOENT (BR-004) — every scaffolded project relies on that for the fresh-clone journey.
+// ENOENT — every scaffolded project relies on that for the fresh-clone journey.
 // 0.12.3 adds `verify --context`, which a non-financial scaffold's `npm test` needs (a policy that
 // requires request inputs blocks a bare baseline request).
 // 0.12.4 makes `verify` probe in the currency the mandate's caps name (it assumed USD), which a scaffolded
@@ -88,20 +88,20 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // suspension or reinstatement reaches a running agent within seconds, not within the bundle's 10-minute maxStaleness.
 // 0.31.0: a guarded tool's decision carries governanceHeaders() — the signed request and its authorization, ready for a
 // gateway — so a tool no longer rebuilds and re-signs it. Required: the scaffold's gateway calls (bookFlightViaGateway,
-// performViaGateway, and npm run resume through them) send decision.governanceHeaders() (pre-beta rerun 6, FW6-2).
+// performViaGateway, and npm run resume through them) send decision.governanceHeaders().
 // 0.32.0: resume() signs the in-process resume claim as MAGP-RESUME-CLAIM-v2, binding the approved request and context at the
-// issuer (pre-beta rerun 6 F-1-NF-R); an issuer that requires it refuses the v1 claim older guards sign.
-// 0.33.0: the bundled policy-core judges owner-keyed operation rules (context-value-in / -not-in, NF-RISK-SELF) like the
+// issuer; an issuer that requires it refuses the v1 claim older guards sign.
+// 0.33.0: the bundled policy-core judges owner-keyed operation rules (context-value-in / -not-in) like the
 // gate, so a local check escalates an owner-marked op (e.g. delete-all) whatever riskLevel the agent declares.
 // 0.34.0: a tool whose gateway predates the approved-context binding (AUTHORIZATION_CONTEXT_REQUIRED) no longer voids the approval;
-// resume() works again once the gateway is upgraded, and a voided approval is reported AUTHORIZATION_VOIDED (pre-beta rerun 6 FW6-1).
-// 0.35.0: a payment in another currency than a currency-scoped cap is refused CURRENCY_NOT_ALLOWED, not SOP_SPEND_CAP (M2).
-// 0.36.0: ships TypeScript declarations (agentsafe-guard.d.mts), so a TypeScript agent gets types with no @types package (L5).
+// resume() works again once the gateway is upgraded, and a voided approval is reported AUTHORIZATION_VOIDED.
+// 0.35.0: a payment in another currency than a currency-scoped cap is refused CURRENCY_NOT_ALLOWED, not SOP_SPEND_CAP.
+// 0.36.0: ships TypeScript declarations (agentsafe-guard.d.mts), so a TypeScript agent gets types with no @types package.
 // 0.37.0: a tool that hands its call to a gateway that then refuses it (the hold stays unclaimed) has its hold released, not
-// captured, so a refused payment is no longer booked as spend (pre-beta rerun 2026-10-12, D-5).
+// captured, so a refused payment is no longer booked as spend.
 const GUARD_VERSION = '^0.37.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
- *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT (BR-004). */
+ *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT. */
 function harnessConfigLoad() {
   return `// agent.metamynd.json holds this agent's LOCAL key and is gitignored, so a fresh clone lacks it.
 // Say so, with the way forward, instead of letting readFileSync throw a bare ENOENT.
@@ -117,8 +117,8 @@ try {
 }`;
 }
 // Emitted at the top of every generated entry point. A committed package-lock.json can pin a guard
-// far older than the one this scaffold was written for (a beta tester's clean clone resolved 0.6.6
-// against a current 0.12.x — BR-005), and `npm install` will honour it silently. Warn, don't fail:
+// far older than the one this scaffold was written for (a clean clone has resolved 0.6.6
+// against a current 0.12.x), and `npm install` will honour it silently. Warn, don't fail:
 // an older guard may still run, but the user should know why behaviour differs from the README.
 function guardFreshnessCheck() {
   const floor = GUARD_VERSION.replace(/^\^/, '').split('.').map(Number);
@@ -168,7 +168,7 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // "approve it in the dashboard and the action resumes" — below this the gateway refused exactly that.
 // 0.20.0: `allowedAgents` pins a Service to the agents it acts for (MAGP §16.3) — refused AGENT_NOT_ADMITTED otherwise.
 // Required: every scaffolded gateway now sets it, and an older guard would ignore the option and serve ANY agent whose
-// own owner granted it the same action, with this owner's credentials (XT-1, pre-beta evaluation 2026-10-03).
+// own owner granted it the same action, with this owner's credentials.
 // 0.21.0: guard.reportOutcome(). Required: the scaffolded gateways report what they ran or refused (MAGP §16.4), and
 // agentsafe-http-gateway's reportOutcomes needs it.
 // 0.22.0: allowedAgents is required, gatewayOwnerPrincipal binds the gateway to the owner of its credentials (an admitted
@@ -183,11 +183,11 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.27.0: a claim of a person-approved hold states the digest of the context it executes (MAGP §9a.5), and a grant naming
 // another (or none) is released and refused. Required: the issuer refuses AUTHORIZATION_CONTEXT_REQUIRED to a claimer that
 // states none, so an older gateway could no longer run an approved escalation.
-// 0.27.1: reportOutcome() reports an authorization a request only NAMED as presented, never as the one it ran under (FW6-3).
+// 0.27.1: reportOutcome() reports an authorization a request only NAMED as presented, never as the one it ran under.
 // 0.28.0: a gateway judges owner-keyed operation rules (context-value-in / -not-in) from its bundle like the gate
-// (NF-RISK-SELF). Required: a gateway on an older guard would read an operation rule's atom as unknown and let it run.
-// 0.29.0: a claim the issuer refuses is logged in one line and its block carries the issuer's detail (FW6-1).
-// 0.30.0: same CURRENCY_NOT_ALLOWED code in a gateway's local judgement as at the gate (M2).
+// Required: a gateway on an older guard would read an operation rule's atom as unknown and let it run.
+// 0.29.0: a claim the issuer refuses is logged in one line and its block carries the issuer's detail.
+// 0.30.0: same CURRENCY_NOT_ALLOWED code in a gateway's local judgement as at the gate.
 // 0.31.0: ships TypeScript declarations (agentsafe-mcp-guard.d.mts).
 const MCP_GUARD_VERSION = '^0.31.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
@@ -223,12 +223,12 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // 0.24.0: depends on agentsafe-mcp-guard ^0.25.0 (one guard in the tree with MCP_GUARD_VERSION above). No template change.
 // 0.25.0: depends on agentsafe-mcp-guard ^0.26.0 (one guard in the tree). No template change.
 // 0.26.0: depends on agentsafe-mcp-guard ^0.27.0 (the approved-context binding). Required with MCP_GUARD_VERSION above.
-// 0.26.1: a report names an authorization as claimed only when this gateway claimed it (FW6-3); depends on agentsafe-mcp-guard ^0.27.1.
+// 0.26.1: a report names an authorization as claimed only when this gateway claimed it; depends on agentsafe-mcp-guard ^0.27.1.
 // 0.27.0: depends on agentsafe-mcp-guard ^0.28.0 (operation rules). Required with MCP_GUARD_VERSION above.
-// 0.28.0: a 403 for a refused claim carries the issuer's detail (FW6-1); depends on agentsafe-mcp-guard ^0.29.0.
-// 0.29.0: a request signed for another action than the route's is refused GATEWAY_ACTION_MISMATCH, not SIGNATURE_INVALID (M2);
+// 0.28.0: a 403 for a refused claim carries the issuer's detail; depends on agentsafe-mcp-guard ^0.29.0.
+// 0.29.0: a request signed for another action than the route's is refused GATEWAY_ACTION_MISMATCH, not SIGNATURE_INVALID;
 // depends on agentsafe-mcp-guard ^0.30.0.
-// 0.30.0: `agentsafe-gateway service-id` / `accept-challenge` / `serve`, SERVICE_IDENTITY_FILE and AGENTSAFE_UPSTREAM_CREDENTIAL (M4).
+// 0.30.0: `agentsafe-gateway service-id` / `accept-challenge` / `serve`, SERVICE_IDENTITY_FILE and AGENTSAFE_UPSTREAM_CREDENTIAL.
 // 0.31.0: ships TypeScript declarations (gateway, route-match, service-identity); depends on agentsafe-mcp-guard ^0.31.0.
 // 0.32.0: `reportOutcomes` defaults to true. The hosted templates already set it; the --harness gateway (no issuer, no
 // network) now sets `reportOutcomes: false`, so it does not log NO_ISSUER on its first refusal.
@@ -513,7 +513,7 @@ function configFileSopFields(config) {
   return {};
 }
 
-// ---------- policy-derived demo (BR-006) ----------
+// ---------- policy-derived demo ----------
 //
 // The scaffold's demo used to be a flight booking with a spend cap NO MATTER what policy the caller
 // supplied, and it injected a per-transaction cap, total budget and currency the policy never
@@ -586,14 +586,14 @@ function defaultNeutralDemo() {
 /**
  * Where an agent's rules are edited in the dashboard. SOPs belong to the legal entity, so the page is
  * VeriFAI → Legal Entities (/dashboard/organization), SOPs tab; the AgentSafe sidebar group links the same
- * tab as "SOPs". This said "Legal Entity → SOPs", a path no menu had (2026-10-02 eval, L-1).
+ * tab as "SOPs". This said "Legal Entity → SOPs", a path no menu had.
  */
 const SOPS_PATH = 'Dashboard → VeriFAI → Legal Entities → SOPs tab (also linked as AgentSafe → SOPs)';
 /** The same path for the generated demo's console output, which stays ASCII. */
 const SOPS_PATH_ASCII = 'Dashboard -> VeriFAI -> Legal Entities -> SOPs';
 /**
  * A --sandbox scaffold runs as the SHARED sandbox agent, which no user has dashboard access to, so "change
- * the rules in the dashboard" sent them somewhere they could not go (L-7). Say how to get an agent whose
+ * the rules in the dashboard" sent them somewhere they could not go. Say how to get an agent whose
  * rules they CAN change instead.
  */
 const SANDBOX_RULES_FIXED = "This is the shared sandbox agent: its rules are fixed and nobody can edit them. To change the rules, provision your own agent — re-run without --sandbox (it signs you up and creates an agent whose SOPs you own, edited at " + SOPS_PATH + "), or use --harness for a free local agent whose rules you edit by hand.";
@@ -890,7 +890,7 @@ function generateAgentKeypair() {
 }
 
 // did:key (base58btc multibase over an Ed25519-multicodec-prefixed raw public key) — mirrors
-// backend/src/features/agent-identity/did.util.ts / magp-did.mjs's buildDidKey exactly, so a
+// the issuer's own did:key encoding / magp-did.mjs's buildDidKey exactly, so a
 // did:key this CLI mints is resolvable by any real MAGP verifier (agentsafe-guard,
 // agentsafe-mcp-guard) with zero network calls: the public key is embedded in the DID string
 // itself. Reimplemented inline (not imported) — this CLI stays zero-dependency, and it is
@@ -933,7 +933,7 @@ function signChallengeHex(privateKeyHex, challenge) {
 // ---------- BYOK via an already-running agentsafe-signer daemon (--daemon-socket) ----------
 // Opt-in alternative to generateAgentKeypair() above: instead of generating the keypair in THIS
 // process and writing it in plaintext into agent.metamynd.json, ask an already-running
-// agentsafe-signer daemon (docs/design/agent-key-custody-local-signer-daemon-plan.md — started
+// agentsafe-signer daemon (started
 // separately, e.g. `agentsafe-signer start --admin`) to generate the key and sign the
 // proof-of-possession challenge. The private key never enters this process at all, and the
 // scaffolded config gets `keyProvider: 'daemon'` instead of a plaintext `agentKey` — see
@@ -1025,11 +1025,11 @@ async function readApiJson(res, path) {
 }
 
 // ---------- owner session ----------
-// An owner access token lives 15 minutes (pre-beta rerun 6, OBS session TTL, #926); the refresh token from the same
+// An owner access token lives 15 minutes; the refresh token from the same
 // sign-in renews it (POST /auth/refresh-token, which rotates both). Every owner-authenticated call this CLI makes goes
 // through ownerFetch: on a 401 it renews the session ONCE — the refresh token first, else a fresh sign-in with the
 // credentials already given to this run — and retries the call once. The password stays in this process's memory
-// for that purpose only; it is never written anywhere (pre-beta rerun 6, CLI login expiry).
+// for that purpose only; it is never written anywhere.
 async function ownerLogin(base, email, password) {
   const login = await apiPost(base, '/auth/login', { username: email, password }, null);
   const token = login?.data?.accessToken;
@@ -1107,7 +1107,7 @@ async function softGet(base, path) {
  *  - a pack built from spend limits cannot govern a non-financial agent: fail and say what would work;
  *  - any other pack is applied as-is, and its rules are sent back as `reviewedMoleculeIds`, so the
  *    platform provisions exactly the rules shown here or nothing at all.
- * A platform whose catalog does not say which packs need spend limits (it predates FA-001) only applies a
+ * A platform whose catalog does not say which packs need spend limits (an older catalog) only applies a
  * pack when spend limits are supplied, so for a non-financial agent the pack is dropped and that is said.
  * Returns { drop: true } or { molecules, reviewedMoleculeIds? }.
  */
@@ -1266,7 +1266,7 @@ function keepConfigAndFail(outDir, config, why) {
  * what the real (non-sandbox) flow scaffolds by default instead.
  */
 /**
- * What a generated demo prints under an ESCALATE (pre-beta evaluation 2026-10-03, L-b). It used to say "approve it in the
+ * What a generated demo prints under an ESCALATE. It used to say "approve it in the
  * dashboard and the action resumes", which was untrue twice over. The shared sandbox has no owner anyone can sign in as, so
  * nobody can approve its escalations. And nothing resumes on its own: once approved, the agent asks
  * guard.escalationStatus(id) for the authorization and presents it to run the action (MAGP §8.7.18). Generated code: it
@@ -1281,7 +1281,7 @@ function escalateNote(sandbox, argsExpr = null) {
     return `console.log(dim('     not a failure: it waits in your dashboard, under Escalations' + (g.escalationId ? ' (' + g.escalationId + ')' : '') + '.'));
       console.log(dim('     Once you approve it, guard.escalationStatus(id) gives the agent the authorization to run it.'));`;
   }
-  // Resumable (0.14.21; pre-beta rerun 3, E-1): the call is saved so `npm run resume -- <id>` can run it, once approved.
+  // Resumable (0.14.21): the call is saved so `npm run resume -- <id>` can run it, once approved.
   return `console.log(dim('     not a failure: it waits in your dashboard, under Escalations' + (g.escalationId ? ' (' + g.escalationId + ')' : '') + '.'));
       if (g.escalationId) {
         saveEscalation(g.escalationId, ${argsExpr});
@@ -1290,7 +1290,7 @@ function escalateNote(sandbox, argsExpr = null) {
 }
 
 /**
- * The resume path a resumable scaffold carries (0.14.21; pre-beta rerun 3, E-1 — resuming used to mean writing ~15 lines
+ * The resume path a resumable scaffold carries (0.14.21 — resuming used to mean writing ~15 lines
  * by hand). `npm start` saves an escalated call's arguments to ./escalations/<id>.json; `npm run resume -- <id>` hands them
  * to the gated tool's `.resume()` (agentsafe-guard >= 0.21.0), which waits for the owner's decision and then runs the tool
  * exactly once under the authorization the approval minted. Generated code; `tool` is the gated tool's variable name.
@@ -1346,7 +1346,7 @@ function exampleIndexNoGateway(scope, perTxnMax, currency, merchant, sandbox = f
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
   // With no merchant list the issuer holds the FIRST payment to each merchant for review (new-merchant, MAGP 6.4.3), so step 1
-  // is a review, not a pass: say so rather than label it "Expected to pass" and then show ESCALATED (pre-beta rerun 4, F-5).
+  // is a review, not a pass: say so rather than label it "Expected to pass" and then show ESCALATED.
   const step1Intent = merchantListed
     ? `a ${currency} ${under} booking, low risk. Expected to pass.`
     : `a ${currency} ${under} booking to ${merchant}, low risk. With no --merchants list, a FIRST payment to a merchant is held for your review, so expect ESCALATED.`;
@@ -1524,7 +1524,7 @@ function exampleIndex(scope, perTxnMax, gatewayPort, currency, merchant, merchan
   const under = Math.max(1, Math.round(perTxnMax * 0.5));
   const over = Math.round(perTxnMax + 100);
   // With no merchant list the issuer holds the FIRST payment to each merchant for review (new-merchant, MAGP 6.4.3), so step 1
-  // is a review, not a pass: say so rather than label it "Expected to pass" and then show ESCALATED (pre-beta rerun 4, F-5).
+  // is a review, not a pass: say so rather than label it "Expected to pass" and then show ESCALATED.
   const step1Intent = merchantListed
     ? `a ${currency} ${under} booking, low risk. Expected to pass.`
     : `a ${currency} ${under} booking to ${merchant}, low risk. With no --merchants list, a FIRST payment to a merchant is held for your review, so expect ESCALATED.`;
@@ -1701,7 +1701,7 @@ console.log(bold('  What this proved'));
 console.log('');
 console.log(dim('   - one code path, three outcomes. The rules decided, not this file'));
 console.log(dim('     and not the model driving it.'));
-// Only claim what happened (pre-beta rerun 2026-10-03, L-h: this said "step 1 ran in ./gateway" when step 1 was refused).
+// Only claim what happened (this used to say "step 1 ran in ./gateway" when step 1 was refused).
 if (step1Ran) {
   console.log(dim('   - step 1 ran in ./gateway, a process this file cannot reach into. There'));
 } else {
@@ -1724,7 +1724,7 @@ console.log('');
 `;
 }
 
-/** The generated README's fresh-clone section (BR-004/BR-005), shared by every hosted README. */
+/** The generated README's fresh-clone section, shared by every hosted README. */
 function clonedFreshSection(daemonKey) {
   return `## Cloned this project fresh?
 
@@ -1737,7 +1737,7 @@ function clonedFreshSection(daemonKey) {
 If a committed \`package-lock.json\` pins an older \`${GUARD_PKG}\` than this project was written for, the first run prints a warning; fix it with \`npm install ${GUARD_PKG}@latest\`.`;
 }
 
-// ---------- hosted NON-FINANCIAL scaffold (BR-006) ----------
+// ---------- hosted NON-FINANCIAL scaffold ----------
 //
 // The hosted flow used to provision spend limits and generate a flight-booking demo whatever the
 // policy. For an agent that does not move money (`financial === false`, see resolveFinancial) the
@@ -2868,7 +2868,7 @@ async function runSandbox(args) {
 // (or re-provision with `create-metamynd-agent`, no --harness) and the SAME guardTool() calls
 // keep working, sealed by a real gate instead of a rules file you authored yourself.
 
-/** Mirrors defaultSopDocument() in backend/src/features/onboarding/onboarding.provision.ts —
+/** Mirrors the hosted platform's default SOP document —
  *  same starter rules the hosted platform issues, so a harness project behaves identically
  *  to a freshly-provisioned one before anyone edits either.
  *
@@ -2907,7 +2907,7 @@ function harnessDefaultSopNeutral() {
   };
 }
 
-/** Mirrors issueMandate()'s document shape in backend/src/features/policy/mandate/mandate.service.ts
+/** Mirrors the shape of a mandate document the hosted platform issues
  *  (minus the parts only a real principal/issuer can do: no VC, no Hedera anchor, no signature) —
  *  same shape evaluateMandate() in policy-core.mjs expects either way.
  *  `financial: false` adds NO spend constraint at all (mirrors onboarding.provision.ts, where
@@ -2977,8 +2977,8 @@ function harnessRulesFile(mandate, sopDocument) {
 // the tool only runs in the gateway process now.
 //
 // Replay of the SAME signed request is refused too (REPLAY_DETECTED): the gateway remembers each nonce for as long as
-// the guard would accept it, in memory (a restart forgets them). An independent tester's rerun (2026-09-24) found the
-// same bytes accepted twice before this.
+// the guard would accept it, in memory (a restart forgets them). Before this, the
+// same bytes were accepted twice.
 //
 // What this does NOT close (be precise, this is a local demo, not the hosted platform):
 // cumulative spend across many DIFFERENT calls. That needs a STATEFUL authority — the hosted gate's
@@ -3708,7 +3708,7 @@ dashboard.close();
 }
 
 /**
- * The harness entry point for a NON-financial agent (BR-006). Same machinery as harnessIndexFile —
+ * The harness entry point for a NON-financial agent. Same machinery as harnessIndexFile —
  * guardToolLocal, the local dashboard, the optional gateway process — but nothing in it is about
  * flights or money: the action is the caller's own scope, and the steps are `demo.cases`, derived
  * from the caller's own rules (buildPolicyCases). Each step states what it expects and says so
@@ -3913,7 +3913,7 @@ function harnessPackageJson(slug) {
 }
 
 function harnessReadme(slug, scope, port, withGateway, gatewayPort, demo = null) {
-  // `demo` is set for a NON-financial scaffold (BR-006): the steps, inputs and any rule the demo
+  // `demo` is set for a NON-financial scaffold: the steps, inputs and any rule the demo
   // could not stage are the caller's own, so this README must not talk about spend limits/flights.
   const neutral = !!demo;
   const tool = neutral ? 'performAction' : 'bookFlight';
@@ -4052,7 +4052,7 @@ async function runHarness(args) {
   if (fileConfig) console.log(`  ${c.green('✓')} loaded policy config ${c.dim(args.config)}`);
 
   // Is this a financial agent? A policy file with no spend limit and no monetary rule is taken at its
-  // word: nothing money-shaped is added on the caller's behalf (BR-006). Say what was decided.
+  // word: nothing money-shaped is added on the caller's behalf. Say what was decided.
   const { financial } = announceFinancial(args, fileConfig);
 
   const name = await pick('name', 'Agent name', fileConfig?.name ?? 'Local Agent');
@@ -4347,7 +4347,7 @@ async function main() {
   const fileConfig = typeof args.config === 'string' ? loadConfigFile(args.config) : null;
   if (fileConfig) console.log(`  ${c.green('✓')} loaded policy config ${c.dim(args.config)}`);
 
-  // BR-006: is this a financial agent? Same rule as --harness, so one policy file scaffolds the same
+  // Is this a financial agent? Same rule as --harness, so one policy file scaffolds the same
   // shape either way. A non-financial agent is provisioned with NO spend fields (the backend treats
   // their absence as a non-financial mandate) and gets the neutral project; say what was decided.
   const { financial } = announceFinancial(args, fileConfig);
@@ -4365,7 +4365,7 @@ async function main() {
 
   // 1. Connection + credentials. The sign-in itself waits until every prompt is answered (step 3): an owner access
   // token lives 15 minutes, and an owner who took longer over the prompts used to reach provisioning with an expired
-  // one (pre-beta rerun 6, CLI login expiry follow-up to #926).
+  // one.
   const apiRaw = await pick('api', 'METAMYND_API', 'API base URL', DEFAULT_API);
   const base = String(apiRaw).replace(/\/+$/, '');
   const email = await pick('email', 'METAMYND_EMAIL', 'Owner email', '');
@@ -4479,7 +4479,7 @@ async function main() {
     // real, registered did:key — see the gateway identity step below), but this CLI has no flag to
     // opt into mainnet yet; that is a separate decision (exposing it safely — KYB status, spend
     // caps — is more than a network toggle) from giving the gateway a real identity, which is what
-    // this fixes. docs/design/release-blockers-open-items.md, "Registry default".
+    // this fixes.
     network: 'testnet',
     ...(financial ? { currency, maxAmount, perTxnMax } : {}),
     merchants,

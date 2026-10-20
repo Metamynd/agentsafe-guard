@@ -1,5 +1,5 @@
 // context-signature.smoke.mjs — the A2A receiver verifies the calling agent's context signature (context-claim binding,
-// docs/design/context-claim-binding.md Tier 1) before it judges the agent's unsigned `itinerary`, as the issuer's gate does.
+// Tier 1) before it judges the agent's unsigned `itinerary`, as the issuer's gate does.
 // The envelope is built by the real agentsafe-guard (`buildA2AEnvelope` over `buildSignedRequest({ signContext: true })`),
 // carried in a real A2A Message, and judged by the real `guardA2ATask`.
 //

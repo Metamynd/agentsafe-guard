@@ -1,5 +1,4 @@
-// outdated-gateway.smoke.mjs — an approval resumed through a gateway that predates the approved-context binding (0.34.0;
-// pre-beta rerun 6, FW6-1).
+// outdated-gateway.smoke.mjs — an approval resumed through a gateway that predates the approved-context binding (0.34.0).
 //
 // Before: the old gateway's claim was refused AUTHORIZATION_CONTEXT_REQUIRED (nothing ran), the tool relayed that refusal,
 // and resume() VOIDED the approved hold as "tool did not run". The resume after upgrading the gateway then said
@@ -30,7 +29,7 @@ const approved = {
 const recordArgs = (a) => ({ context: { riskLevel: a.riskLevel, target: a.target, op: a.op } });
 
 /**
- * A fake issuer that behaves like escalation.service.ts claimResume + mandate.service.ts markDispatching: the one resume is
+ * A fake issuer that behaves like the issuer's resume claim and dispatch: the one resume is
  * taken once, re-opened when a (signed) gateway claim of the still-held hold is refused AUTHORIZATION_CONTEXT_REQUIRED.
  */
 function fakeIssuer({ spendStatus = 'held', outcome = 'not_started', resumeDetail } = {}) {
