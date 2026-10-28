@@ -16,6 +16,8 @@
 //   • coverage   — every number in each agent's evidence sequence (`agentSeq`) is accounted for (verifyCoverage)
 //   • assignment — a decision's `bundleHash` is the policy anchored for that agent on its own HCS topic at the time
 //                  (readPolicyUpdates + verifyPolicyAssignment)
+//   • egress     — a sandbox network policy someone is shown is the one anchored for the agent (egressPolicyHash,
+//                  readEgressPolicyAnchors + verifyEgressPolicy)
 //
 // Zero dependencies: node:crypto + fetch only. A regulator can run it standalone.
 import { createHash } from 'node:crypto';
@@ -139,33 +141,90 @@ export function agentPolicyTopicId(did) {
  * `maxPages` pages of 100 — since a partial history could hide the op that names or supersedes a bundle.
  */
 export async function readPolicyUpdates(did, opts = {}) {
-  const fetchImpl = opts.fetchImpl ?? fetch;
   const topicId = opts.topicId ?? agentPolicyTopicId(did);
   if (!topicId) return null;
+  return readTopicOps(topicId, opts, (op, m) => (op.op === 'policy-update' && op.did === did ? {
+    did: op.did,
+    bundleHash: op.bundleHash ?? null,
+    sigDigest: op.sigDigest ?? null,
+    versionLabel: op.versionLabel ?? null,
+    consensusTimestamp: m.consensus_timestamp ?? null,
+    sequenceNumber: m.sequence_number ?? null,
+  } : null));
+}
+
+/**
+ * Every message of an HCS topic, oldest first, via a public mirror node, mapped by `pick(op, message)` (null skips it).
+ * Null when the topic cannot be read in full: unreachable, or longer than `maxPages` pages of 100.
+ */
+async function readTopicOps(topicId, opts, pick) {
+  const fetchImpl = opts.fetchImpl ?? fetch;
   const base = mirrorBase(opts.network ?? 'testnet');
   let url = `${base}/api/v1/topics/${topicId}/messages?limit=100&order=asc`;
-  const updates = [];
+  const out = [];
   for (let page = 0; url && page < (opts.maxPages ?? 50); page++) {
     let body = null;
     try { body = await fetchImpl(url).then((r) => (r.ok ? r.json() : null)); } catch { return null; }
     if (!body) return null;
     for (const m of body.messages ?? []) {
-      try {
-        const op = JSON.parse(Buffer.from(m.message, 'base64').toString('utf8'));
-        if (op?.op !== 'policy-update' || op.did !== did) continue;
-        updates.push({
-          did: op.did,
-          bundleHash: op.bundleHash ?? null,
-          sigDigest: op.sigDigest ?? null,
-          versionLabel: op.versionLabel ?? null,
-          consensusTimestamp: m.consensus_timestamp ?? null,
-          sequenceNumber: m.sequence_number ?? null,
-        });
-      } catch { /* skip non-JSON */ }
+      let op = null;
+      try { op = JSON.parse(Buffer.from(m.message, 'base64').toString('utf8')); } catch { continue; /* skip non-JSON */ }
+      const picked = op && typeof op === 'object' ? pick(op, m) : null;
+      if (picked) out.push(picked);
     }
     url = body.links?.next ? `${base}${body.links.next}` : null;
   }
-  return url ? null : updates;
+  return url ? null : out;
+}
+
+// ── Egress policy (the sandbox the agent ran in allowed no route around the gateway) ─────────
+/**
+ * The hash anchored for a sandbox's egress policy: "sha256:" + hex sha256 over the policy text exactly as the runtime
+ * reports it (OpenShell `sandbox get <name> --policy-only`), with line endings normalised to LF and trailing whitespace
+ * at the end of the text removed — so a copy saved on another platform, or with a final newline added, still matches.
+ */
+export function egressPolicyHash(policyText) {
+  const normalised = String(policyText).replace(/\r\n?/g, '\n').replace(/\s+$/, '');
+  return `sha256:${sha256Hex(Buffer.from(normalised, 'utf8'))}`;
+}
+
+/**
+ * Read the `egress-policy` ops anchored for an agent, oldest first:
+ * [{ did, runtime, sandboxId, egressPolicyHash, generation, consensusTimestamp, sequenceNumber }]. They are on the
+ * agent's own topic when its DID names one; pass `topicId` for an agent whose DID does not (the issuer's
+ * `egress-policies` topic). Null when the topic cannot be read in full.
+ */
+export async function readEgressPolicyAnchors(did, opts = {}) {
+  const topicId = opts.topicId ?? agentPolicyTopicId(did);
+  if (!topicId) return null;
+  return readTopicOps(topicId, opts, (op, m) => (op.op === 'egress-policy' && op.did === did ? {
+    did: op.did,
+    runtime: op.runtime ?? null,
+    sandboxId: op.sandboxId ?? null,
+    egressPolicyHash: op.egressPolicyHash ?? null,
+    generation: op.generation ?? null,
+    consensusTimestamp: m.consensus_timestamp ?? null,
+    sequenceNumber: m.sequence_number ?? null,
+  } : null));
+}
+
+/**
+ * Whether a policy someone has been shown is the one anchored for an agent's sandbox. Returns
+ * { ok, hash, anchor, latest } — `anchor` the most recent op with this hash (and `sandboxId`, when given), `latest`
+ * whether no op with a different hash was anchored for that sandbox after it (one means the policy changed since). A
+ * policy changed and then changed back is current again. `ok` needs a matching anchor only.
+ */
+export function verifyEgressPolicy(policyText, anchors, { sandboxId } = {}) {
+  const hash = egressPolicyHash(policyText);
+  const id = sandboxId ? String(sandboxId).toLowerCase() : null;
+  const ordered = [...(anchors ?? [])]
+    .filter((a) => !id || a.sandboxId === id)
+    .sort((a, b) => consensusToMs(a.consensusTimestamp) - consensusToMs(b.consensusTimestamp));
+  const index = ordered.findLastIndex((a) => a.egressPolicyHash === hash);
+  if (index < 0) return { ok: false, hash, anchor: null, latest: false };
+  const anchor = ordered[index];
+  const later = ordered.slice(index + 1).some((a) => a.sandboxId === anchor.sandboxId && a.egressPolicyHash !== hash);
+  return { ok: true, hash, anchor, latest: !later };
 }
 
 /**

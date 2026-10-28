@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import {
   evidenceLeaf, verifyMerkleProof, recomputeCommitment, verifyDisclosure, verifyRootAnchored,
   verifyCoverage, verifyPolicyAssignment, readPolicyUpdates, agentPolicyTopicId,
+  egressPolicyHash, readEgressPolicyAnchors, verifyEgressPolicy,
 } from './magp-evidence.mjs';
 
 let pass = 0, fail = 0;
@@ -135,6 +136,43 @@ console.log('\n7. Policy assignment — the decision used the policy anchored fo
   ok('a history longer than maxPages is not returned as if complete', (await readPolicyUpdates(did, { fetchImpl: mirror, maxPages: 1 })) === null);
   ok('a record with no valid timestamp is undated, not unanchored', verifyPolicyAssignment({ agentDid: did, bundleHash: 'sha256:v1', timestamp: 'n/a' }, updates).status === 'undated');
   ok('the topic comes from the DID', agentPolicyTopicId(did) === '0.0.4242' && agentPolicyTopicId('did:key:z6Mk') === null);
+}
+
+console.log('\n8. Egress policy — the sandbox policy someone is shown is the one anchored for the agent');
+{
+  const did = 'did:hedera:testnet:z6MkAgent_0.0.4242';
+  const sandboxId = '0b5c6a1e-2f3d-4c5b-8a9e-1f2d3c4b5a60';
+  const policy = 'version: 1\nnetwork_policies:\n  purchasing:\n    endpoints:\n      - host: host.openshell.internal\n        port: 8443\n';
+  // A fixed vector, so every implementation of the hash (the operator tooling that publishes it) can check itself.
+  const VECTOR = 'sha256:c9cff2825dc9cd95014ca4475954f3781749d670e37b955aea324b49b7e6f397';
+  ok('the hash matches the published vector', egressPolicyHash(policy) === VECTOR);
+  ok('line endings and a trailing newline do not change it', egressPolicyHash(policy.replace(/\n/g, '\r\n') + '\r\n\r\n') === VECTOR);
+  ok('any change to the policy does', egressPolicyHash(policy.replace('8443', '8444')) !== VECTOR);
+
+  const t0 = 1793000000;
+  const anchor = (hash, secs, generation, id = sandboxId) => ({ did, runtime: 'openshell', sandboxId: id, egressPolicyHash: hash, generation, consensusTimestamp: `${secs}.000000000` });
+  const changed = egressPolicyHash(policy.replace('8443', '9443'));
+  const anchors = [anchor(VECTOR, t0, 1), anchor(changed, t0 + 60, 2)];
+  const v = verifyEgressPolicy(policy, anchors, { sandboxId: sandboxId.toUpperCase() });
+  ok('the shown policy matches its anchor', v.ok && v.anchor.generation === 1);
+  ok('a policy changed and then changed back is current again', (() => {
+    const back = verifyEgressPolicy(policy, [...anchors, anchor(VECTOR, t0 + 120, 3)]);
+    return back.latest === true && back.anchor.generation === 3;
+  })());
+  ok('a later, different anchor for the sandbox means it is no longer current', v.latest === false);
+  ok('the newest anchored policy is current', verifyEgressPolicy(policy.replace('8443', '9443'), anchors).latest === true);
+  ok('a policy never anchored does not verify', verifyEgressPolicy('version: 1\n', anchors).ok === false);
+  ok('another sandbox\'s anchor does not count', verifyEgressPolicy(policy, [anchor(VECTOR, t0, 1, '11111111-2222-4333-8444-555555555555')], { sandboxId }).ok === false);
+
+  const msg = (o, n) => ({ sequence_number: n, consensus_timestamp: `${t0 + n}.000000000`, message: Buffer.from(JSON.stringify(o)).toString('base64') });
+  const mirror = async () => ({ ok: true, json: async () => ({ messages: [
+    msg({ op: 'policy-update', did, sigDigest: 's', bundleHash: 'sha256:b' }, 1),
+    msg({ op: 'egress-policy', did, runtime: 'openshell', sandboxId, egressPolicyHash: VECTOR, generation: 1 }, 2),
+    msg({ op: 'egress-policy', did: 'did:hedera:testnet:other_0.0.4242', sandboxId, egressPolicyHash: VECTOR, generation: 1 }, 3),
+  ], links: { next: null } }) });
+  const read = await readEgressPolicyAnchors(did, { fetchImpl: mirror });
+  ok('reads only this agent\'s egress-policy ops', read.length === 1 && read[0].egressPolicyHash === VECTOR && read[0].sequenceNumber === 2);
+  ok('the policy-update reader is unaffected by them', (await readPolicyUpdates(did, { fetchImpl: mirror })).length === 1);
 }
 
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ FAILURES'} — ${pass} passed, ${fail} failed\n`);

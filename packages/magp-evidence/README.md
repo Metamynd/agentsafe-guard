@@ -23,7 +23,7 @@ disclosing one record reveals nothing about any other.
 
 ## What it proves about an agent's whole record
 
-Two further checks run over a set of an agent's disclosed records:
+Further checks run over a set of an agent's disclosed records, or its anchored history:
 
 5. **Coverage** (`verifyCoverage`) — each record written for an agent DID carries `agentSeq`
    (1, 2, 3… per DID) in its leaf. The check reports every gap and every number claimed twice,
@@ -38,6 +38,15 @@ Two further checks run over a set of an agent's disclosed records:
    mirror node and reports `assigned`, `superseded` (a newer policy had been issued before the
    decision), `anchored-after-decision`, `unanchored`, `undated` or `no-bundle`. `readPolicyUpdates`
    returns null rather than a partial history when the topic cannot be read in full.
+
+7. **Egress policy** (`egressPolicyHash`, `readEgressPolicyAnchors` + `verifyEgressPolicy`) — where an
+   agent runs in a sandbox whose network egress the runtime enforces (OpenShell), its owner anchors a
+   hash of the sandbox's effective network policy in an `egress-policy` op on the agent's topic.
+   Shown that policy later, a verifier recomputes the hash, finds the anchor for that sandbox, and
+   learns whether a different policy was anchored for it since (`latest`). Reading the policy itself
+   then shows whether it allows any route around the gateway. The hash is sha256 over the policy text
+   with line endings normalised to LF and trailing whitespace removed; the test file publishes a
+   fixed vector for other implementations.
 
 ```js
 import { verifyCoverage, readPolicyUpdates, verifyPolicyAssignment } from './magp-evidence.mjs';
@@ -76,7 +85,7 @@ Disclosure package shape: `{ record, proof, root, leaf?, opening?: { sensitive, 
 ## Run tests
 
 ```bash
-node integrations/magp-evidence/magp-evidence.test.mjs   # 34 assertions
+node integrations/magp-evidence/magp-evidence.test.mjs   # 45 assertions
 ```
 
 ## Status / caveats
