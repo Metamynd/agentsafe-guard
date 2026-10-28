@@ -21,6 +21,31 @@ Given a disclosure package a holder opened, the auditor checks:
 Because the proof carries only **sibling hashes** and each commitment has an **independent salt**,
 disclosing one record reveals nothing about any other.
 
+## What it proves about an agent's whole record
+
+Two further checks run over a set of an agent's disclosed records:
+
+5. **Coverage** (`verifyCoverage`) — each record written for an agent DID carries `agentSeq`
+   (1, 2, 3… per DID) in its leaf. The check reports every gap and every number claimed twice,
+   so a record removed from the set is visible. Pass `{ fromOne: true }` when the set is the
+   agent's whole record. Records written before sequencing existed are counted as `unsequenced`.
+   A record removed after the highest number held is not detectable this way; anchoring bounds
+   that window.
+6. **Policy assignment** (`readPolicyUpdates` + `verifyPolicyAssignment`) — a decision's leaf
+   carries `bundleHash`, the compiled policy bundle it was judged under. The issuer publishes the
+   same hash in a `policy-update` op on the agent's own HCS topic (the topic named in its
+   `did:hedera` DID) each time it issues the agent a new bundle. The check reads that topic from a
+   mirror node and reports `assigned`, `superseded` (a newer policy had been issued before the
+   decision), `anchored-after-decision`, `unanchored`, `undated` or `no-bundle`. `readPolicyUpdates`
+   returns null rather than a partial history when the topic cannot be read in full.
+
+```js
+import { verifyCoverage, readPolicyUpdates, verifyPolicyAssignment } from './magp-evidence.mjs';
+const coverage = verifyCoverage(records, { fromOne: true });          // { complete, agents: [{ gaps, duplicates, … }] }
+const updates = await readPolicyUpdates(record.agentDid);            // the agent's policy-update ops, oldest first
+const assignment = verifyPolicyAssignment(record, updates);          // { ok, status, anchoredAt, supersededAt }
+```
+
 ## It matches the backend exactly
 
 `evidenceLeaf`, the Merkle verification, and `recomputeCommitment` reproduce the backend's
@@ -51,7 +76,7 @@ Disclosure package shape: `{ record, proof, root, leaf?, opening?: { sensitive, 
 ## Run tests
 
 ```bash
-node integrations/magp-evidence/magp-evidence.test.mjs   # 16 assertions
+node integrations/magp-evidence/magp-evidence.test.mjs   # 34 assertions
 ```
 
 ## Status / caveats

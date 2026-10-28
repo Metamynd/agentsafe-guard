@@ -12,6 +12,11 @@
 //   • tx commitment   = "sha256-" ‖ sha256("MAGP-TX-COMMITMENT-v1\0" ‖ JSON(sensitive) ‖ "\0" ‖ salt)
 //                                                                          (mandate.service anchorCommitment)
 //
+// Beyond one record it checks two properties of an agent's record as a whole:
+//   • coverage   — every number in each agent's evidence sequence (`agentSeq`) is accounted for (verifyCoverage)
+//   • assignment — a decision's `bundleHash` is the policy anchored for that agent on its own HCS topic at the time
+//                  (readPolicyUpdates + verifyPolicyAssignment)
+//
 // Zero dependencies: node:crypto + fetch only. A regulator can run it standalone.
 import { createHash } from 'node:crypto';
 import { Buffer } from 'node:buffer';
@@ -76,6 +81,130 @@ export async function verifyRootAnchored(root, topicId, opts = {}) {
     } catch { /* skip non-JSON */ }
   }
   return { anchored: false, consensusTimestamp: null, sequenceNumber: null };
+}
+
+// ── Coverage (no record removed) ──────────────────────────────────────────────────────────────
+/**
+ * Whether a set of evidence records accounts for every number in each agent's sequence. A record written for an agent
+ * DID carries `agentSeq` (1, 2, 3… per DID) in its leaf; a missing number is a gap, a number claimed twice a duplicate.
+ * Pass `{ fromOne: true }` when the set is the agent's whole record, so a missing start is a gap too. Records without
+ * `agentSeq` predate sequencing and are counted as `unsequenced`. A record removed after the highest number held is not
+ * detectable here; anchoring bounds that window.
+ * Returns { complete, unsequenced, agents: [{ agentDid, first, last, count, gaps: [{from,to}], duplicates, complete }] }.
+ */
+export function verifyCoverage(records, { fromOne = false } = {}) {
+  const byAgent = new Map();
+  let unsequenced = 0;
+  for (const r of records ?? []) {
+    if (!r?.agentDid) continue;
+    if (r.agentSeq == null) { unsequenced++; continue; }
+    if (!byAgent.has(r.agentDid)) byAgent.set(r.agentDid, []);
+    byAgent.get(r.agentDid).push(Number(r.agentSeq));
+  }
+  const agents = [...byAgent.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([agentDid, seqs]) => {
+      seqs.sort((a, b) => a - b);
+      const gaps = [];
+      const duplicates = [];
+      let expected = fromOne ? 1 : seqs[0];
+      for (let i = 0; i < seqs.length; i++) {
+        const s = seqs[i];
+        if (i > 0 && s === seqs[i - 1]) { if (duplicates[duplicates.length - 1] !== s) duplicates.push(s); continue; }
+        if (s > expected) gaps.push({ from: expected, to: s - 1 });
+        expected = s + 1;
+      }
+      return { agentDid, first: seqs[0], last: seqs[seqs.length - 1], count: seqs.length, gaps, duplicates, complete: gaps.length === 0 && duplicates.length === 0 };
+    });
+  return { complete: agents.every((a) => a.complete), unsequenced, agents };
+}
+
+// ── Policy assignment (the decision used the policy issued to that agent) ────────────────────
+/** A mirror-node consensus timestamp ("seconds.nanoseconds") in milliseconds, or NaN. */
+export function consensusToMs(ts) {
+  const [s, ns = '0'] = String(ts ?? '').split('.');
+  return Number(s) * 1000 + Number(ns.padEnd(9, '0').slice(0, 3));
+}
+
+/** The HCS topic a did:hedera DID's policy is anchored on: the part after its last `_`. */
+export function agentPolicyTopicId(did) {
+  const topic = String(did ?? '').split('_').pop();
+  return /^\d+\.\d+\.\d+$/.test(topic) ? topic : null;
+}
+
+/**
+ * Read an agent's `policy-update` ops from its own HCS topic via a public mirror node, oldest first:
+ * [{ did, bundleHash, sigDigest, versionLabel, consensusTimestamp, sequenceNumber }]. `bundleHash` is null on ops
+ * published before it was added. Returns null when the topic cannot be read in full — unreachable, or longer than
+ * `maxPages` pages of 100 — since a partial history could hide the op that names or supersedes a bundle.
+ */
+export async function readPolicyUpdates(did, opts = {}) {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const topicId = opts.topicId ?? agentPolicyTopicId(did);
+  if (!topicId) return null;
+  const base = mirrorBase(opts.network ?? 'testnet');
+  let url = `${base}/api/v1/topics/${topicId}/messages?limit=100&order=asc`;
+  const updates = [];
+  for (let page = 0; url && page < (opts.maxPages ?? 50); page++) {
+    let body = null;
+    try { body = await fetchImpl(url).then((r) => (r.ok ? r.json() : null)); } catch { return null; }
+    if (!body) return null;
+    for (const m of body.messages ?? []) {
+      try {
+        const op = JSON.parse(Buffer.from(m.message, 'base64').toString('utf8'));
+        if (op?.op !== 'policy-update' || op.did !== did) continue;
+        updates.push({
+          did: op.did,
+          bundleHash: op.bundleHash ?? null,
+          sigDigest: op.sigDigest ?? null,
+          versionLabel: op.versionLabel ?? null,
+          consensusTimestamp: m.consensus_timestamp ?? null,
+          sequenceNumber: m.sequence_number ?? null,
+        });
+      } catch { /* skip non-JSON */ }
+    }
+    url = body.links?.next ? `${base}${body.links.next}` : null;
+  }
+  return url ? null : updates;
+}
+
+/**
+ * Whether an evidence record was decided under the policy issued to its agent at the time. `record` is the disclosed
+ * leaf record (its `bundleHash` and `timestamp`); `updates` are the agent's `policy-update` ops (readPolicyUpdates).
+ * `graceMs` (default 2 minutes) absorbs the gap between a policy taking effect and its op reaching consensus.
+ *
+ * Status:
+ *   assigned                  the bundle was the agent's anchored policy when the record was decided
+ *   superseded                a different policy had been anchored for the agent before the decision
+ *   anchored-after-decision   the bundle was first anchored more than `graceMs` after the decision
+ *   unanchored                no policy-update for the agent names this bundle
+ *   undated                   the bundle is anchored, but the record has no valid timestamp to place it against
+ *   no-bundle                 the record names no bundle
+ *
+ * The record's `timestamp` is the issuer's; it is bounded by the consensus time of the batch root the record is
+ * included in (verifyRootAnchored), which a verifier should check as well.
+ */
+export function verifyPolicyAssignment(record, updates, { graceMs = 120_000 } = {}) {
+  const result = (status, extra = {}) => ({ ok: status === 'assigned', status, anchoredAt: null, supersededAt: null, ...extra });
+  if (!record?.bundleHash) return result('no-bundle');
+  const ordered = [...(updates ?? [])]
+    .filter((u) => !record.agentDid || u.did === record.agentDid)
+    .map((u) => ({ ...u, at: consensusToMs(u.consensusTimestamp) }))
+    .filter((u) => Number.isFinite(u.at))
+    .sort((a, b) => a.at - b.at);
+  const first = ordered.find((u) => u.bundleHash === record.bundleHash);
+  if (!first) return result('unanchored');
+  const anchoredAt = first.consensusTimestamp;
+  const decidedAt = Date.parse(record.timestamp);
+  if (!Number.isFinite(decidedAt)) return result('undated', { anchoredAt });
+  if (first.at > decidedAt + graceMs) return result('anchored-after-decision', { anchoredAt });
+  // Superseded only by a policy anchored AFTER this bundle and more than graceMs before the decision. An older op in force
+  // at the decision time (the bundle reached consensus just after it, within grace) does not count.
+  const inForce = ordered.filter((u) => u.at <= decidedAt).pop();
+  if (inForce && inForce.bundleHash !== record.bundleHash && inForce.at > first.at && inForce.at < decidedAt - graceMs) {
+    return result('superseded', { anchoredAt, supersededAt: inForce.consensusTimestamp });
+  }
+  return result('assigned', { anchoredAt });
 }
 
 // ── The auditor's verdict ─────────────────────────────────────────────────────────────────────

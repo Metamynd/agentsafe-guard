@@ -2,7 +2,10 @@
 // offline; disclosing one record reveals nothing about any other.
 // Run: node integrations/magp-evidence/magp-evidence.test.mjs
 import { createHash } from 'node:crypto';
-import { evidenceLeaf, verifyMerkleProof, recomputeCommitment, verifyDisclosure, verifyRootAnchored } from './magp-evidence.mjs';
+import {
+  evidenceLeaf, verifyMerkleProof, recomputeCommitment, verifyDisclosure, verifyRootAnchored,
+  verifyCoverage, verifyPolicyAssignment, readPolicyUpdates, agentPolicyTopicId,
+} from './magp-evidence.mjs';
 
 let pass = 0, fail = 0;
 const ok = (name, cond) => { if (cond) { pass++; console.log(`  ✓ ${name}`); } else { fail++; console.log(`  ✗ ${name}`); } };
@@ -83,6 +86,55 @@ console.log('\n5. On-chain anchoring — the root is confirmed on the evidence t
   ok('a root that was never anchored is not found', bad.anchored === false);
   ok('verifyDisclosure with anchoredRoot cross-checks the root', verifyDisclosure(disclose(0), { anchoredRoot: root }).valid === true
     && verifyDisclosure(disclose(0), { anchoredRoot: sha256Hex('x') }).valid === false);
+}
+
+console.log('\n6. Coverage — a removed record leaves a gap in its agent\'s sequence');
+{
+  const A = 'did:hedera:testnet:agentA_0.0.700';
+  const B = 'did:hedera:testnet:agentB_0.0.701';
+  const seq = (agentDid, agentSeq) => ({ eventId: `${agentDid}#${agentSeq}`, agentDid, agentSeq });
+  const whole = [seq(A, 1), seq(A, 2), seq(A, 3), seq(B, 1), seq(B, 2)];
+  ok('an unbroken record is complete', verifyCoverage(whole, { fromOne: true }).complete === true);
+  const missing = verifyCoverage(whole.filter((r) => r.eventId !== `${A}#2`), { fromOne: true });
+  const a = missing.agents.find((x) => x.agentDid === A);
+  ok('removing #2 shows the gap 2..2 for that agent only', !missing.complete && a.gaps.length === 1 && a.gaps[0].from === 2 && a.gaps[0].to === 2
+    && missing.agents.find((x) => x.agentDid === B).complete);
+  ok('a missing start is a gap only when the set is the whole record', !verifyCoverage([seq(A, 2), seq(A, 3)], { fromOne: true }).complete
+    && verifyCoverage([seq(A, 2), seq(A, 3)]).complete);
+  ok('a number claimed twice is a duplicate', verifyCoverage([seq(A, 1), seq(A, 1), seq(A, 2)]).agents[0].duplicates[0] === 1);
+  const legacy = verifyCoverage([{ eventId: 'old', agentDid: A }, seq(A, 1)]);
+  ok('records written before sequencing are counted, not treated as gaps', legacy.complete && legacy.unsequenced === 1);
+}
+
+console.log('\n7. Policy assignment — the decision used the policy anchored for that agent');
+{
+  const did = 'did:hedera:testnet:z6MkAgent_0.0.4242';
+  const op = (bundleHash, secs) => ({ did, bundleHash, sigDigest: `sha256:sig-${bundleHash}`, consensusTimestamp: `${secs}.000000000` });
+  const t0 = Date.parse('2026-10-28T10:00:00Z') / 1000;
+  const updates = [op('sha256:v1', t0), op('sha256:v2', t0 + 3600)];
+  const rec = (bundleHash, iso) => ({ agentDid: did, bundleHash, timestamp: iso });
+  ok('a decision under the policy in force is assigned', verifyPolicyAssignment(rec('sha256:v1', '2026-10-28T10:30:00Z'), updates).status === 'assigned');
+  ok('a decision under the newer policy after it took effect is assigned', verifyPolicyAssignment(rec('sha256:v2', '2026-10-28T11:30:00Z'), updates).ok);
+  ok('a decision under a policy already replaced is superseded', verifyPolicyAssignment(rec('sha256:v1', '2026-10-28T11:30:00Z'), updates).status === 'superseded');
+  ok('a bundle never anchored for the agent is unanchored', verifyPolicyAssignment(rec('sha256:other', '2026-10-28T10:30:00Z'), updates).status === 'unanchored');
+  ok('a bundle first anchored well after the decision is flagged', verifyPolicyAssignment(rec('sha256:v2', '2026-10-28T10:30:00Z'), updates).status === 'anchored-after-decision');
+  ok('a bundle anchored seconds after the decision (within grace) is assigned', verifyPolicyAssignment(rec('sha256:v2', '2026-10-28T10:59:30Z'), updates).ok);
+  ok('a record naming no bundle says so', verifyPolicyAssignment({ agentDid: did, timestamp: '2026-10-28T10:30:00Z' }, updates).status === 'no-bundle');
+  ok('another agent\'s policy-update never matches', verifyPolicyAssignment(rec('sha256:v1', '2026-10-28T10:30:00Z'), updates.map((u) => ({ ...u, did: 'did:hedera:testnet:x_0.0.1' }))).status === 'unanchored');
+
+  // readPolicyUpdates pages through the agent's own topic on a mirror node and keeps only its policy-update ops.
+  const msg = (o, n, secs) => ({ sequence_number: n, consensus_timestamp: `${secs}.000000000`, message: Buffer.from(JSON.stringify(o)).toString('base64') });
+  const pages = {
+    '/api/v1/topics/0.0.4242/messages?limit=100&order=asc': { messages: [msg({ op: 'did-create', did }, 1, t0 - 10), msg({ op: 'policy-update', did, sigDigest: 's1', bundleHash: 'sha256:v1' }, 2, t0)], links: { next: '/api/v1/topics/0.0.4242/messages?limit=100&order=asc&sequencenumber=gt:2' } },
+    '/api/v1/topics/0.0.4242/messages?limit=100&order=asc&sequencenumber=gt:2': { messages: [msg({ op: 'policy-update', did, sigDigest: 's2' }, 3, t0 + 3600)], links: { next: null } },
+  };
+  const mirror = async (url) => ({ ok: true, json: async () => pages[new URL(url).pathname + new URL(url).search] });
+  const read = await readPolicyUpdates(did, { fetchImpl: mirror });
+  ok('reads every page of the agent\'s topic, policy-update ops only', read.length === 2 && read[0].bundleHash === 'sha256:v1' && read[1].sequenceNumber === 3);
+  ok('an op published before bundleHash existed reads as null', read[1].bundleHash === null);
+  ok('a history longer than maxPages is not returned as if complete', (await readPolicyUpdates(did, { fetchImpl: mirror, maxPages: 1 })) === null);
+  ok('a record with no valid timestamp is undated, not unanchored', verifyPolicyAssignment({ agentDid: did, bundleHash: 'sha256:v1', timestamp: 'n/a' }, updates).status === 'undated');
+  ok('the topic comes from the DID', agentPolicyTopicId(did) === '0.0.4242' && agentPolicyTopicId('did:key:z6Mk') === null);
 }
 
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ FAILURES'} — ${pass} passed, ${fail} failed\n`);
