@@ -21,6 +21,7 @@
 import { matchRoute } from './route-match.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
 import { assertAccessPolicy, checkAccessContext, resolveAccessPrincipal } from './access-context.mjs';
+import { assertOutputPolicy, checkOutputBody, checkOutputQuery, checkOutputValue } from './output-filter.mjs';
 
 /** The access codes an executed call's withheld answer carries (route.access); reported under that code, not EXECUTED. */
 const WITHHELD_CODES = new Set(['ACCESS_CONTEXT_MISMATCH', 'ACCESS_CONTEXT_UNCHECKABLE']);
@@ -493,6 +494,36 @@ function accessRefusal(upstream, access, principal) {
   return found ? { reasonCode: found.reasonCode, path: found.path, ...(found.detail ? { detail: found.detail } : {}) } : null;
 }
 
+/**
+ * The output refusal for the request this gateway is about to forward, or null to forward it (route.output,
+ * output-filter.mjs). What is checked is what would leave: every name and value in the query string, and the body after
+ * any argument rewrite, in BOTH fields when both are set (a forward() may read either). A body is read by its Content-Type
+ * (checkOutputBody): a form decoded, JSON by the strict reader, anything else as text. A body that is not UTF-8, JSON
+ * that is not strict, or a query string that does not decode cannot be checked and is refused.
+ */
+function outputRefusal(req, output) {
+  const found = checkOutputQuery(String(req.path ?? '').split('?').slice(1).join('?'), output);
+  if (found) return found;
+  const type = Object.entries(req.headers ?? {}).find(([k]) => k.toLowerCase() === 'content-type')?.[1];
+  for (const raw of [req.rawBody, req.body]) {
+    if (raw == null) continue;
+    let refusal;
+    if (typeof raw === 'string' || raw instanceof Uint8Array) {
+      let text;
+      try {
+        text = typeof raw === 'string' ? raw : UTF8.decode(raw);
+      } catch {
+        return { reasonCode: 'OUTPUT_UNCHECKABLE', path: '', detail: 'the body is not UTF-8' };
+      }
+      refusal = checkOutputBody(text, Array.isArray(type) ? type.join(',') : type, output, parseStrictJson);
+    } else {
+      refusal = checkOutputValue(raw, output);
+    }
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
 function withHeader(headers, name, value) {
   const out = {};
   for (const [k, v] of Object.entries(headers ?? {})) if (k.toLowerCase() !== name) out[k] = v;
@@ -757,6 +788,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
   for (const route of routes) {
     assertAllowedQuery(route);
     assertAccessPolicy(route);
+    assertOutputPolicy(route);
     if (Array.isArray(route?.allowedQuery) && route.allowedQuery.length > 0) {
       console.warn(
         `[gateway] route "${route.method ?? '*'} ${route.path}" forwards query parameter(s) ${route.allowedQuery.join(', ')} ` +
@@ -1068,6 +1100,17 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       const rewrite = (original) => (typeof original === 'string' ? json : original instanceof Uint8Array ? new TextEncoder().encode(json) : decision.arguments);
       const fields = ['rawBody', 'body'].filter((f) => req[f] != null);
       forwardReq = { ...forwardReq, ...Object.fromEntries(fields.map((f) => [f, rewrite(req[f])])), headers: withHeader(forwardReq.headers, 'content-length') };
+    }
+    // Output check (route.output): what is about to leave carries none of the operator's forbidden words. Checked after the
+    // request was verified, so only an authorized agent learns that a text was refused; nothing is sent and the hold is
+    // released. The agent learns where the word is, never which word.
+    if (route.output) {
+      const refusal = outputRefusal(forwardReq, route.output);
+      if (refusal) {
+        console.warn(`[gateway] refused to forward "${route.method ?? '*'} ${route.path}": ${refusal.reasonCode} at ${refusal.path || '(body)'}`);
+        await releaseUnexecuted(decision, refusal.reasonCode);
+        return { status: 403, body: { decision: 'block', ...refusal, action: route.action, executed: false } };
+      }
     }
     // Access check (route.access): learn which tenant and user this request is served for BEFORE anything is sent, from the
     // operator's resolver. A resolver that fails means the response could not be checked, so nothing is forwarded and the

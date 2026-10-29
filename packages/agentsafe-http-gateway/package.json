@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/agentsafe-http-gateway",
-  "version": "0.35.0",
+  "version": "0.36.0",
   "description": "Generic HTTP interception gateway (SAFR §17) — a zero-dependency reverse proxy that governs arbitrary HTTP calls through the AgentSafe gate before forwarding upstream.",
   "type": "module",
   "main": "gateway.mjs",
@@ -26,6 +26,10 @@
       "types": "./access-context.d.mts",
       "default": "./access-context.mjs"
     },
+    "./output-filter": {
+      "types": "./output-filter.d.mts",
+      "default": "./output-filter.mjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -38,6 +42,8 @@
     "payload-binding.mjs",
     "access-context.d.mts",
     "access-context.mjs",
+    "output-filter.d.mts",
+    "output-filter.mjs",
     "server.mjs",
     "service-identity.mjs",
     "cli.mjs",
@@ -46,10 +52,10 @@
   ],
   "scripts": {
     "start": "node server.mjs",
-    "test": "node gateway.smoke.mjs && node bind-payload.smoke.mjs && node payload-binding.smoke.mjs && node bind-payload.fuzz.mjs && node credential-vault.smoke.mjs && node gateway-settle.smoke.mjs && node settle-after-answer.smoke.mjs && node context-signature.smoke.mjs && node query-binding.smoke.mjs && node allowed-agents.smoke.mjs && node report-outcomes.smoke.mjs && node upstream-unreachable.smoke.mjs && node service-identity.smoke.mjs && node routes-file.smoke.mjs && node argument-policy.smoke.mjs && node access-context.smoke.mjs"
+    "test": "node gateway.smoke.mjs && node bind-payload.smoke.mjs && node payload-binding.smoke.mjs && node bind-payload.fuzz.mjs && node credential-vault.smoke.mjs && node gateway-settle.smoke.mjs && node settle-after-answer.smoke.mjs && node context-signature.smoke.mjs && node query-binding.smoke.mjs && node allowed-agents.smoke.mjs && node report-outcomes.smoke.mjs && node upstream-unreachable.smoke.mjs && node service-identity.smoke.mjs && node routes-file.smoke.mjs && node argument-policy.smoke.mjs && node access-context.smoke.mjs && node output-filter.smoke.mjs"
   },
   "dependencies": {
-    "@metamynd/agentsafe-mcp-guard": "^0.33.0"
+    "@metamynd/agentsafe-mcp-guard": "^0.34.0"
   },
   "engines": {
     "node": ">=18"

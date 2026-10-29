@@ -566,6 +566,34 @@ headers and body. Resolve it from what the operator trusts: a directory keyed by
 (`request.agentDid`), or a fixed principal for a gateway that serves one tenant. This is the plaintext form of ZKBC's
 access family (its identity match over the observed context fields).
 
+## Text with a forbidden word is not sent (`route.output`) — since 0.36.0
+
+An agent can be talked into writing what it must not release: a customer's SSN into an email, an internal codename into
+a public post. Name the words a route must never carry out:
+
+```js
+{ method: 'POST', path: '/messages', action: 'send-message', valueFields: [], output: { forbidden: ['ssn', 'falcon'] } }
+```
+
+- **What is checked:** what would leave. That is the body after any rewrite by the owner's argument policy (every
+  string in a JSON body, values and object keys; a form body decoded; any other body as one text), in both body fields
+  when both are set, and every name and value in the query string. Headers and the request path are not checked, so a
+  route whose path carries free text (`/notes/:text`) is not covered.
+- **Matching:** text is folded (NFKC, invisible format characters removed, then case folding) and split at Unicode
+  word boundaries (UAX #29), with whitespace and punctuation dropped. A word, or a run of letters or digits inside one,
+  equal to a forbidden word folded the same way refuses the request. `SSN`, `ssn.`, fullwidth `ｓｓｎ`, `my_ssn` and
+  `ssn123` all match `ssn`; `lessons` and `s s n` do not. This catches a mistake, not an agent that is trying to get a
+  word past it. Scripts written without spaces (Chinese, Japanese, Thai, Korean) are split by dictionary or not at all.
+- **`OUTPUT_FORBIDDEN_WORD`:** `403` with the JSON Pointer `path` of the string (`?` for the query string; for an object
+  key, the object that holds it), never the word, and `executed: false`. Nothing is sent, and a claimed hold is released. The check runs after the request is
+  verified, so only an authorized agent learns that a text was refused. With `reportOutcomes`, it is reported
+  `refused` under this code.
+- **`OUTPUT_UNCHECKABLE`:** a body that is not UTF-8, a JSON body (by Content-Type, or one that starts like JSON) that is
+  not strict JSON, a form or query string that does not decode, or more than 100,000 fields.
+- **Startup:** each forbidden entry must be exactly one word after folding; a phrase (`credit card`) fails startup.
+- **Reuse:** exported as `@metamynd/agentsafe-http-gateway/output-filter`, identical to the MCP guard's `output` check.
+  It is the plaintext form of ZKBC's output family.
+
 ## Credential Vault (`resolveCredential`) — fails CLOSED since 0.13.0
 
 The gateway can inject an upstream credential that the **agent never sees**, released just in time

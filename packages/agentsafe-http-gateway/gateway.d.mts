@@ -94,7 +94,19 @@ export interface Route {
    * ACCESS_CONTEXT_MISMATCH or ACCESS_CONTEXT_UNCHECKABLE, with the failing path and never the value.
    */
   access?: RouteAccess;
+  /**
+   * The output check on what the agent sends (0.36.0): the request is forwarded only when no string in its body (value or
+   * key; a form decoded; a non-JSON body as text) or its query string has a forbidden word, matched as words after folding
+   * (NFKC + case). Otherwise 403 OUTPUT_FORBIDDEN_WORD (or OUTPUT_UNCHECKABLE) with the path, never the word; nothing is
+   * sent and a claimed hold is released. Headers and the request path are not checked.
+   */
+  output?: RouteOutput;
   [key: string]: unknown;
+}
+
+export interface RouteOutput {
+  /** Each exactly one word; a phrase is refused at startup. */
+  forbidden: string[];
 }
 
 /** The principal a request is served for. Never from anything the agent sends: it controls its own headers and body. */

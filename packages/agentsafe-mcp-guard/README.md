@@ -631,6 +631,40 @@ const search = guard.guardIncomingTool('crm-search', (signed, args) => crm.searc
 it from what the operator trusts, such as a directory keyed by the verified `signed.agentDid`. The same check is
 `route.access` in `@metamynd/agentsafe-http-gateway`; the module is exported as `@metamynd/agentsafe-mcp-guard/access-context`.
 
+### Text with a forbidden word is not sent (`output`) — since 0.34.0
+
+An agent can be talked into writing what it must not release: a customer's SSN into an email, an internal codename into
+a public post. Name the words a tool's arguments must never carry:
+
+```js
+const sendEmail = guard.guardIncomingTool('send-email', (signed, args) => mailer.send(args), {
+  output: { forbidden: ['ssn', 'falcon'] },
+});
+```
+
+- **Matching:** every string in the tool's argument (the first after the signed request), values and object keys, is
+  folded (NFKC, invisible format characters removed, then case folding) and split at Unicode word boundaries (UAX #29),
+  with whitespace and punctuation dropped. A word, or a run of letters or digits inside one, equal to a forbidden word
+  folded the same way refuses the call. `SSN`, `ssn.`, fullwidth `ｓｓｎ`, `my_ssn`, `ssn123` and `s­sn` (soft hyphen)
+  all match `ssn`. Numbers are checked as their text.
+- **Words, not substrings:** `ssn` does not match `lessons`, and it does not match `s s n` either. This catches a
+  mistake, not an agent that is trying to get a word past it. Scripts written without spaces (Chinese, Japanese, Thai,
+  Korean) are split by dictionary or not at all, so a forbidden word in them may not be found inside longer text.
+- **Refused before the tool runs:** the call throws `GovernanceBlocked` with `governance =
+  { decision: 'block', reasonCode: 'OUTPUT_FORBIDDEN_WORD', path, executed: false }`. The `path` is the JSON Pointer of
+  the string in the agent's own argument (for a key, the object that holds it); the word is never named. Arguments JSON cannot carry (a BigInt, a cycle) are
+  `OUTPUT_UNCHECKABLE`. A hold this guard settles is released.
+- **Holds:** a hold this guard settles (`settle: true`) is released; one it does not settle is left to its owner.
+- **What runs:** the handler receives the JSON snapshot of the argument that was checked (with the same type changes as
+  under `access`). Under an owner's argument policy, the check runs on the sanitized arguments the handler gets.
+  Arguments after the first (an MCP SDK's `extra`) are passed through unchecked.
+- **Startup:** each forbidden entry must be exactly one word after folding; a phrase (`credit card`, `e-mail`) throws
+  when the tool is wrapped, since it could never match. Phrases are not supported.
+
+The same check is `route.output` in `@metamynd/agentsafe-http-gateway`; the module is exported as
+`@metamynd/agentsafe-mcp-guard/output-filter`. It is the plaintext form of ZKBC's output family; JavaScript has no full
+case fold, so the fold is built from lower and upper case and collapses at least what default case folding does.
+
 ### Jurisdiction (signed, since 0.16.0)
 
 A request may carry a top-level `jurisdiction` (ISO 3166-1 alpha-2) that the agent **signed** — the v2 message

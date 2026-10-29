@@ -61,6 +61,7 @@ import { verifyBundle } from './magp-policy.mjs';
 import { resolveKeyProvider } from './key-providers.mjs';
 import { PAYLOAD_DIGEST_HEADER, buildPayloadBindingMessage, claimDigestField, isPayloadDigest, payloadDigestOf, toWireJson } from './payload-binding.mjs';
 import { assertAccessPolicy, checkAccessValue, resolveAccessPrincipal } from './access-context.mjs';
+import { assertOutputPolicy, checkOutputValue } from './output-filter.mjs';
 
 // The approved-context binding (MAGP §9a.5): a hold a PERSON approved is bound to the context
 // (itinerary) that person was shown. The claim states the digest of the context this Service is about to execute; the issuer
@@ -1085,12 +1086,15 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    * agent's signed request must be passed as the first argument. Throws
    * GovernanceBlocked on any non-allow decision.
    */
-  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, requirePayloadBinding = false, requireContextSignature, x402 = false, allowedAgents: toolAgents, access } = {}) {
+  function guardIncomingTool(action, handler, { settle: settleClaim = false, trustedContext, bindPayload = false, requirePayloadBinding = false, requireContextSignature, x402 = false, allowedAgents: toolAgents, access, output } = {}) {
     if (toolAgents !== undefined) assertProfileAgents(toolAgents, `tool "${action}"`);
     // `access` (0.33.0): the answer is released only when every tenant and user field in it names the principal this
     // call is served for (access-context.mjs). Checked here, so a misconfigured tool fails when it is wrapped.
     const accessHolder = access === undefined ? undefined : { access };
     if (accessHolder) assertAccessPolicy(accessHolder, `tool "${action}"`);
+    // `output` (0.34.0): the tool runs only when the text the agent hands it has none of the operator's forbidden words
+    // (output-filter.mjs). Checked here too.
+    if (output !== undefined) assertOutputPolicy({ output }, `tool "${action}"`);
     const accessBlocked = (governance) => {
       const e = new Error(`MCP guard BLOCK "${action}": ${governance.reasonCode}`);
       e.name = 'GovernanceBlocked';
@@ -1199,16 +1203,37 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
         console.warn(`[mcp-guard] "${action}" (amount=${signed.amount}) permitted in trustless mode — rate-limit, circuit-breaker, replay, cumulative-spend, and spend-anomaly floors are stateful and were NOT re-verified against live issuer state. Set requireAuthorization:true for custodial/value-bearing surfaces.`);
       }
       const settling = settleClaim && (decision.claimToken || decision.counterpartyAuthenticated);
+      // A refusal before the handler runs: a hold this guard settles is released. A release that fails (issuer unreachable)
+      // must not replace the refusal: the caller still learns nothing ran.
+      const refuseUnrun = async (reasonCode, extra) => {
+        const release = settling ? await releaseAuthorization({ authorizationId: decision.authorizationId, claimToken: decision.claimToken, reason: reasonCode }).catch((e) => ({ ok: false, error: String(e?.message ?? e) })) : null;
+        return accessBlocked({ decision: 'block', reasonCode, ...extra, executed: false, ...(release && release.ok === false ? { releaseFailed: true } : {}) });
+      };
+      // The output check runs on what the handler would run with (after the owner's argument policy rewrote it): the tool's
+      // argument, as a JSON snapshot that the handler then receives, so a getter cannot show the check one text and the
+      // tool another. Only the first argument after the signed request is the agent's; the rest (an MCP SDK's `extra`) are not.
+      if (output !== undefined && rest.length > 0 && rest[0] !== undefined) {
+        let snapshot;
+        try {
+          snapshot = JSON.parse(JSON.stringify(rest[0]));
+        } catch {
+          throw await refuseUnrun('OUTPUT_UNCHECKABLE', { path: '', detail: 'the arguments cannot be written as JSON' });
+        }
+        const refusal = checkOutputValue(snapshot, output);
+        if (refusal) {
+          console.warn(`[mcp-guard] refused "${action}": ${refusal.reasonCode} at ${refusal.path || '(arguments)'}`);
+          throw await refuseUnrun(refusal.reasonCode, { path: refusal.path, ...(refusal.detail ? { detail: refusal.detail } : {}) });
+        }
+        rest = [snapshot, ...rest.slice(1)];
+      }
       // The principal is resolved before the handler runs, from the verified request and what the operator trusts — never
-      // the agent's claim. A resolver that fails refuses the call with nothing run; a hold this guard settles is released.
+      // the agent's claim. A resolver that fails refuses the call with nothing run.
       let accessPrincipal;
       if (accessHolder) {
         try {
           accessPrincipal = await resolveAccessPrincipal(accessHolder, signed, ...rest);
         } catch (err) {
-          // A release that fails (issuer unreachable) must not replace the refusal: the caller still learns nothing ran.
-          const release = settling ? await releaseAuthorization({ authorizationId: decision.authorizationId, claimToken: decision.claimToken, reason: 'ACCESS_PRINCIPAL_UNAVAILABLE' }).catch((e) => ({ ok: false, error: String(e?.message ?? e) })) : null;
-          throw accessBlocked({ decision: 'block', reasonCode: 'ACCESS_PRINCIPAL_UNAVAILABLE', executed: false, error: String(err?.message ?? err), ...(release && release.ok === false ? { releaseFailed: true } : {}) });
+          throw await refuseUnrun('ACCESS_PRINCIPAL_UNAVAILABLE', { error: String(err?.message ?? err) });
         }
       }
       // The handler RAN (a claimed hold is settled as executed first); what is withheld is its answer. The agent is told

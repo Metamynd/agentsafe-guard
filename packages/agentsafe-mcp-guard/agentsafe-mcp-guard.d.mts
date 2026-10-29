@@ -73,6 +73,19 @@ export interface GuardIncomingToolOptions extends Omit<VerifyOptions, 'payloadDi
    * throws GovernanceBlocked with `executed: true`.
    */
   access?: ToolAccess;
+  /**
+   * Forbidden words (0.34.0). The tool runs only when no string in its argument (the first after the signed request), value
+   * or key, has one of them, matched as whole words after folding (NFKC + case). Otherwise the call throws GovernanceBlocked
+   * with `OUTPUT_FORBIDDEN_WORD` (or `OUTPUT_UNCHECKABLE`), the `path` of the string, never the word, and `executed: false`;
+   * a hold this guard settles (`settle: true`) is released, and one it does not settle is left to its owner. The handler
+   * receives the JSON snapshot of the argument that was checked.
+   */
+  output?: ToolOutput;
+}
+
+export interface ToolOutput {
+  /** Each exactly one word; a phrase is refused when the tool is wrapped. */
+  forbidden: string[];
 }
 
 /** The principal a call is served for. Never from anything the agent sends: it controls its own request. */

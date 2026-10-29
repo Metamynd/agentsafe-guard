@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/agentsafe-mcp-guard",
-  "version": "0.33.0",
+  "version": "0.34.0",
   "description": "Zero-dependency trustless governance for the SERVICE side. An MCP server or API re-verifies a calling agent's signed request against the agent's own published policy â€” so an agent that ignores its own guard still cannot make your service act.",
   "type": "module",
   "main": "./agentsafe-mcp-guard.mjs",
@@ -20,6 +20,10 @@
       "types": "./access-context.d.mts",
       "default": "./access-context.mjs"
     },
+    "./output-filter": {
+      "types": "./output-filter.d.mts",
+      "default": "./output-filter.mjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -33,6 +37,8 @@
     "payload-binding.mjs",
     "access-context.d.mts",
     "access-context.mjs",
+    "output-filter.d.mts",
+    "output-filter.mjs",
     "governance-envelope.mjs",
     "policy-core.mjs",
     "x402.mjs",
@@ -40,7 +46,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node mcp-guard.smoke.mjs && node pay.smoke.mjs && node decision-token.smoke.mjs && node claim-authorization.smoke.mjs && node claim-token.smoke.mjs && node payload-binding.smoke.mjs && node guard-incoming-tool.smoke.mjs && node bundle-authentication.smoke.mjs && node jurisdiction.smoke.mjs && node context-signature.smoke.mjs && node bundle-cache.smoke.mjs && node approved-escalation.smoke.mjs && node claim-expectations.smoke.mjs && node refusal-codes.smoke.mjs && node allowed-agents.smoke.mjs && node report-outcome.smoke.mjs && node accept-challenge.smoke.mjs && node argument-policy.smoke.mjs && node access-context.smoke.mjs"
+    "test": "node mcp-guard.smoke.mjs && node pay.smoke.mjs && node decision-token.smoke.mjs && node claim-authorization.smoke.mjs && node claim-token.smoke.mjs && node payload-binding.smoke.mjs && node guard-incoming-tool.smoke.mjs && node bundle-authentication.smoke.mjs && node jurisdiction.smoke.mjs && node context-signature.smoke.mjs && node bundle-cache.smoke.mjs && node approved-escalation.smoke.mjs && node claim-expectations.smoke.mjs && node refusal-codes.smoke.mjs && node allowed-agents.smoke.mjs && node report-outcome.smoke.mjs && node accept-challenge.smoke.mjs && node argument-policy.smoke.mjs && node access-context.smoke.mjs && node output-filter.smoke.mjs"
   },
   "engines": {
     "node": ">=18"
