@@ -65,6 +65,34 @@ const assignment = verifyPolicyAssignment(record, updates);          // { ok, st
 const part = verifyPolicyDisclosure(opening, updates);               // { ok, status, leaf, anchor }
 ```
 
+## ZKBC v1 core (`@metamynd/magp-evidence/zkbc`)
+
+`zkbc.mjs` implements the ledger-neutral part of ZKBC v1 (HCS-XX, "Zero-Knowledge Boundary Compliance",
+draft 1.0) and reproduces every digest the specification publishes in its Test Vectors. It provides:
+- the commitments (`commit`, `setCommit`, `identityDigest`);
+- the public statement and `statementHash`, and the recursive `chainDigest`;
+- `buildJournal`, and `checkJournal` for an auditor's structural checks on a journal;
+- `verifySessionCoverage`, the cross-topic coverage check;
+- `policyInEffect`, the consensus-time in-effect rule;
+- the topic and transaction memos;
+- `toolPolicyFromBundle` + `toolCommitments`: the tool family's allowlist and sensitive-key commitments, read from a
+  MAGP policy bundle (the mandated actions, and the paths an argument policy marks sensitive).
+
+It is not a prover or a proof verifier. A ZKBC receipt carries a zero-knowledge proof that the actions it names
+satisfied the committed policy; nothing here makes or checks one, so `checkJournal(j).ok` means the journal is well
+formed and binds its own fields, never that the actions were compliant. A journal with verdict `compliant` and no proof
+would assert compliance on a public topic without evidence, so the module builds journals for a prover to attach a
+proof to, and leaves publishing to whoever has one. ZKBC's set commitments are unsalted: a small allowlist can be
+confirmed by trying candidates, so publishing `toolCommitments` on a public topic discloses the sets to that extent.
+
+```js
+import { toolPolicyFromBundle, toolCommitments, buildJournal, checkJournal } from '@metamynd/magp-evidence/zkbc';
+const policyCommitments = toolCommitments(toolPolicyFromBundle(bundle));
+const journal = buildJournal({ sessionId, issuedAt, policyId, policyCommitments, programId, proofSystem,
+  mode: 'batch', family: ['tool'], sequenceRange: { from: 1, to: 20 } });
+checkJournal(journal);   // { ok, problems: [] }
+```
+
 ## It matches the backend exactly
 
 `evidenceLeaf`, the Merkle verification, and `recomputeCommitment` reproduce the backend's
