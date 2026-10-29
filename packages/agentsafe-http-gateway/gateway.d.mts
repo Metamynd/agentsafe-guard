@@ -30,6 +30,8 @@ export interface GatewayGuard {
   // VerifyOptions, ...) are interfaces, which TypeScript does not treat as assignable to a Record, so
   // createHttpGateway({ guard: createMcpGuard(...) }) failed to compile under --strict in 0.31.0.
   verifyRequest(signed: SignedRequest, opts?: any): Promise<ServiceVerdict>;
+  /** True when the guard enforces a mandate's argument policy on the body it is handed (agentsafe-mcp-guard >= 0.32.0). */
+  readonly checksArguments?: boolean;
   reportOutcome?(input: any): Promise<{ ok: boolean; reasonCode?: string; status?: number; reportId?: string }>;
   captureAuthorization?(input: any): Promise<{ ok: boolean; [key: string]: unknown }>;
   releaseAuthorization?(input: any): Promise<{ ok: boolean; [key: string]: unknown }>;

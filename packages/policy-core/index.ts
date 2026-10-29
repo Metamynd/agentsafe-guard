@@ -69,6 +69,22 @@ export type {
   BudgetState,
 } from './mandate.types.js';
 
+// Per-tool argument policy (enforced by the guard that executes the call)
+export {
+  argumentPoliciesFor,
+  argumentPolicyProblem,
+  checkArguments,
+  sanitizeArguments,
+  argumentPolicyNarrowing,
+  parseArgumentPointer,
+  REDACTED_ARGUMENT,
+  HMAC_ARGUMENT_PREFIX,
+  type ArgumentPolicy,
+  type SensitiveArgument,
+  type ArgumentCheck,
+  type ArgumentSanitization,
+} from './argument-policy.js';
+
 // Composed evaluation + canonical message + context construction
 export { evaluate, type EvaluateInput, type RulePack } from './evaluate.js';
 export { buildAuthMessage, buildLegacyAuthMessageV1, AUTH_MESSAGE_V2_TAG, type AuthMessageFields } from './canonical.js';

@@ -946,6 +946,184 @@ function sumEventField(events, type, field) {
   return events.filter((e) => e.type === type).reduce((acc, e) => acc + (typeof e.payload[field] === "number" ? e.payload[field] : 0), 0);
 }
 
+// src/policy-core/argument-policy.ts
+var REDACTED_ARGUMENT = "[REDACTED]";
+var HMAC_ARGUMENT_PREFIX = "hmac-sha256:";
+var MAX_DEPTH = 32;
+var MAX_NODES = 1e4;
+var MAX_PATHS = 256;
+function parseArgumentPointer(pointer) {
+  if (typeof pointer !== "string" || !pointer.startsWith("/")) return null;
+  const out = [];
+  for (const raw of pointer.slice(1).split("/")) {
+    if (/~[^01]|~$/.test(raw)) return null;
+    out.push(raw.replace(/~1/g, "/").replace(/~0/g, "~"));
+  }
+  return out;
+}
+function toPointer(segments) {
+  return segments.map((s) => "/" + s.replace(/~/g, "~0").replace(/\//g, "~1")).join("");
+}
+function argumentPolicyProblem(policy) {
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) return "arguments must be an object";
+  const { allow, sensitive } = policy;
+  if (!Array.isArray(allow) || allow.length === 0) return "arguments.allow must list at least one path";
+  if (allow.length > MAX_PATHS) return `arguments.allow lists more than ${MAX_PATHS} paths`;
+  for (const p of allow) if (!parseArgumentPointer(p)) return `arguments.allow: ${JSON.stringify(p)} is not a JSON Pointer below the root`;
+  if (sensitive !== void 0) {
+    if (!Array.isArray(sensitive)) return "arguments.sensitive must be a list";
+    if (sensitive.length > MAX_PATHS) return `arguments.sensitive lists more than ${MAX_PATHS} paths`;
+    for (const s of sensitive) {
+      if (!s || typeof s !== "object") return "arguments.sensitive entries must be objects";
+      const { path, mode } = s;
+      if (!parseArgumentPointer(path)) return `arguments.sensitive: ${JSON.stringify(path)} is not a JSON Pointer below the root`;
+      if (mode !== "redact" && mode !== "hmac") return `arguments.sensitive: mode must be "redact" or "hmac"`;
+    }
+  }
+  return null;
+}
+function argumentPoliciesFor(mandate, action) {
+  return (mandate?.permission ?? []).filter((p) => (p.target ?? mandate?.target) === action && p.arguments !== void 0).map((p) => p.arguments);
+}
+function covers(pattern, path) {
+  if (pattern.length > path.length) return false;
+  return pattern.every((seg, i) => seg === "*" || seg === path[i]);
+}
+function isPlainObject(v) {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+function leavesOf(root) {
+  const leaves = [];
+  let nodes = 0;
+  const walk = (value, path) => {
+    if (++nodes > MAX_NODES) return `more than ${MAX_NODES} values`;
+    if (path.length > MAX_DEPTH) return `nested deeper than ${MAX_DEPTH}`;
+    if (value === null || typeof value === "string" || typeof value === "boolean") {
+      leaves.push(path);
+      return null;
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return "a non-finite number";
+      leaves.push(path);
+      return null;
+    }
+    if (Array.isArray(value)) {
+      if (value.length === 0 && path.length > 0) {
+        leaves.push(path);
+        return null;
+      }
+      for (let i = 0; i < value.length; i++) {
+        const e = walk(value[i], [...path, String(i)]);
+        if (e) return e;
+      }
+      return null;
+    }
+    if (isPlainObject(value)) {
+      const keys = Object.keys(value);
+      if (keys.length === 0 && path.length > 0) {
+        leaves.push(path);
+        return null;
+      }
+      for (const k of keys) {
+        const e = walk(value[k], [...path, k]);
+        if (e) return e;
+      }
+      return null;
+    }
+    return `a value JSON cannot carry (${typeof value})`;
+  };
+  if (!isPlainObject(root)) return { ok: false, path: "", detail: "the arguments are not a single JSON object" };
+  const err = walk(root, []);
+  return err ? { ok: false, path: "", detail: err } : { ok: true, leaves };
+}
+function checkArguments(policies, args) {
+  if (policies.length === 0) return { ok: true };
+  for (const p of policies) {
+    const problem = argumentPolicyProblem(p);
+    if (problem) return { ok: false, reasonCode: "ARGUMENTS_UNCHECKABLE", detail: problem };
+  }
+  const found = leavesOf(args);
+  if (!found.ok) return { ok: false, reasonCode: "ARGUMENTS_UNCHECKABLE", detail: found.detail };
+  for (const p of policies) {
+    const allowed = p.allow.map((a) => parseArgumentPointer(a));
+    for (const leaf of found.leaves) {
+      if (!allowed.some((a) => covers(a, leaf))) return { ok: false, reasonCode: "ARGUMENT_NOT_ALLOWED", path: toPointer(leaf) };
+    }
+  }
+  return { ok: true };
+}
+function canonicalJson(v) {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  if (v !== null && typeof v === "object") {
+    const o = v;
+    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(v);
+}
+function clone(v) {
+  return JSON.parse(JSON.stringify(v));
+}
+function sanitizeArguments(policies, args, { hmac } = {}) {
+  for (const p of policies) {
+    const problem = argumentPolicyProblem(p);
+    if (problem) return { ok: false, reasonCode: "ARGUMENTS_UNCHECKABLE", detail: problem };
+  }
+  const modes = /* @__PURE__ */ new Map();
+  const visit = (value, pattern, at, mode) => {
+    if (pattern.length === 0) {
+      const key = toPointer(at);
+      const prev = modes.get(key);
+      if (!prev || prev.mode === "hmac" && mode === "redact") modes.set(key, { segments: at, mode });
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+    const [head, ...rest] = pattern;
+    const keys = head === "*" ? Object.keys(value) : Object.prototype.hasOwnProperty.call(value, head) ? [head] : [];
+    for (const k of keys) visit(value[k], rest, [...at, k], mode);
+  };
+  for (const p of policies) {
+    for (const s of p.sensitive ?? []) visit(args, parseArgumentPointer(s.path), [], s.mode);
+  }
+  if (modes.size === 0) return { ok: true, value: args };
+  const out = clone(args);
+  for (const { segments, mode } of [...modes.values()].sort((a, b) => b.segments.length - a.segments.length)) {
+    const parent = segments.slice(0, -1).reduce((o, k) => o?.[k], out);
+    const last = segments[segments.length - 1];
+    if (!parent || typeof parent !== "object" || !Object.prototype.hasOwnProperty.call(parent, last)) continue;
+    if (mode === "redact") {
+      parent[last] = REDACTED_ARGUMENT;
+      continue;
+    }
+    if (typeof hmac !== "function") return { ok: false, reasonCode: "SENSITIVE_ARGUMENT_UNPROTECTED", path: toPointer(segments), detail: "the policy asks for a keyed hash and this guard has no key" };
+    const digest = hmac(canonicalJson(parent[last]));
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+      return { ok: false, reasonCode: "SENSITIVE_ARGUMENT_UNPROTECTED", path: toPointer(segments), detail: "the keyed hash did not return 64 lowercase hex characters" };
+    }
+    parent[last] = HMAC_ARGUMENT_PREFIX + digest;
+  }
+  return { ok: true, value: out };
+}
+function argumentPolicyNarrowing(parent, child) {
+  if (child !== void 0 && argumentPolicyProblem(child)) return { refusal: "UNCOMPARABLE", detail: "arguments" };
+  if (parent === void 0) return null;
+  if (argumentPolicyProblem(parent)) return { refusal: "UNCOMPARABLE", detail: "arguments" };
+  if (child === void 0) return { refusal: "CONSTRAINT_DROPPED", detail: "arguments" };
+  const p = parent;
+  const c = child;
+  const patternCovers = (outer, inner) => outer.length <= inner.length && outer.every((seg, i) => seg === "*" || seg === inner[i]);
+  const parentAllow = p.allow.map((a) => parseArgumentPointer(a));
+  for (const a of c.allow) {
+    if (!parentAllow.some((pa) => patternCovers(pa, parseArgumentPointer(a)))) return { refusal: "CONSTRAINT_WIDENED", detail: `arguments.allow ${a}` };
+  }
+  for (const ps of p.sensitive ?? []) {
+    const match = (c.sensitive ?? []).find((cs) => cs.path === ps.path && (cs.mode === ps.mode || cs.mode === "redact"));
+    if (!match) return { refusal: "CONSTRAINT_DROPPED", detail: `arguments.sensitive ${ps.path}` };
+  }
+  return null;
+}
+
 // src/policy-core/evaluate.ts
 var PRECEDENCE2 = { allow: 0, observe: 1, escalate: 2, block: 3, suspend: 4, quarantine: 5, decommission: 6 };
 function evaluate(input) {
@@ -1047,6 +1225,7 @@ export {
   CONTEXT_UNVERIFIABLE,
   DEFAULT_AMOUNT_SHARE_HIGH,
   EU_MEMBER_STATES,
+  HMAC_ARGUMENT_PREFIX,
   JURISDICTION_ATOM,
   JURISDICTION_GROUPS,
   MODES_BY_RANK,
@@ -1054,11 +1233,15 @@ export {
   PROVENANCE_KEY,
   PROVENANCE_LEVELS,
   PROVENANCE_RANK,
+  REDACTED_ARGUMENT,
   RISK_LEVELS,
   SUPERVISED_AMOUNT_CAP,
   applyCapture,
   applyHold,
   applySignedLast,
+  argumentPoliciesFor,
+  argumentPolicyNarrowing,
+  argumentPolicyProblem,
   asOperatingMode,
   authorityFailure,
   buildAgentSettleMessage,
@@ -1068,6 +1251,7 @@ export {
   buildLocalDecisionMessage,
   buildRuleContext,
   canAuthorize,
+  checkArguments,
   contextFieldProblem,
   contextRiskSignals,
   contextValueAt,
@@ -1091,6 +1275,7 @@ export {
   normalizeContextToken,
   normalizeRiskLevel,
   operatingModeGate,
+  parseArgumentPointer,
   perTxnCapFor,
   provenanceOf,
   releaseHold,
@@ -1101,6 +1286,7 @@ export {
   riskFloorFor,
   riskSignalSettings,
   riskSignalsFor,
+  sanitizeArguments,
   sumEventField,
   validateMolecules
 };

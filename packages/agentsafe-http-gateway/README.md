@@ -501,6 +501,24 @@ not the tool body.
 keys: list them in `allowedFields`, or set `allowedFields: null`). Reproduced before the change: a
 request signed for $250 to an approved merchant, carrying `surcharge: 9999`, reached the upstream.
 
+## The owner's argument policy — since 0.33.0
+
+`allowedFields` is the operator's list. The agent's owner can set their own on the mandate (`arguments`, MAGP §8.3.14), and
+it travels in the signed bundle: JSON Pointer paths the body may carry, and values to redact or keyed-hash before the
+upstream sees them. The gateway hands the guard the JSON body (agentsafe-mcp-guard >= 0.32.0), so:
+
+- a body field the route admits but the owner does not is refused `403 ARGUMENT_NOT_ALLOWED` with its `path`, before any
+  hold is claimed;
+- a sensitive value is rewritten and the upstream receives the rewritten body, in the form it arrived in, without the old
+  `Content-Length`. A body with nothing to rewrite is forwarded byte for byte;
+- `hmac` values are keyed with `AGENTSAFE_ARGUMENT_KEY` (at least 32 bytes). Without it such a call is refused
+  `SENSITIVE_ARGUMENT_UNPROTECTED`;
+- a body that does not parse, under a policy, is refused `ARGUMENTS_UNCHECKABLE`.
+
+The policy covers the JSON body. A query string carries arguments it cannot see, so under a policy a request with one is
+refused `ARGUMENTS_UNCHECKABLE`, even on a route that declares `allowedQuery`. An agentsafe-mcp-guard older
+than 0.32.0 ignores the policy, and the gateway says so at startup.
+
 ## Credential Vault (`resolveCredential`) — fails CLOSED since 0.13.0
 
 The gateway can inject an upstream credential that the **agent never sees**, released just in time

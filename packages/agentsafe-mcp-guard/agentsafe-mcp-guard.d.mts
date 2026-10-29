@@ -35,6 +35,13 @@ export interface ServiceVerdict {
   claimToken?: string;
   counterpartyAuthenticated?: boolean;
   detail?: string;
+  /** On an argument refusal: the JSON Pointer of the offending argument. */
+  path?: string;
+  /**
+   * On a permit under an argument policy (the mandate's `arguments`): the arguments to run with, sensitive values redacted
+   * or keyed-hashed. Absent when the action has no policy. Non-enumerable.
+   */
+  arguments?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -48,9 +55,14 @@ export interface VerifyOptions {
   x402?: boolean;
   /** A narrower allow-list for this call (a credential profile, §16.3). */
   allowedAgents?: string[];
+  /**
+   * The call's arguments, checked against the owner's argument policy when the mandate sets one (a call under a policy that
+   * passes none is refused, ARGUMENTS_UNCHECKABLE). guardIncomingTool passes its single argument itself.
+   */
+  arguments?: unknown;
 }
 
-export interface GuardIncomingToolOptions extends Omit<VerifyOptions, 'payloadDigest'> {
+export interface GuardIncomingToolOptions extends Omit<VerifyOptions, 'payloadDigest' | 'arguments'> {
   /** Capture the claimed hold when the handler returns; mark it unknown when it throws. */
   settle?: boolean;
   /** Digest the single argument after the signed request (true), or say what to digest. */
@@ -112,6 +124,8 @@ export interface McpGuardOptions {
   /** The principal DID that owns this Service's credentials (§16.3). */
   gatewayOwnerPrincipal?: string;
   honourApprovals?: boolean;
+  /** Key for argument hashes (`sensitive: hmac`), at least 32 bytes. Without it such a call is refused. */
+  argumentKey?: string | Uint8Array;
 }
 
 export interface McpGuard {
@@ -119,6 +133,8 @@ export interface McpGuard {
   readonly allowedAgents: readonly string[] | 'any';
   readonly gatewayOwnerPrincipal: string | null | undefined;
   readonly honoursApprovals: boolean;
+  /** This guard enforces a mandate's argument policy (0.32.0). */
+  readonly checksArguments: true;
   verifyRequest(signed: SignedRequest, opts?: VerifyOptions): Promise<ServiceVerdict>;
   /** Wrap a tool handler: it runs only on a permit, with the signed request as its first argument. */
   guardIncomingTool<Args extends unknown[], R>(

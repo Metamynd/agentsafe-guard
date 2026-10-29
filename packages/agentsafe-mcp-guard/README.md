@@ -565,6 +565,35 @@ const guard = createMcpGuard({ serviceDid, serviceKey, issuerApi, policyPublicKe
   gatewayOwnerPrincipal, requireAuthorization: false, honourApprovals: true });
 ```
 
+### The owner's argument policy (`arguments`, `argumentKey`) — since 0.32.0
+
+A mandate permission may limit the arguments its tool runs with (MAGP §8.3.14):
+
+```json
+{ "target": "send-email", "arguments": { "allow": ["/to", "/subject", "/body"],
+  "sensitive": [{ "path": "/to", "mode": "hmac" }, { "path": "/body", "mode": "redact" }] } }
+```
+
+`guardIncomingTool` checks its single argument after the signed request against it, after the policy permits and before
+any hold is claimed:
+
+- a value outside the `allow` paths (JSON Pointers; `*` matches any key or index) is refused `ARGUMENT_NOT_ALLOWED`, with
+  the offending `path`;
+- the handler receives a copy with each `sensitive` value replaced: `"[REDACTED]"`, or `hmac-sha256:<hex>` keyed with
+  `argumentKey` (at least 32 bytes; keep it stable so equal values keep matching). With no key, a call that needs one is
+  refused `SENSITIVE_ARGUMENT_UNPROTECTED`, never sent in the clear;
+- a tool called with more than one argument after the signed request, or with anything but a JSON object, is refused
+  `ARGUMENTS_UNCHECKABLE`.
+
+Calling `verifyRequest` yourself, pass the arguments as `{ arguments }`; the verdict then carries the sanitized copy as
+`verdict.arguments`. A call under a policy that passes none is refused `ARGUMENTS_UNCHECKABLE`. A tool without a policy is
+unchanged, and its handler receives the very object it was called with. `guard.checksArguments` is `true` from 0.32.0.
+
+```js
+const guard = createMcpGuard({ serviceDid, serviceKey, issuerApi, policyPublicKey, allowedAgents: [agentDid],
+  gatewayOwnerPrincipal, argumentKey: process.env.ARGUMENT_KEY });
+```
+
 ### Jurisdiction (signed, since 0.16.0)
 
 A request may carry a top-level `jurisdiction` (ISO 3166-1 alpha-2) that the agent **signed** — the v2 message

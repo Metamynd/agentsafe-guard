@@ -34,6 +34,7 @@
 
 import type { Constraint, Mandate, Operator, Permission } from './mandate.types.js';
 import { maxRisk, normalizeRiskLevel } from './provenance.js';
+import { argumentPolicyNarrowing } from './argument-policy.js';
 
 /**
  * How deep a delegation chain may go.
@@ -192,6 +193,10 @@ function permissionNarrows(parent: Permission, child: Permission): DelegationVer
   if ((parent as { requirePayloadBinding?: unknown }).requirePayloadBinding === true && childBinding !== true) {
     return no('CONSTRAINT_DROPPED', 'requirePayloadBinding');
   }
+
+  // An argument policy limits what the tool may be called with, so a child may narrow it but not drop or widen it.
+  const args = argumentPolicyNarrowing((parent as { arguments?: unknown }).arguments, (child as { arguments?: unknown }).arguments);
+  if (args) return no(args.refusal, args.detail);
   return ok();
 }
 
@@ -237,6 +242,16 @@ export function delegationVerdict(parent: Mandate, child: Mandate, depth: number
       best = best ?? verdict;
     }
     if (!covered) return best ?? no('CONSTRAINT_WIDENED', target);
+
+    // Argument policies are not "any one covers it": a guard applies EVERY policy the action carries (argumentPoliciesFor),
+    // so a parent with one permission that sets a policy and one that does not is bound by the policy. The child must
+    // narrow each of them, or a child judged against the policy-free permission would run with no policy at all.
+    for (const pp of candidates) {
+      const parentArgs = (pp as { arguments?: unknown }).arguments;
+      if (parentArgs === undefined) continue;
+      const args = argumentPolicyNarrowing(parentArgs, (cp as { arguments?: unknown }).arguments);
+      if (args) return no(args.refusal, args.detail);
+    }
   }
 
   // A prohibition is authority REMOVED, so the child must keep every one of the parent's.

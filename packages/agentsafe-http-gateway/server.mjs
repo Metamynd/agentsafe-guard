@@ -234,6 +234,9 @@ async function main() {
     // Off by default — agentsafe-guard >= 0.17.0 signs it unless `signContext: false`, older agents do not; a present one is always checked.
     requireContextSignature: process.env.AGENTSAFE_REQUIRE_CONTEXT_SIGNATURE === 'true',
     allowedAgents: ALLOWED_AGENTS,
+    // The secret argument hashes are keyed with, where an agent's mandate marks an argument `sensitive: hmac` (at least 32
+    // bytes; keep it stable). Unset: such a call is refused (SENSITIVE_ARGUMENT_UNPROTECTED), never sent in the clear.
+    argumentKey: process.env.AGENTSAFE_ARGUMENT_KEY || undefined,
     gatewayOwnerPrincipal: GATEWAY_OWNER,
   });
   // A pin the guard does not report is a pin it does not enforce: an mcp-guard below 0.20.0 (a stale lockfile) ignores the

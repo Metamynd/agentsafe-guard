@@ -14,6 +14,8 @@
  * the owner-initiated agent-identity containment state (never fired by a rule).
  */
 
+import type { ArgumentPolicy } from './argument-policy.js';
+
 export type MandateDecision = 'allow' | 'observe' | 'block' | 'escalate' | 'suspend' | 'quarantine' | 'decommission';
 
 /** The fixed operator set. New scenarios add operands/resolvers, not operators. */
@@ -75,6 +77,13 @@ export interface Permission {
    * Not an ODRL constraint and never evaluated by `evaluateMandate`. A delegated child may not drop it.
    */
   requirePayloadBinding?: boolean;
+  /**
+   * The mandate OWNER's argument policy for this tool (argument-policy.ts): the JSON Pointer paths its arguments may carry
+   * (anything else is refused, `ARGUMENT_NOT_ALLOWED`) and the values rewritten before the call leaves the guard. Enforced by
+   * the guard that executes the call, which holds the arguments; never evaluated by `evaluateMandate`. A delegated child may
+   * narrow it, never drop or widen it.
+   */
+  arguments?: ArgumentPolicy;
 }
 
 export interface Prohibition {

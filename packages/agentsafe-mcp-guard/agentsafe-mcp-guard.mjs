@@ -12,7 +12,7 @@
 // Dependencies are the two generated, zero-external-dependency bundles:
 //   policy-core.mjs (deterministic evaluator) and magp-did.mjs (key-in-DID verify).
 import crypto from 'node:crypto';
-import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, effectiveRiskFloor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, effectiveRiskFloor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction, argumentPoliciesFor, checkArguments, sanitizeArguments } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 
 /**
@@ -254,8 +254,16 @@ const CLOCK_SKEW_TOLERANCE_MS = 30 * 1000;
  *   as an approval claim; the issuer grants it only for a hold a person approved, for this agent and these values, and
  *   only once, so the approved call runs exactly once and anything else stays escalated. Allowed calls are not claimed,
  *   exactly as before. Implied by `requireAuthorization`. Off by default.
+ * @param {string|Uint8Array} [cfg.argumentKey] (0.32.0) the secret this Service keys argument hashes with, where the agent's
+ *   mandate marks an argument `sensitive: hmac` (policy-core argument-policy.ts): the tool then receives
+ *   `hmac-sha256:<hex>` of the value, never the value. At least 32 bytes; keep it stable, or equal values stop matching
+ *   across restarts. Without it, a call whose policy asks for a keyed hash is refused (SENSITIVE_ARGUMENT_UNPROTECTED).
  */
-export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents, gatewayOwnerPrincipal, honourApprovals = false } = {}) {
+export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProviderOpt, daemonSocketPath, issuerApi, fetchBundle, bundleCache, policyPublicKey, settlementStore, verifyCapability, requireAuthorization = false, requireCapability = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents, gatewayOwnerPrincipal, honourApprovals = false, argumentKey } = {}) {
+  if (argumentKey !== undefined && (typeof argumentKey !== 'string' && !(argumentKey instanceof Uint8Array) || Buffer.byteLength(argumentKey) < 32)) {
+    throw new Error('createMcpGuard: argumentKey must be a string or bytes of at least 32 bytes');
+  }
+  const argumentHmac = argumentKey === undefined ? undefined : (canonical) => crypto.createHmac('sha256', argumentKey).update(canonical, 'utf8').digest('hex');
   if (!serviceDid) throw new Error('createMcpGuard requires { serviceDid }');
   const { serves: servesAgent, pinned: allowedAgentsPinned } = agentAllowList(allowedAgents, 'mcp-guard');
   const owner = gatewayOwnerFor(allowedAgentsPinned, gatewayOwnerPrincipal, 'mcp-guard');
@@ -850,7 +858,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
    *   `envelopeSignature`). A present `envelopeSignature` is verified regardless.
    * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
-  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, requireContextSignature, x402 = false, allowedAgents: profileAgents } = {}) {
+  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, requireContextSignature, x402 = false, allowedAgents: profileAgents, ...more } = {}) {
     try {
       assertTrustedContext(trustedContext); // a broken deriver is a refused request (GUARD_ERROR), never a quiet downgrade
       const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature, jurisdiction } = signed;
@@ -956,6 +964,28 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       const final = (verdict.decision === 'allow' || verdict.decision === 'observe') && modeGate.decision === 'escalate'
         ? { ...verdict, decision: 'escalate', reasonCode: modeGate.reasonCode }
         : verdict;
+      // 3c. The owner's argument policy for this tool (policy-core argument-policy.ts, in the signed mandate): which argument
+      // paths the call may carry, and which values leave rewritten. Judged on a verdict that could still run the call (an
+      // escalate may come back approved), and BEFORE the claim below, so a refused call never spends a hold. A policy is
+      // the owner's and fails closed: a caller that did not pass the arguments (`{ arguments }`) cannot have them checked,
+      // so the call is refused rather than run unchecked.
+      let sanitizedArguments;
+      if (final.decision === 'allow' || final.decision === 'observe' || final.decision === 'escalate') {
+        // Every mandate the bundle holds for this action (a reissue can leave more than one): a policy on any of them applies.
+        const argPolicies = (bundle?.mandates ?? []).filter((m) => m.action === action).flatMap((m) => argumentPoliciesFor(m.document, action));
+        if (argPolicies.length > 0) {
+          if (!Object.prototype.hasOwnProperty.call(more, 'arguments')) return { decision: 'block', reasonCode: 'ARGUMENTS_UNCHECKABLE', detail: "the policy limits this tool's arguments and none were given to check" };
+          // Judge and run ONE JSON snapshot: a getter or Proxy in the caller's object cannot answer the check one way and the
+          // tool another, because the tool never sees that object.
+          let snapshot;
+          try { snapshot = toWireJson(more.arguments); } catch { return { decision: 'block', reasonCode: 'ARGUMENTS_UNCHECKABLE', detail: 'the arguments are not JSON' }; }
+          const checked = checkArguments(argPolicies, snapshot);
+          if (!checked.ok) return { decision: 'block', reasonCode: checked.reasonCode, ...(checked.path !== undefined ? { path: checked.path } : {}), ...(checked.detail ? { detail: checked.detail } : {}) };
+          const cleaned = sanitizeArguments(argPolicies, snapshot, { hmac: argumentHmac });
+          if (!cleaned.ok) return { decision: 'block', reasonCode: cleaned.reasonCode, ...(cleaned.path !== undefined ? { path: cleaned.path } : {}), ...(cleaned.detail ? { detail: cleaned.detail } : {}) };
+          sanitizedArguments = cleaned.value;
+        }
+      }
       // 4. Stateful claim (opt-in). Re-evaluating policy per request (above) does not by itself
       // stop REPLAY or CUMULATIVE SPEND past the mandate total — both are the stateful issuer
       // gate's job. Only claim on an actual PERMIT: escalate/block/suspend/quarantine execute
@@ -1035,7 +1065,13 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       }
       // On a claimed permit the Service that executes needs the claim token to settle or release the
       // hold afterwards (non-enumerable — see withClaim).
-      return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
+      // The arguments the tool may run with (non-enumerable, like the claim token): sanitized under the owner's policy.
+      const out = withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
+      if (sanitizedArguments === undefined || (out.decision !== 'allow' && out.decision !== 'observe')) return out;
+      // withClaim returns a fresh object when it adds anything; otherwise copy, so the verdict object itself is never changed.
+      const withArgs = out === permitted ? { ...out } : out;
+      Object.defineProperty(withArgs, 'arguments', { value: sanitizedArguments, enumerable: false });
+      return withArgs;
     } catch (err) {
       // The issuer could not be reached for the bundle: say so (GATE_UNREACHABLE), as the agent guard does — GUARD_ERROR
       // read as a fault in this Service during an issuer outage. Anything else stays GUARD_ERROR.
@@ -1098,7 +1134,10 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
       // Configured but yielding nothing usable (a function that returned undefined) is a broken deriver, not "no
       // trusted context": refuse rather than fall back to the agent's word. `undefined` option = not configured.
       if (trustedContext !== undefined) assertTrustedContext(derived === undefined ? null : derived, `"${action}"`);
-      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, requireContextSignature, x402, ...(toolAgents !== undefined ? { allowedAgents: toolAgents } : {}) });
+      // The tool's arguments, for the owner's argument policy (3c in verifyRequest): its single argument after the signed
+      // request. A tool with any other shape passes none, so a policy on it refuses the call (ARGUMENTS_UNCHECKABLE).
+      const argumentOptions = rest.length === 1 ? { arguments: rest[0] } : {};
+      const decision = await verifyRequest({ ...signed, action }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, requireContextSignature, x402, ...(toolAgents !== undefined ? { allowedAgents: toolAgents } : {}), ...argumentOptions });
       // allow/observe both PERMIT the tool call; observe is permit-but-flag (SAFR §11).
       if (decision.decision !== 'allow' && decision.decision !== 'observe') {
         const err = new Error(`MCP guard ${decision.decision.toUpperCase()} "${action}": ${decision.reasonCode}`);
@@ -1134,6 +1173,9 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
           throw err;
         }
       }
+      // Under an argument policy the tool runs with the sanitized copy (sensitive values redacted or keyed-hashed), never
+      // the agent's original. The payload digest above was taken over what the agent sent, which is what it signed.
+      if (decision.arguments !== undefined) rest = [decision.arguments];
       if (decision.decision === 'observe') {
         console.warn(`[mcp-guard] OBSERVE "${action}": ${decision.reasonCode} — served under monitoring`);
       }
@@ -1232,7 +1274,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
 
   // `allowedAgents`: the pin this guard enforces (the DIDs, 'any', or null when unset) — a gateway asserts it at startup,
   // so a stale guard that predates the option (and would ignore it) cannot run unnoticed.
-  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, reportOutcome, acceptCounterpartyChallenge, invalidateBundle, close, serviceDid, allowedAgents: allowedAgentsPinned, gatewayOwnerPrincipal: owner, honoursApprovals: requireAuthorization === true || honourApprovals === true };
+  return { handshakeChallenge, handshakeVerify, verifyRequest, guardIncomingTool, requirePayment, settle, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, reportOutcome, acceptCounterpartyChallenge, invalidateBundle, close, serviceDid, allowedAgents: allowedAgentsPinned, gatewayOwnerPrincipal: owner, honoursApprovals: requireAuthorization === true || honourApprovals === true, checksArguments: true };
 }
 
 /**

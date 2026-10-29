@@ -445,6 +445,19 @@ function assertTrustedContext(tc, route) {
 }
 
 /** A copy of `headers` with every spelling of `name` removed, then `name` set to `value` when there is one. */
+/**
+ * The request's arguments, for the owner's argument policy (agentsafe-mcp-guard >= 0.32.0): its JSON body, read by the same
+ * strict reader the payload digest uses. No body = no arguments (`{}`). A body that does not parse throws, and the caller
+ * passes nothing, so a policy refuses it (ARGUMENTS_UNCHECKABLE) and a route without one is unaffected.
+ */
+function requestArguments(req) {
+  const raw = req.rawBody ?? req.body;
+  if (raw == null) return {};
+  if (typeof raw !== 'string' && !(raw instanceof Uint8Array)) return raw;
+  const text = typeof raw === 'string' ? raw : UTF8.decode(raw);
+  return text.trim() ? parseStrictJson(text) : {};
+}
+
 function withHeader(headers, name, value) {
   const out = {};
   for (const [k, v] of Object.entries(headers ?? {})) if (k.toLowerCase() !== name) out[k] = v;
@@ -555,6 +568,13 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
   reportOutcomes = reportOutcomes ?? true;
   if (reportOutcomesExplicit && reportOutcomes && typeof guard?.reportOutcome !== 'function') {
     console.warn('[gateway] reportOutcomes is set, but this guard cannot report (needs @metamynd/agentsafe-mcp-guard >= 0.21.0) — nothing will be reported');
+  }
+  // An owner's argument policy (a mandate's `arguments`) is enforced by the guard, on the body this gateway hands it. A guard
+  // that predates it ignores the policy, so say so rather than let an owner believe their tool's arguments are checked. Said of
+  // an agentsafe-mcp-guard only: a custom guard is the integrator's own, and states `checksArguments` if it does.
+  const guardChecksArguments = guard?.checksArguments === true;
+  if (!guardChecksArguments && typeof guard?.guardIncomingTool === 'function') {
+    console.warn("[gateway] this guard does not check arguments (needs @metamynd/agentsafe-mcp-guard >= 0.32.0) — an argument policy in an agent's mandate is not enforced here");
   }
 
   /** Hold close-outs running after their response was returned (settleInBackground). */
@@ -935,6 +955,15 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       }
     }
 
+    let requestBody;
+    if (guardChecksArguments) {
+      // A query string (a route that declares allowedQuery) carries arguments the policy does not see: passed as nothing, so
+      // a policy refuses the call (ARGUMENTS_UNCHECKABLE) rather than let them through unchecked.
+      const query = String(req.path ?? '').split('?')[1];
+      if (query) requestBody = undefined;
+      else try { requestBody = requestArguments(req); } catch { requestBody = undefined; }
+    }
+
     let decision;
     try {
       // What THIS route knows about its own action (`route.trustedContext`: an object, or
@@ -959,6 +988,9 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
         // has an independent observer confirm any settlement below the authorization, or a release after the claim.
         ...(route.x402 === true ? { x402: true } : {}),
         ...(route.allowedAgents !== undefined ? { allowedAgents: route.allowedAgents } : {}),
+        // The body, for the owner's argument policy. A body that does not parse is passed as nothing: refused under a
+        // policy, ignored without one.
+        ...(guardChecksArguments ? { arguments: requestBody } : {}),
       };
       decision = Object.keys(verifyOptions).length ? await guard.verifyRequest(request, verifyOptions) : await guard.verifyRequest(request);
       trace.decision = decision;
@@ -972,7 +1004,10 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       // The issuer's sentence for a refused claim rides along (since 0.28.0): the bare code was all the agent
       // saw of, say, AUTHORIZATION_CONTEXT_REQUIRED. Only the issuer's own `detail` — never a stack or an internal error.
       const detail = typeof decision?.detail === 'string' && decision.detail ? decision.detail : undefined;
-      return { status: 403, body: { decision: decision?.decision ?? 'block', reasonCode: decision?.reasonCode ?? 'BLOCKED', ...(detail ? { detail } : {}) }, governance: decision };
+      // An argument refusal names the offending JSON Pointer (ARGUMENT_NOT_ALLOWED, SENSITIVE_ARGUMENT_UNPROTECTED): a path the
+      // agent itself sent, so nothing it did not already know.
+      const path = typeof decision?.path === 'string' ? decision.path : undefined;
+      return { status: 403, body: { decision: decision?.decision ?? 'block', reasonCode: decision?.reasonCode ?? 'BLOCKED', ...(detail ? { detail } : {}), ...(path !== undefined ? { path } : {}) }, governance: decision };
     }
 
     // The authorization is the effect's natural idempotency key: one authorization is one execution. Hand it
@@ -983,6 +1018,16 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     // (or skip a real execution) with a key the agent chose. It is replaced by the authorization id when a hold
     // was claimed, and simply removed when none was (there is nothing to key on).
     let forwardReq = { ...req, headers: withHeader(req.headers, 'idempotency-key', decision?.authorizationId) };
+    // Under an argument policy that rewrote a value (redacted, or keyed-hashed), the upstream receives the rewritten body, in
+    // the form the body arrived in, and never the agent's original. Its length changed, so the old Content-Length goes.
+    // The guard hands back a snapshot either way; only a changed one is forwarded in place of the original bytes. BOTH body
+    // fields are rewritten when both are present, so a forward() reading either never sees the original.
+    if (decision?.arguments !== undefined && JSON.stringify(decision.arguments) !== JSON.stringify(requestBody)) {
+      const json = JSON.stringify(decision.arguments);
+      const rewrite = (original) => (typeof original === 'string' ? json : original instanceof Uint8Array ? new TextEncoder().encode(json) : decision.arguments);
+      const fields = ['rawBody', 'body'].filter((f) => req[f] != null);
+      forwardReq = { ...forwardReq, ...Object.fromEntries(fields.map((f) => [f, rewrite(req[f])])), headers: withHeader(forwardReq.headers, 'content-length') };
+    }
     // Trusted Execution Gateway hook (Module G): resolve an upstream credential the agent
     // never sees, and inject it into a CLONE of the outbound headers — never the original req.
     // FAIL CLOSED: once a vault is configured, a call it did not release a credential for is never

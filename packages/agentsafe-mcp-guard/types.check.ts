@@ -12,7 +12,12 @@ async function example(signed: SignedRequest): Promise<void> {
     allowedAgents: ['did:hedera:testnet:zAgent_0.0.1'],
     gatewayOwnerPrincipal: 'did:hedera:testnet:zOwner_0.0.2',
     bundleCache: { maxAgeMs: 30_000 },
+    argumentKey: 'k'.repeat(32),
   });
+  const checked: true = guard.checksArguments;
+  void checked;
+  const withArgs = await guard.verifyRequest(signed, { arguments: { to: 'a@b.c' } });
+  if (withArgs.arguments) void withArgs.arguments.to;
 
   const verdict: ServiceVerdict = await guard.verifyRequest(signed, { payloadDigest: payloadDigestOf({ amount: 10 }), trustedContext: { riskLevel: 'high' } });
   if (verdict.decision === 'allow' && verdict.authorizationId) {
