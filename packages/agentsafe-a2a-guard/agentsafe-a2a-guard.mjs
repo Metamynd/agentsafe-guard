@@ -19,7 +19,7 @@
 // bundles (policy-core.mjs, magp-did.mjs) plus a hand-written one (magp-policy.mjs, identical copy
 // to the MCP guard's — see that file's own header for why it's duplicated rather than shared).
 import crypto from 'node:crypto';
-import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, effectiveRiskFloor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction } from './policy-core.mjs';
+import { evaluate, buildAuthMessage, applySignedLast, operatingModeGate, buildRuleContext, riskFloorFor, effectiveRiskFloor, maxRisk, normalizeRiskLevel, documentEnforcesJurisdiction, argumentPoliciesFor, checkArguments, sanitizeArguments } from './policy-core.mjs';
 import { verifyDidSignature } from './magp-did.mjs';
 
 /**
@@ -244,7 +244,7 @@ export function mapDecisionToTaskState(decision, reasonCode) {
  * exact same `escalation_status()`/`escalationStatus()` every existing client already implements,
  * unmodified.
  */
-export function buildTaskStatus({ decision, reasonCode, escalationId, contextId, taskId, detail }) {
+export function buildTaskStatus({ decision, reasonCode, escalationId, contextId, taskId, detail, path }) {
   const { taskState } = mapDecisionToTaskState(decision, reasonCode);
   const summary =
     taskState === TASK_STATE.WORKING
@@ -264,7 +264,9 @@ export function buildTaskStatus({ decision, reasonCode, escalationId, contextId,
       parts: [{ text: summary }],
       // `detail` (since 0.19.1): the issuer's sentence for a refused claim, e.g. which gateway to upgrade for
       // AUTHORIZATION_CONTEXT_REQUIRED. Present only when there is one; branch on `reasonCode`, never on it.
-      metadata: { [MAGP_A2A_EXTENSION_URI]: { decision, reasonCode, escalationId: escalationId ?? null, ...(typeof detail === 'string' && detail ? { detail } : {}) } },
+      // `path` (since 0.21.0): the JSON Pointer an argument refusal names (ARGUMENT_NOT_ALLOWED, SENSITIVE_ARGUMENT_UNPROTECTED)
+      // — a path inside the caller's own data part, so nothing it did not already know.
+      metadata: { [MAGP_A2A_EXTENSION_URI]: { decision, reasonCode, escalationId: escalationId ?? null, ...(typeof detail === 'string' && detail ? { detail } : {}), ...(typeof path === 'string' ? { path } : {}) } },
     },
     timestamp: new Date().toISOString(),
   };
@@ -307,6 +309,9 @@ export function buildTaskStatus({ decision, reasonCode, escalationId, contextId,
  *   does so for any agent on the platform whose own owner granted it a matching action (ported from
  *   agentsafe-mcp-guard). `'any'` accepts every governed agent on purpose. Left unset, it accepts every agent, as before
  *   0.15.0, and says so once at startup.
+ * @param {string|Uint8Array} [cfg.argumentKey] (0.21.0) the secret this agent keys argument hashes with, where the caller's
+ *   mandate marks an argument `sensitive: hmac` (MAGP §8.3.14): the skill then receives `hmac-sha256:<hex>` of the value,
+ *   never the value. At least 32 bytes; keep it stable. Without it such a task is refused (SENSITIVE_ARGUMENT_UNPROTECTED).
  */
 /**
  * The `allowedAgents` option (MAGP §16.3): `serves(agentDid)` over a verified agent DID, and `pinned` — reported as
@@ -365,7 +370,30 @@ function assertTrustedContext(tc, where) {
   }
 }
 
-export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, requireAuthorization = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents, gatewayOwnerPrincipal } = {}) {
+/**
+ * A task's arguments, for the owner's argument policy (MAGP §8.3.14): the `data` of its one data part, when its `parts` are
+ * exactly that. Any other shape (free text, a file, several parts) has nothing the policy can check, so it is `undefined`:
+ * a skill under a policy then refuses the task (ARGUMENTS_UNCHECKABLE) and a skill without one is unaffected. The message's
+ * `metadata` and `referenceTaskIds` are not arguments and are not checked.
+ */
+export function a2aTaskArguments(message) {
+  const parts = message?.parts;
+  if (!Array.isArray(parts) || parts.length !== 1) return undefined;
+  const part = parts[0];
+  if (!part || typeof part !== 'object' || !Object.prototype.hasOwnProperty.call(part, 'data')) return undefined;
+  // A part carrying content of another kind beside `data` is not a plain data part.
+  if (['text', 'raw', 'url', 'file', 'bytes', 'uri'].some((k) => part[k] !== undefined)) return undefined;
+  if (part.kind !== undefined && part.kind !== 'data') return undefined;
+  return part.data;
+}
+
+export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle, policyPublicKey, requireAuthorization = false, allowUnverifiedBundle = false, requireContextSignature: requireContextSignatureDefault = false, allowedAgents, gatewayOwnerPrincipal, argumentKey } = {}) {
+  // The secret this agent keys argument hashes with, where a caller's mandate marks an argument `sensitive: hmac` — as
+  // agentsafe-mcp-guard's `argumentKey`. Without it such a task is refused (SENSITIVE_ARGUMENT_UNPROTECTED).
+  if (argumentKey !== undefined && (typeof argumentKey !== 'string' && !(argumentKey instanceof Uint8Array) || Buffer.byteLength(argumentKey) < 32)) {
+    throw new Error('createA2aGuard: argumentKey must be a string or bytes of at least 32 bytes');
+  }
+  const argumentHmac = argumentKey === undefined ? undefined : (canonical) => crypto.createHmac('sha256', argumentKey).update(canonical, 'utf8').digest('hex');
   const { serves: servesAgent, pinned: allowedAgentsPinned } = agentAllowList(allowedAgents, 'a2a-guard');
   const owner = gatewayOwnerFor(allowedAgentsPinned, gatewayOwnerPrincipal, 'a2a-guard');
   const base = issuerApi ? issuerApi.replace(/\/$/, '') : null;
@@ -653,7 +681,7 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
    *   of the guard's `requireContextSignature` (refuse an envelope with no `envelopeSignature`); a present one is always verified.
    * @returns {Promise<{decision:'allow'|'observe'|'block'|'escalate'|'suspend'|'quarantine',reasonCode:string|null}>}
    */
-  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, requireContextSignature, x402 = false, allowedAgents: profileAgents } = {}) {
+  async function verifyRequest(signed = {}, { trustedContext, payloadDigest, requirePayloadBinding, requireContextSignature, x402 = false, allowedAgents: profileAgents, ...more } = {}) {
     try {
       assertTrustedContext(trustedContext); // a broken deriver is a refused task (GUARD_ERROR), never a quiet downgrade
       const { agentDid, action, amount = 0, currency = 'USD', merchant = '', resource = null, nonce, issuedAt, signature, jurisdiction } = signed;
@@ -742,6 +770,26 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         (verdict.decision === 'allow' || verdict.decision === 'observe') && modeGate.decision === 'escalate'
           ? { ...verdict, decision: 'escalate', reasonCode: modeGate.reasonCode }
           : verdict;
+      // The owner's argument policy for this skill (policy-core argument-policy.ts, in the caller's signed mandate): which
+      // argument paths the task may carry, and which values reach the skill rewritten. Judged on a verdict that could still
+      // run the task (an escalate may come back approved), and BEFORE the claim below, so a refused task never spends a hold.
+      // It fails closed: a caller of verifyRequest that did not pass `{ arguments }` cannot have them checked. As agentsafe-mcp-guard.
+      let sanitizedArguments;
+      if (final.decision === 'allow' || final.decision === 'observe' || final.decision === 'escalate') {
+        // Every mandate the bundle holds for this action (a reissue can leave more than one): a policy on any of them applies.
+        const argPolicies = (bundle?.mandates ?? []).filter((m) => m.action === action).flatMap((m) => argumentPoliciesFor(m.document, action));
+        if (argPolicies.length > 0) {
+          if (!Object.prototype.hasOwnProperty.call(more, 'arguments') || more.arguments === undefined) return { decision: 'block', reasonCode: 'ARGUMENTS_UNCHECKABLE', detail: "the policy limits this skill's arguments and none were given to check (a task's arguments are its one data part)" };
+          // One JSON snapshot is judged and handed on, so a getter cannot answer the check one way and the skill another.
+          let snapshot;
+          try { snapshot = toWireJson(more.arguments); } catch { return { decision: 'block', reasonCode: 'ARGUMENTS_UNCHECKABLE', detail: 'the arguments are not JSON' }; }
+          const checked = checkArguments(argPolicies, snapshot);
+          if (!checked.ok) return { decision: 'block', reasonCode: checked.reasonCode, ...(checked.path !== undefined ? { path: checked.path } : {}), ...(checked.detail ? { detail: checked.detail } : {}) };
+          const cleaned = sanitizeArguments(argPolicies, snapshot, { hmac: argumentHmac });
+          if (!cleaned.ok) return { decision: 'block', reasonCode: cleaned.reasonCode, ...(cleaned.path !== undefined ? { path: cleaned.path } : {}), ...(cleaned.detail ? { detail: cleaned.detail } : {}) };
+          sanitizedArguments = cleaned.value;
+        }
+      }
       let claimToken; let claimAuthenticated = false;
       // An ESCALATE with an authorization attached may already have been decided by a person (MAGP §8.7.18) — the issuer
       // says whether, never the request. Only an escalate is lifted; see agentsafe-mcp-guard's verifyRequest for the full note.
@@ -788,7 +836,12 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
         // a grant that names none comes from an issuer that predates the binding and did not, so it is refused, never trusted.
         if (claim.approvedByHuman && (contextDigest === undefined || claim.contextDigest !== contextDigest)) return refuseClaimed('AUTHORIZATION_CONTEXT_MISMATCH');
       }
-      return withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
+      // The arguments the skill may run with (non-enumerable, like the claim token): sanitized under the owner's policy.
+      const out = withClaim(permitted, signed.authorizationId, claimToken, claimAuthenticated);
+      if (sanitizedArguments === undefined || (out.decision !== 'allow' && out.decision !== 'observe')) return out;
+      const withArgs = out === permitted ? { ...out } : out;
+      Object.defineProperty(withArgs, 'arguments', { value: sanitizedArguments, enumerable: false });
+      return withArgs;
     } catch (err) {
       // The issuer could not be reached for the bundle: GATE_UNREACHABLE, as the agent guard says it.
       return { decision: 'block', reasonCode: err?.code === 'GATE_UNREACHABLE' ? 'GATE_UNREACHABLE' : 'GUARD_ERROR', error: String(err?.message ?? err) };
@@ -872,7 +925,9 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
           if (!decision) {
             const derived = typeof trustedContext === 'function' ? await trustedContext(envelope, message, task) : trustedContext;
             if (trustedContext !== undefined) assertTrustedContext(derived === undefined ? null : derived, `skill "${skillId}"`);
-            decision = await verifyRequest({ ...envelope, action: skillId }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, requireContextSignature, x402, ...(skillAgents !== undefined ? { allowedAgents: skillAgents } : {}) });
+            // The task's arguments, for the owner's argument policy: its one data part (a2aTaskArguments), read from the message
+            // the skill will receive. Any other shape passes nothing, so a policy refuses the task (ARGUMENTS_UNCHECKABLE).
+            decision = await verifyRequest({ ...envelope, action: skillId }, { trustedContext: derived, payloadDigest: executorDigest, requirePayloadBinding, requireContextSignature, x402, ...(skillAgents !== undefined ? { allowedAgents: skillAgents } : {}), arguments: a2aTaskArguments(message) });
           }
         } catch (err) {
           decision = { decision: 'block', reasonCode: 'GUARD_ERROR', error: String(err?.message ?? err) };
@@ -885,10 +940,14 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
           reasonCode: decision.reasonCode,
           escalationId: decision.escalationId,
           detail: decision.detail,
+          path: decision.path,
           contextId: message?.contextId,
           taskId: message?.taskId ?? task?.id,
         });
       }
+      // Under an argument policy the skill runs with the sanitized copy of the data part (sensitive values redacted or
+      // keyed-hashed), never the caller's original. A payload binding above was checked against what the caller sent.
+      if (decision.arguments !== undefined) message = { ...message, parts: [{ ...message.parts[0], data: decision.arguments }] };
       if (decision.decision === 'observe') {
         console.warn(`[a2a-guard] OBSERVE "${skillId}": ${decision.reasonCode} — served under monitoring`);
       }
@@ -913,5 +972,5 @@ export function createA2aGuard({ serviceDid, serviceKey, issuerApi, fetchBundle,
     };
   }
 
-  return { verifyRequest, guardA2ATask, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, serviceDid: serviceDid ?? null, allowedAgents: allowedAgentsPinned, gatewayOwnerPrincipal: owner };
+  return { verifyRequest, guardA2ATask, claimAuthorization, lookupOutcome, captureAuthorization, releaseAuthorization, markAuthorizationUnknown, refundAuthorization, serviceDid: serviceDid ?? null, allowedAgents: allowedAgentsPinned, gatewayOwnerPrincipal: owner, checksArguments: true };
 }

@@ -123,10 +123,12 @@ import decimal
 import errno
 import functools
 import hashlib
+import hmac
 import inspect
 import json
 import math
 import os
+import re
 import secrets
 import selectors
 import socket
@@ -179,9 +181,16 @@ __all__ = [
     "GovernanceBlocked",
     "GovernanceRefusal",
     "ToolNotExecuted",
+    "ArgumentRefusal",
+    "argument_policy_problem",
+    "check_arguments",
+    "sanitize_arguments",
+    "parse_argument_pointer",
+    "REDACTED_ARGUMENT",
+    "HMAC_ARGUMENT_PREFIX",
 ]
 
-__version__ = "0.24.2"
+__version__ = "0.25.0"
 
 DEFAULT_API = "https://metamynd.ai/api/v1"
 
@@ -482,6 +491,218 @@ def canonical_payload(value: Any) -> str:
 def payload_digest(value: Any) -> str:
     """`sha256:` + the hex SHA-256 of the canonical text — what the agent signs and the executing service compares."""
     return PAYLOAD_DIGEST_PREFIX + hashlib.sha256(canonical_payload(value).encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------------------
+# The owner's argument policy (MAGP §8.3.14) — policy-core argument-policy.ts, in Python
+# --------------------------------------------------------------------------------------
+
+# What a redacted value is replaced with, and the prefix of a keyed-hash replacement (`hmac-sha256:<64 hex>`).
+REDACTED_ARGUMENT = "[REDACTED]"
+HMAC_ARGUMENT_PREFIX = "hmac-sha256:"
+_ARG_MAX_DEPTH = 32
+_ARG_MAX_NODES = 10_000
+_ARG_MAX_PATHS = 256
+
+
+class ArgumentRefusal(Exception):
+    """Why a call's arguments may not run under the owner's policy: `reason_code` (ARGUMENT_NOT_ALLOWED,
+    SENSITIVE_ARGUMENT_UNPROTECTED or ARGUMENTS_UNCHECKABLE), the JSON Pointer `path` it names, and a `detail`."""
+
+    def __init__(self, reason_code: str, path: Optional[str] = None, detail: Optional[str] = None):
+        super().__init__(f"{reason_code}{f' at {path}' if path else ''}{f': {detail}' if detail else ''}")
+        self.reason_code = reason_code
+        self.path = path
+        self.detail = detail
+
+
+def parse_argument_pointer(pointer: Any) -> "Optional[list[str]]":
+    """RFC 6901 pointer → segments. The root (`""`) and malformed escapes are refused (None)."""
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        return None
+    out = []
+    for raw in pointer[1:].split("/"):
+        if re.search(r"~[^01]|~$", raw):
+            return None
+        out.append(raw.replace("~1", "/").replace("~0", "~"))
+    return out
+
+
+def _to_pointer(segments: "list[str]") -> str:
+    return "".join("/" + s.replace("~", "~0").replace("/", "~1") for s in segments)
+
+
+def argument_policy_problem(policy: Any) -> Optional[str]:
+    """Why a policy is unusable, or None when it is well formed. An unusable policy refuses the call; it never means none."""
+    if not isinstance(policy, Mapping):
+        return "arguments must be an object"
+    allow, sensitive = policy.get("allow"), policy.get("sensitive")
+    if not isinstance(allow, list) or not allow:
+        return "arguments.allow must list at least one path"
+    if len(allow) > _ARG_MAX_PATHS:
+        return f"arguments.allow lists more than {_ARG_MAX_PATHS} paths"
+    for p in allow:
+        if parse_argument_pointer(p) is None:
+            return f"arguments.allow: {json.dumps(p)} is not a JSON Pointer below the root"
+    if "sensitive" in policy:
+        if not isinstance(sensitive, list):
+            return "arguments.sensitive must be a list"
+        if len(sensitive) > _ARG_MAX_PATHS:
+            return f"arguments.sensitive lists more than {_ARG_MAX_PATHS} paths"
+        for s in sensitive:
+            if not isinstance(s, Mapping):
+                return "arguments.sensitive entries must be objects"
+            if parse_argument_pointer(s.get("path")) is None:
+                return f"arguments.sensitive: {json.dumps(s.get('path'))} is not a JSON Pointer below the root"
+            if s.get("mode") not in ("redact", "hmac"):
+                return 'arguments.sensitive: mode must be "redact" or "hmac"'
+    return None
+
+
+def _json_snapshot(value: Any, depth: int = 0) -> Any:
+    """A plain JSON copy of `value` (tuples become lists), or ArgumentRefusal ARGUMENTS_UNCHECKABLE for anything JSON cannot
+    carry: what is checked is exactly what the tool then runs with."""
+    if depth > _ARG_MAX_DEPTH + 1:
+        raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail=f"nested deeper than {_ARG_MAX_DEPTH}")
+    # Subclasses (an IntEnum, a str subclass) become the plain value, so the copy is detached from the caller's objects.
+    if value is None or isinstance(value, bool):
+        return None if value is None else bool(value)
+    if isinstance(value, str):
+        return "".join([value])
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail="a non-finite number")
+        return float(value) if isinstance(value, float) else int(value)
+    if type(value) in (list, tuple):
+        return [_json_snapshot(v, depth + 1) for v in value]
+    if type(value) is dict:
+        if not all(isinstance(k, str) for k in value):
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail="an object key that is not a string")
+        return {k: _json_snapshot(v, depth + 1) for k, v in value.items()}
+    raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail=f"a value JSON cannot carry ({type(value).__name__})")
+
+
+def _argument_leaves(root: Any) -> "list[list[str]]":
+    if not isinstance(root, dict):
+        raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", path="", detail="the arguments are not a single JSON object")
+    leaves: "list[list[str]]" = []
+    nodes = 0
+
+    def walk(value: Any, path: "list[str]") -> None:
+        nonlocal nodes
+        nodes += 1
+        if nodes > _ARG_MAX_NODES:
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", path="", detail=f"more than {_ARG_MAX_NODES} values")
+        if len(path) > _ARG_MAX_DEPTH:
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", path="", detail=f"nested deeper than {_ARG_MAX_DEPTH}")
+        if isinstance(value, list):
+            if not value and path:
+                leaves.append(path)
+            for i, v in enumerate(value):
+                walk(v, path + [str(i)])
+        elif isinstance(value, dict):
+            if not value and path:
+                leaves.append(path)
+            for k, v in value.items():
+                walk(v, path + [k])
+        else:
+            leaves.append(path)
+
+    walk(root, [])
+    return leaves
+
+
+def _covers(pattern: "list[str]", path: "list[str]") -> bool:
+    return len(pattern) <= len(path) and all(seg == "*" or seg == path[i] for i, seg in enumerate(pattern))
+
+
+def check_arguments(policies: "list[Any]", args: Any) -> None:
+    """Raise ArgumentRefusal unless every value in `args` (a JSON object) sits at or below an `allow` path of every policy."""
+    if not policies:
+        return
+    for p in policies:
+        problem = argument_policy_problem(p)
+        if problem:
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail=problem)
+    leaves = _argument_leaves(args)
+    for p in policies:
+        allowed = [parse_argument_pointer(a) for a in p["allow"]]
+        for leaf in leaves:
+            if not any(_covers(a, leaf) for a in allowed):  # type: ignore[arg-type]
+                raise ArgumentRefusal("ARGUMENT_NOT_ALLOWED", path=_to_pointer(leaf))
+
+
+def _child_keys(value: Any, head: str) -> "list[str]":
+    if isinstance(value, dict):
+        return list(value.keys()) if head == "*" else ([head] if head in value else [])
+    if isinstance(value, list):
+        if head == "*":
+            return [str(i) for i in range(len(value))]
+        return [head] if head.isascii() and head.isdigit() and str(int(head)) == head and int(head) < len(value) else []
+    return []
+
+
+def _child(value: Any, key: str) -> Any:
+    return value[int(key)] if isinstance(value, list) else value[key]
+
+
+def sanitize_arguments(policies: "list[Any]", args: "dict[str, Any]", hmac_key: "Optional[bytes]" = None) -> "dict[str, Any]":
+    """`args` with every sensitive value rewritten under all policies (`redact` wins over `hmac` at the same value). Run
+    after check_arguments. `hmac` is HMAC-SHA256 under `hmac_key` over the value's canonical JSON — the same bytes the Node
+    guards hash, so equal values match across languages. No key where one is needed → SENSITIVE_ARGUMENT_UNPROTECTED."""
+    for p in policies:
+        problem = argument_policy_problem(p)
+        if problem:
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail=problem)
+    modes: "dict[str, tuple[list[str], str]]" = {}
+
+    def visit(value: Any, pattern: "list[str]", at: "list[str]", mode: str) -> None:
+        if not pattern:
+            key = _to_pointer(at)
+            prev = modes.get(key)
+            if prev is None or (prev[1] == "hmac" and mode == "redact"):
+                modes[key] = (at, mode)
+            return
+        for k in _child_keys(value, pattern[0]):
+            visit(_child(value, k), pattern[1:], at + [k], mode)
+
+    for p in policies:
+        for s in p.get("sensitive") or []:
+            visit(args, parse_argument_pointer(s["path"]) or [], [], s["mode"])
+    if not modes:
+        return args
+    out = json.loads(json.dumps(args))
+    for segments, mode in sorted(modes.values(), key=lambda m: -len(m[0])):
+        parent: Any = out
+        for k in segments[:-1]:
+            parent = _child(parent, k) if _child_keys(parent, k) else None
+            if parent is None:
+                break
+        last = segments[-1]
+        if parent is None or not _child_keys(parent, last):
+            continue
+        slot: Any = int(last) if isinstance(parent, list) else last
+        if mode == "redact":
+            parent[slot] = REDACTED_ARGUMENT
+            continue
+        if not hmac_key:
+            raise ArgumentRefusal("SENSITIVE_ARGUMENT_UNPROTECTED", path=_to_pointer(segments),
+                                  detail="the policy asks for a keyed hash and this agent has no argument_key")
+        try:
+            canonical = _canonical(parent[slot], 0, "$")
+        except PayloadNotCanonicalizable as exc:
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", path=_to_pointer(segments), detail=str(exc)) from exc
+        parent[slot] = HMAC_ARGUMENT_PREFIX + hmac.new(hmac_key, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    return out
+
+
+def _argument_key_bytes(key: Any) -> "Optional[bytes]":
+    if key is None:
+        return None
+    raw = key.encode("utf-8") if isinstance(key, str) else bytes(key) if isinstance(key, (bytes, bytearray)) else None
+    if raw is None or len(raw) < 32:
+        raise ValueError("argument_key must be a string or bytes of at least 32 bytes")
+    return raw
 
 
 # Effect outcomes after which a hold is final: nothing is left for an agent to capture.
@@ -1289,7 +1510,7 @@ def _urlopen(request: urllib.request.Request, timeout: float) -> Any:
 class MetaMyndClient:
     """Signs and submits authorize requests to the MetaMynd gate."""
 
-    def __init__(self, api: str, agent_did: str, agent_key: Optional[str] = None, timeout: float = 15.0, *, daemon_socket: Optional[str] = None, sign_context: bool = True, orphan_release_delays: "tuple[float, ...]" = (2.0, 10.0, 30.0)):
+    def __init__(self, api: str, agent_did: str, agent_key: Optional[str] = None, timeout: float = 15.0, *, daemon_socket: Optional[str] = None, sign_context: bool = True, orphan_release_delays: "tuple[float, ...]" = (2.0, 10.0, 30.0), argument_key: "Union[str, bytes, None]" = None):
         """Exactly one of `agent_key` (the key lives in THIS process) or `daemon_socket` — a path
         to an `agentsafe-signer` daemon's socket (0.5.0) — must be given; the daemon signs without
         ever handing the key to this process. Everything else about the client is identical either
@@ -1304,6 +1525,10 @@ class MetaMyndClient:
         `orphan_release_delays` (0.13.0): when an authorize call is sent but its answer never arrives (a timeout, a dropped
         connection), the gate may still have committed a hold nobody can use or settle. After each of these delays (seconds)
         the client looks it up by the request's nonce and releases it with this agent's signed void; `()` turns it off.
+
+        `argument_key` (0.25.0): the secret `guard_tool` keys argument hashes with, where the mandate's owner marks a tool
+        argument `sensitive: hmac` (MAGP §8.3.14). At least 32 bytes; keep it stable. Without it such a call is refused
+        (SENSITIVE_ARGUMENT_UNPROTECTED). `from_env` reads it from AGENTSAFE_ARGUMENT_KEY.
         """
         # Refuse a missing api or agent DID here, at construction, as the Node
         # guard's createGuard does (`if (!api || !agentDid) throw`) — the same rule, no stricter, so the two
@@ -1320,6 +1545,7 @@ class MetaMyndClient:
         self.agent_did = agent_did
         self.timeout = timeout
         self.sign_context = sign_context
+        self.argument_key = _argument_key_bytes(argument_key)
         if bool(agent_key) == bool(daemon_socket):
             raise ValueError("MetaMyndClient needs exactly one of agent_key or daemon_socket")
         self._signer = _LocalKeySigner(load_key(agent_key)) if agent_key else _DaemonSigner(daemon_socket)
@@ -1392,9 +1618,11 @@ class MetaMyndClient:
         api = os.environ.get("METAMYND_API", DEFAULT_API)
         # METAMYND_SIGN_CONTEXT=false opts out of context signing (0.7.0; on by default).
         sign_context = os.environ.get("METAMYND_SIGN_CONTEXT", "true").strip().lower() not in ("false", "0", "no", "off")
+        # AGENTSAFE_ARGUMENT_KEY (0.25.0): the key for `sensitive: hmac` tool arguments, as the HTTP gateway reads it.
+        argument_key = os.environ.get("AGENTSAFE_ARGUMENT_KEY") or None
         if agent_key:
-            return cls(api, agent_did, agent_key, sign_context=sign_context)
-        return cls(api, agent_did, daemon_socket=daemon_socket, sign_context=sign_context)
+            return cls(api, agent_did, agent_key, sign_context=sign_context, argument_key=argument_key)
+        return cls(api, agent_did, daemon_socket=daemon_socket, sign_context=sign_context, argument_key=argument_key)
 
     def sign_request(
         self,
@@ -2158,16 +2386,74 @@ def guard_tool(
         if on_verdict is None:
             return gate
 
-        def observed(*args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any]]":
+        def observed(*args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any], tuple]":
             try:
-                verdict, payload = gate(*args, **kwargs)
+                verdict, payload, call = gate(*args, **kwargs)
             except GovernanceBlocked as refused:
                 _notify(refused.verdict)
                 raise
             _notify(verdict)
-            return verdict, payload
+            return verdict, payload, call
 
         return observed
+
+    try:
+        tool_signature: "Optional[inspect.Signature]" = inspect.signature(fn)
+    except (TypeError, ValueError):
+        tool_signature = None
+
+    def _held_to_policy(raw: "Mapping[str, Any]", args: "tuple", kwargs: "dict") -> "tuple[tuple, dict]":
+        """The call the tool runs with, held to the owner's argument policy (0.25.0, MAGP §8.3.14): the gate names the
+        action's policies on a permit (`argumentPolicies`), and an approved escalation's status does too. A value at a path
+        the policy does not allow raises ArgumentRefusal; a sensitive one reaches the tool redacted or keyed-hashed. The
+        arguments are the tool's parameters by name (a `**kwargs` parameter's keys at the top level). No policy (or a gate
+        that predates them) = the call exactly as given."""
+        policies = raw.get("argumentPolicies") if isinstance(raw, Mapping) else None
+        if policies is None or policies == []:
+            return args, kwargs
+        if not isinstance(policies, list):
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail="the gate's argumentPolicies is not a list")
+        if tool_signature is None:
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail="the tool's signature cannot be read, so its arguments cannot be named")
+        try:
+            bound = tool_signature.bind(*args, **kwargs)
+        except TypeError as exc:
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail=str(exc)) from exc
+        params = tool_signature.parameters
+        named: "dict[str, Any]" = {}
+        for name, value in bound.arguments.items():
+            kind = params[name].kind
+            if kind is inspect.Parameter.VAR_POSITIONAL:
+                if value:
+                    raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail="positional arguments beyond the tool's named parameters have no name to check")
+            elif kind is inspect.Parameter.VAR_KEYWORD:
+                # `def f(a, /, **kw)` called as f(1, a=2) carries two values named "a": one name cannot check both.
+                clash = next((k for k in value if k in params), None)
+                if clash is not None:
+                    raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", path="/" + clash.replace("~", "~0").replace("/", "~1"),
+                                          detail="a keyword argument has the name of a positional-only parameter")
+                named.update(value)
+            else:
+                named[name] = value
+        # One JSON snapshot is checked and then run, so what the policy judged is exactly what the tool receives.
+        snapshot = _json_snapshot(named)
+        check_arguments(policies, snapshot)
+        clean = sanitize_arguments(policies, snapshot, getattr(client, "argument_key", None))
+        for name in list(bound.arguments):
+            kind = params[name].kind
+            if kind is inspect.Parameter.VAR_KEYWORD:
+                bound.arguments[name] = {k: clean[k] for k in bound.arguments[name]}
+            elif kind is not inspect.Parameter.VAR_POSITIONAL:
+                bound.arguments[name] = clean[name]
+        return bound.args, bound.kwargs
+
+    def _argument_blocked(exc: ArgumentRefusal, authorization_id: "Optional[str]" = None, escalation_id: "Optional[str]" = None) -> "GovernanceBlocked":
+        """The refusal for arguments the owner's policy does not allow. The tool has not run. It names the JSON Pointer, never
+        the value: a path the agent itself passed."""
+        hint = "; ".join(part for part in (f"at {exc.path}" if exc.path else None, exc.detail) if part) or None
+        raw = {"reasonCode": exc.reason_code, **({"path": exc.path} if exc.path is not None else {})}
+        return _guard_refusal(Verdict(decision="block", reason_code=exc.reason_code, authorization_id=authorization_id,
+                                      escalation_id=escalation_id, hint=hint, raw=raw))
 
     def _refused(refused: "GovernanceBlocked") -> "Any":
         """The tool's result for a governance refusal when it is not raised. The tool has NOT run."""
@@ -2175,7 +2461,7 @@ def guard_tool(
             return GovernanceRefusal(refused.verdict, refused.action)
         return on_refusal(refused)
 
-    def _gate(*args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any]]":
+    def _gate(*args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any], tuple]":
         payload = map_args(*args, **kwargs) if map_args else {}
         try:
             verdict = client.authorize(
@@ -2196,7 +2482,19 @@ def guard_tool(
         if not verdict.permitted:
             # Fail closed, loudly, and before the tool is touched.
             raise _guard_refusal(verdict)
-        return verdict, payload
+        try:
+            call = _held_to_policy(verdict.raw, args, kwargs)
+        except Exception as raw_exc:  # noqa: BLE001 — anything the check raises is a refusal, never a stray error
+            exc = raw_exc if isinstance(raw_exc, ArgumentRefusal) else ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail=str(raw_exc)[:200])
+            # Permitted, but the arguments break the owner's policy: the tool never runs, so its hold is released (best
+            # effort; the TTL is the backstop) before the refusal goes out.
+            if verdict.authorization_id:
+                try:
+                    client.void(verdict.authorization_id, reason=f"tool did not run: {exc.reason_code}"[:200])
+                except Exception:  # noqa: BLE001 — best effort
+                    pass
+            raise _argument_blocked(exc, verdict.authorization_id) from None
+        return verdict, payload, call
 
     def _guard_refusal(verdict: "Verdict") -> "GovernanceBlocked":
         """This wrapper's own refusal, marked as such: raised inside an ENCLOSING guarded tool it says nothing about what
@@ -2216,7 +2514,7 @@ def guard_tool(
         return resume_request_digest(state.authorization_id or "", action, payload.get("amount"), payload.get("currency") or "USD",
                                      payload.get("merchant", ""), payload.get("resource"), bound_payload)
 
-    def _approved(escalation_id: str, *args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any]]":
+    def _approved(escalation_id: str, *args: "Any", **kwargs: "Any") -> "tuple[Verdict, Mapping[str, Any], tuple]":
         """The permit an owner's approval minted, as if the gate had allowed the call itself — or GovernanceBlocked."""
         payload = map_args(*args, **kwargs) if map_args else {}
         try:
@@ -2267,6 +2565,12 @@ def guard_tool(
             if actual_context != expected_context:
                 raise _guard_refusal(Verdict(decision="block", reason_code="ESCALATION_REQUEST_MISMATCH", authorization_id=state.authorization_id,
                                              escalation_id=escalation_id, hint="this context is not the one the owner approved"))
+        # The owner's argument policy (0.25.0), before the one resume is taken below: a refused call must not use it up.
+        try:
+            call = _held_to_policy(state.raw, args, kwargs)
+        except Exception as raw_exc:  # noqa: BLE001 — anything the check raises is a refusal, never a stray error
+            exc = raw_exc if isinstance(raw_exc, ArgumentRefusal) else ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail=str(raw_exc)[:200])
+            raise _argument_blocked(exc, state.authorization_id, escalation_id) from None
         # The original signed request is old by now (a service refuses one older than a few minutes): sign the SAME
         # request again, carrying the approval's authorization, for governance_headers() to hand to a gateway.
         signed = client.sign_request(
@@ -2303,7 +2607,7 @@ def guard_tool(
                                          else "another process took this approval's one resume" if claim == "AUTHORIZATION_IN_USE" else None))
         verdict = Verdict(decision="allow", reason_code=state.reason_code or "ESCALATION_APPROVED", authorization_id=state.authorization_id,
                           escalation_id=escalation_id, raw=state.raw, signed=signed)
-        return verdict, payload
+        return verdict, payload, call
 
     def _take_resume(escalation_id: str) -> None:
         """One resume of an escalation at a time per client (0.13.0): a second, concurrent one is refused AUTHORIZATION_IN_USE
@@ -2402,7 +2706,7 @@ def guard_tool(
         # handle to: release it, best effort (the hold's TTL is the backstop), off the event loop.
         if task.cancelled() or task.exception() is not None:
             return
-        held, _payload = task.result()
+        held = task.result()[0]
 
         def _void() -> None:
             try:
@@ -2421,7 +2725,7 @@ def guard_tool(
         async def _run_async(gate: "Any", args: "tuple", kwargs: "dict") -> "Any":
             gate_call = asyncio.ensure_future(asyncio.to_thread(gate, *args, **kwargs))
             try:
-                verdict, payload = await asyncio.shield(gate_call)
+                verdict, payload, (args, kwargs) = await asyncio.shield(gate_call)
             except asyncio.CancelledError:
                 gate_call.add_done_callback(_release_if_cancelled)
                 raise
@@ -2460,7 +2764,8 @@ def guard_tool(
 
     def _run(gate: "Any", args: "tuple", kwargs: "dict") -> "Any":
         try:
-            verdict, payload = gate(*args, **kwargs)
+            # The call to run comes back from the gate: under an argument policy it is the sanitized one (0.25.0).
+            verdict, payload, (args, kwargs) = gate(*args, **kwargs)
         except GovernanceBlocked as refused:
             if on_refusal == "raise":
                 raise

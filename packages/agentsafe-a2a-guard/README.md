@@ -135,6 +135,31 @@ Both sides must digest the identical value — a receiver that widens `bindPaylo
 Input JSON cannot carry is refused (`PAYLOAD_NOT_CANONICALIZABLE`), and a grant that does not echo the digest (an issuer that
 predates binding) is refused too. Both options are off by default; nothing changes for a skill that does not use them.
 
+### The owner's argument policy (`argumentKey`) — since 0.21.0 (MAGP §8.3.14)
+
+The caller's mandate may limit what a skill's task carries: `arguments: { allow, sensitive? }` on the permission, signed
+in the bundle and set by the caller's owner (as for `agentsafe-mcp-guard` 0.32.0). A task's arguments are its **one data
+part**: `parts: [{ data: { … } }]` (or `{ kind: 'data', data }`).
+
+- A value at a path outside `allow` (JSON Pointers, `*` = any one key or index) is refused `ARGUMENT_NOT_ALLOWED`; the
+  refusal's metadata names the `path`.
+- A `sensitive` value reaches the skill rewritten: `redact` → `"[REDACTED]"`, `hmac` → `hmac-sha256:<hex>` keyed with this
+  agent's `argumentKey` (at least 32 bytes; keep it stable). With no key, such a task is refused
+  `SENSITIVE_ARGUMENT_UNPROTECTED`, never run with the value in the clear.
+- Under a policy, a task whose `parts` are anything other than one data part (free text, a file, several parts) is refused
+  `ARGUMENTS_UNCHECKABLE`. So is a call to `verifyRequest` that does not pass `{ arguments }`.
+- It is judged before any claim, so a refused task never spends a hold. The handler receives the message with the
+  sanitized data in place of the original; a payload binding is still checked against what the caller signed.
+
+```js
+const a2a = createA2aGuard({ issuerApi, policyPublicKey, allowedAgents, argumentKey: process.env.AGENTSAFE_ARGUMENT_KEY });
+```
+
+A skill whose caller's mandate sets no policy is unaffected. The message's `metadata` and `referenceTaskIds`, and the
+data part's own `metadata`, are not arguments and are not checked; bind them with `bindScope: 'message'` if the skill
+reads them. The `task` argument is this agent's own state and is not rewritten: a skill under a policy should read the
+task's input from `message`, never from `task.history`, which can still hold the caller's original.
+
 ### The agent's context is read from `itinerary` (0.11.0)
 
 The unsigned request context (`riskLevel`, `tool`, `piiPresent`, a mandate's context operands, …) travels in the envelope

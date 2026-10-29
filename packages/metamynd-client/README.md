@@ -183,6 +183,28 @@ An escalation can also end as `modified` — a reviewer changed the action inste
 asked. That stops the wait too, is never `may_proceed`, and `status.next_escalation_id` is the
 follow-up hold for the modified action.
 
+### The owner's argument policy (0.25.0, MAGP §8.3.14)
+
+A mandate may limit what a tool is called with: the allowed JSON Pointer paths, and values that
+must not reach the tool as sent. The gate names the action's policy on a permit (and on an approved
+escalation), and `guard_tool` holds the call to it before the tool runs:
+
+- The arguments are the tool's parameters by name, with a `**kwargs` parameter's keys at the top
+  level. A value at a path the policy does not allow is refused `ARGUMENT_NOT_ALLOWED`
+  (`refused.verdict.raw["path"]` names it), the hold is released, and the tool never runs.
+- A `sensitive` value reaches the tool as `"[REDACTED]"`, or as `hmac-sha256:<hex>` keyed with
+  `argument_key` (`MetaMyndClient(..., argument_key=...)`, or `AGENTSAFE_ARGUMENT_KEY` for
+  `from_env`; at least 32 bytes). The hash matches the Node guards' byte for byte. Without a key,
+  such a call is refused `SENSITIVE_ARGUMENT_UNPROTECTED`.
+- Under a policy the tool receives a JSON copy of its arguments (a tuple arrives as a list).
+  Anything JSON cannot carry, or extra positional arguments, is refused `ARGUMENTS_UNCHECKABLE`.
+- A resume is held to the policy before it takes the approval's one resume, so a refused call
+  does not use the approval up.
+
+Like the wrapper itself, this is cooperative: it holds a well-behaved agent to its owner's policy.
+The boundary is a separate process that runs the tool (`agentsafe-mcp-guard`, the HTTP gateway).
+A gate that predates this names no policy, and the call runs as given.
+
 ## Behind a gateway or MCP server
 
 A service protected by [`@metamynd/agentsafe-http-gateway`](https://www.npmjs.com/package/@metamynd/agentsafe-http-gateway)
