@@ -18,6 +18,8 @@
 //                  (readPolicyUpdates + verifyPolicyAssignment)
 //   • egress     — a sandbox network policy someone is shown is the one anchored for the agent (egressPolicyHash,
 //                  readEgressPolicyAnchors + verifyEgressPolicy)
+//   • disclosure — one part of an agent's policy (a mandate, SOP or standard) opens to the salted commitment anchored
+//                  with its policy-update, the other parts unseen (policyPartLeaf + verifyPolicyDisclosure)
 //
 // Zero dependencies: node:crypto + fetch only. A regulator can run it standalone.
 import { createHash } from 'node:crypto';
@@ -136,8 +138,8 @@ export function agentPolicyTopicId(did) {
 
 /**
  * Read an agent's `policy-update` ops from its own HCS topic via a public mirror node, oldest first:
- * [{ did, bundleHash, sigDigest, versionLabel, consensusTimestamp, sequenceNumber }]. `bundleHash` is null on ops
- * published before it was added. Returns null when the topic cannot be read in full — unreachable, or longer than
+ * [{ did, bundleHash, policyRoot, policyParts, sigDigest, versionLabel, consensusTimestamp, sequenceNumber }].
+ * `bundleHash` is null on ops published before it was added, `policyRoot` and `policyParts` likewise. Returns null when the topic cannot be read in full — unreachable, or longer than
  * `maxPages` pages of 100 — since a partial history could hide the op that names or supersedes a bundle.
  */
 export async function readPolicyUpdates(did, opts = {}) {
@@ -146,6 +148,8 @@ export async function readPolicyUpdates(did, opts = {}) {
   return readTopicOps(topicId, opts, (op, m) => (op.op === 'policy-update' && op.did === did ? {
     did: op.did,
     bundleHash: op.bundleHash ?? null,
+    policyRoot: op.policyRoot ?? null,
+    policyParts: op.policyParts ?? null,
     sigDigest: op.sigDigest ?? null,
     versionLabel: op.versionLabel ?? null,
     consensusTimestamp: m.consensus_timestamp ?? null,
@@ -264,6 +268,67 @@ export function verifyPolicyAssignment(record, updates, { graceMs = 120_000 } = 
     return result('superseded', { anchoredAt, supersededAt: inForce.consensusTimestamp });
   }
   return result('assigned', { anchoredAt });
+}
+
+// ── Policy disclosure (one part of the policy issued to an agent, the rest unseen) ───────────
+/** JSON with object keys sorted and undefined members dropped, as the issuer's stableStringify. */
+function stableJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value ?? null);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(',')}}`;
+}
+
+/**
+ * The leaf a policy part commits to under its salt (hex):
+ *   sha256( "MAGP-POLICY-PART-v1" \0 kind \0 id \0 stableJson(content) \0 salt )
+ * The salt is per part and per bundle, so opening one part says nothing about the others, and a part cannot be confirmed
+ * by guessing its content without it.
+ */
+export function policyPartLeaf(part, saltHex) {
+  return sha256Hex(`MAGP-POLICY-PART-v1\0${part.kind}\0${part.id}\0${stableJson(part.content)}\0${saltHex}`);
+}
+
+/** Levels in a tree of `n` leaves where a lone last node pairs with itself: the length of every proof in it. */
+function proofDepth(n) {
+  let depth = 0;
+  for (let width = n; width > 1; width = Math.ceil(width / 2)) depth++;
+  return depth;
+}
+
+/**
+ * Whether a disclosed part of an agent's policy was in a policy anchored for that agent. `pkg` is what the owner hands
+ * over: { did, bundleHash, policyRoot, policyParts, disclosure: { kind, id, content, salt, proof } }. `updates` are the
+ * agent's `policy-update` ops (readPolicyUpdates). Returns { ok, status, leaf, anchor }:
+ *
+ *   anchored        the part opens to a commitment anchored for the agent with this bundle; `anchor` is the first such op
+ *                   (its consensusTimestamp is when that policy took effect — verifyPolicyAssignment places decisions)
+ *   proof-invalid   the part, its salt and the proof do not reproduce the claimed root, or the proof does not fit a tree
+ *                   of `policyParts` leaves
+ *   unanchored      no policy-update for the agent carries that root
+ *   mismatch        the root is anchored for the agent, but with a different bundle or part count than claimed
+ *   malformed       the package is missing a field
+ */
+export function verifyPolicyDisclosure(pkg, updates) {
+  const result = (status, extra = {}) => ({ ok: status === 'anchored', status, leaf: null, anchor: null, ...extra });
+  const d = pkg?.disclosure;
+  const n = Number(pkg?.policyParts);
+  if (!pkg?.did || !/^sha256:[0-9a-f]{64}$/.test(String(pkg?.policyRoot)) || !Number.isInteger(n) || n < 1
+    || !d || typeof d.kind !== 'string' || typeof d.id !== 'string' || !('content' in d) || typeof d.salt !== 'string' || !Array.isArray(d.proof)) {
+    return result('malformed');
+  }
+  const leaf = policyPartLeaf(d, d.salt);
+  // The proof's positions spell the leaf's index; it must be a leaf of a tree that size, not a node beyond it.
+  const index = d.proof.reduce((acc, step, i) => acc + (step?.position === 'left' ? 2 ** i : 0), 0);
+  if (d.proof.length !== proofDepth(n) || index >= n || !verifyMerkleProof(leaf, d.proof, pkg.policyRoot.slice('sha256:'.length))) {
+    return result('proof-invalid', { leaf });
+  }
+  const forAgent = [...(updates ?? [])]
+    .filter((u) => u.did === pkg.did && u.policyRoot === pkg.policyRoot)
+    .sort((a, b) => consensusToMs(a.consensusTimestamp) - consensusToMs(b.consensusTimestamp));
+  if (forAgent.length === 0) return result('unanchored', { leaf });
+  const anchor = forAgent.find((u) => u.bundleHash === pkg.bundleHash && Number(u.policyParts) === n);
+  return anchor ? result('anchored', { leaf, anchor }) : result('mismatch', { leaf, anchor: forAgent[0] });
 }
 
 // ── The auditor's verdict ─────────────────────────────────────────────────────────────────────

@@ -48,11 +48,21 @@ Further checks run over a set of an agent's disclosed records, or its anchored h
    with line endings normalised to LF and trailing whitespace removed; the test file publishes a
    fixed vector for other implementations.
 
+8. **Policy disclosure** (`policyPartLeaf` + `verifyPolicyDisclosure`) — each compile's `policy-update`
+   op carries `policyRoot`: a Merkle root over the bundle's parts (each mandate, SOP and pinned
+   standard, and a `subject` part), each leaf salted. The owner hands an auditor one part with its
+   salt and proof (from `GET /agent-identity/:ref/policy-disclosure`); the auditor recomputes the
+   leaf, walks it to the root, and finds the op for that agent carrying the same root, bundle hash
+   and part count. The other parts stay unseen, and the salt stops anyone confirming a part by
+   guessing it. Status is `anchored`, `proof-invalid`, `unanchored`, `mismatch` or `malformed`. The
+   test file publishes a fixed leaf vector.
+
 ```js
-import { verifyCoverage, readPolicyUpdates, verifyPolicyAssignment } from './magp-evidence.mjs';
+import { verifyCoverage, readPolicyUpdates, verifyPolicyAssignment, verifyPolicyDisclosure } from './magp-evidence.mjs';
 const coverage = verifyCoverage(records, { fromOne: true });          // { complete, agents: [{ gaps, duplicates, … }] }
 const updates = await readPolicyUpdates(record.agentDid);            // the agent's policy-update ops, oldest first
 const assignment = verifyPolicyAssignment(record, updates);          // { ok, status, anchoredAt, supersededAt }
+const part = verifyPolicyDisclosure(opening, updates);               // { ok, status, leaf, anchor }
 ```
 
 ## It matches the backend exactly

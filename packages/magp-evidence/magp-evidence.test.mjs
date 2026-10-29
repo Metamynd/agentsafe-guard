@@ -6,6 +6,7 @@ import {
   evidenceLeaf, verifyMerkleProof, recomputeCommitment, verifyDisclosure, verifyRootAnchored,
   verifyCoverage, verifyPolicyAssignment, readPolicyUpdates, agentPolicyTopicId,
   egressPolicyHash, readEgressPolicyAnchors, verifyEgressPolicy,
+  policyPartLeaf, verifyPolicyDisclosure,
 } from './magp-evidence.mjs';
 
 let pass = 0, fail = 0;
@@ -173,6 +174,53 @@ console.log('\n8. Egress policy — the sandbox policy someone is shown is the o
   const read = await readEgressPolicyAnchors(did, { fetchImpl: mirror });
   ok('reads only this agent\'s egress-policy ops', read.length === 1 && read[0].egressPolicyHash === VECTOR && read[0].sequenceNumber === 2);
   ok('the policy-update reader is unaffected by them', (await readPolicyUpdates(did, { fetchImpl: mirror })).length === 1);
+}
+
+console.log('\n9. Policy disclosure: one part of the policy issued to an agent opens to its anchored commitment');
+{
+  // A fixed vector, shared with the issuer's own test (policy-commitment.test.ts): both must produce it.
+  const VECTOR = 'e17174553d422b107e1e28e369b4f69a7904c095e023bb0828bd91441e0fa1ff';
+  ok('the part leaf matches the published vector', policyPartLeaf({ kind: 'mandate', id: 'pay:sha256:m1', content: { action: 'pay', hash: 'sha256:m1', document: { b: 2, a: [1, null] } } }, '00'.repeat(32)) === VECTOR);
+  ok('key order and undefined members do not change it', policyPartLeaf({ kind: 'mandate', id: 'pay:sha256:m1', content: { document: { a: [1, null], b: 2, c: undefined }, hash: 'sha256:m1', action: 'pay' } }, '00'.repeat(32)) === VECTOR);
+
+  const did = 'did:hedera:testnet:z6MkAgent_0.0.4242';
+  const bundleHash = 'sha256:' + 'ab'.repeat(32);
+  const parts = [
+    { kind: 'mandate', id: 'book:sha256:m2', content: { action: 'book', cap: 900 } },
+    { kind: 'mandate', id: 'pay:sha256:m1', content: { action: 'pay', cap: 500 } },
+    { kind: 'sop', id: 'sop-1', content: { steps: ['a'] } },
+    { kind: 'subject', id: 'subject', content: { subject: did } },
+    { kind: 'standard', id: 'uk@1', content: { key: 'uk' } },
+  ];
+  const salts = parts.map((_, i) => String(i).padStart(64, '0'));
+  const leaves = parts.map((p, i) => policyPartLeaf(p, salts[i]));
+  const policyRoot = 'sha256:' + merkleRoot(leaves);
+  const pkgFor = (i, over = {}) => ({ did, bundleHash, policyRoot, policyParts: parts.length, disclosure: { ...parts[i], salt: salts[i], proof: merkleProof(leaves, i) }, ...over });
+  const t0 = 1793000000;
+  const updates = [
+    { did, bundleHash: 'sha256:old', policyRoot: null, policyParts: null, consensusTimestamp: `${t0}.0` },
+    { did, bundleHash, policyRoot, policyParts: parts.length, consensusTimestamp: `${t0 + 60}.0` },
+  ];
+
+  const v = verifyPolicyDisclosure(pkgFor(1), updates);
+  ok('a disclosed mandate opens to the anchored root', v.ok && v.status === 'anchored' && v.anchor.consensusTimestamp === `${t0 + 60}.0`);
+  ok('every part opens, the last (paired with itself) included', parts.every((_, i) => verifyPolicyDisclosure(pkgFor(i), updates).ok));
+  ok('a guessed value does not open with the disclosed salt', verifyPolicyDisclosure(pkgFor(1, { disclosure: { ...pkgFor(1).disclosure, content: { action: 'pay', cap: 5000 } } }), updates).status === 'proof-invalid');
+  ok('a part renamed to another kind does not open', verifyPolicyDisclosure(pkgFor(2, { disclosure: { ...pkgFor(2).disclosure, kind: 'standard' } }), updates).status === 'proof-invalid');
+  ok('another part\'s salt does not open it', verifyPolicyDisclosure(pkgFor(1, { disclosure: { ...pkgFor(1).disclosure, salt: salts[0] } }), updates).status === 'proof-invalid');
+  ok('a proof deeper than a tree of that many parts is refused', verifyPolicyDisclosure(pkgFor(1, { policyParts: 2 }), updates).status === 'proof-invalid');
+  // The duplicated last node: index 5 of a 5-leaf tree reproduces the root, but no sixth part exists.
+  const phantom = merkleProof(leaves, 4).map((s, i) => (i === 0 ? { sibling: leaves[4], position: 'left' } : s));
+  ok('the duplicated last leaf cannot be claimed as an extra part', verifyPolicyDisclosure(pkgFor(4, { disclosure: { ...pkgFor(4).disclosure, proof: phantom } }), updates).status === 'proof-invalid');
+  ok('a root never anchored for the agent is unanchored', verifyPolicyDisclosure(pkgFor(1), updates.slice(0, 1)).status === 'unanchored');
+  ok('another agent\'s anchor of the root does not count', verifyPolicyDisclosure(pkgFor(1), updates.map((u) => ({ ...u, did: 'did:hedera:testnet:other_0.0.1' }))).status === 'unanchored');
+  ok('a root anchored with a different bundle is a mismatch', verifyPolicyDisclosure(pkgFor(1, { bundleHash: 'sha256:' + 'cd'.repeat(32) }), updates).status === 'mismatch');
+  ok('a package missing its salt is malformed', verifyPolicyDisclosure(pkgFor(1, { disclosure: { ...pkgFor(1).disclosure, salt: undefined } }), updates).status === 'malformed');
+
+  const msg = (o, n) => ({ sequence_number: n, consensus_timestamp: `${t0 + n}.000000000`, message: Buffer.from(JSON.stringify(o)).toString('base64') });
+  const mirror = async () => ({ ok: true, json: async () => ({ messages: [msg({ op: 'policy-update', did, sigDigest: 's', bundleHash, policyRoot, policyParts: 5 }, 1)], links: { next: null } }) });
+  const read = await readPolicyUpdates(did, { fetchImpl: mirror });
+  ok('readPolicyUpdates carries the commitment', read[0].policyRoot === policyRoot && read[0].policyParts === 5 && verifyPolicyDisclosure(pkgFor(1), read).ok);
 }
 
 console.log(`\n${fail === 0 ? '✅ ALL PASS' : '❌ FAILURES'} — ${pass} passed, ${fail} failed\n`);

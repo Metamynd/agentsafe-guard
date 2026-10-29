@@ -1,6 +1,6 @@
 {
   "name": "@metamynd/magp-evidence",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "MAGP Phase E — the lawful selective-disclosure auditor: verify a holder-opened evidence record (Merkle inclusion + on-chain root + tx-commitment opening) with MetaMynd offline. Reproduces the backend's leaf/commitment construction. Zero dependencies.",
   "main": "magp-evidence.mjs",
