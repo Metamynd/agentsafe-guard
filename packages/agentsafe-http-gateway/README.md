@@ -519,6 +519,48 @@ The policy covers the JSON body. A query string carries arguments it cannot see,
 refused `ARGUMENTS_UNCHECKABLE`, even on a route that declares `allowedQuery`. An agentsafe-mcp-guard older
 than 0.32.0 ignores the policy, and the gateway says so at startup.
 
+## Answers that belong to someone else are withheld (`route.access`) — since 0.34.0
+
+An agent acting for one tenant and one user must not be handed another's records, whatever it asked for. Injected text
+can steer its query, an upstream filter can be wrong, and a shared index can return other people's rows. Name where the
+tenant and the user appear in the upstream's JSON answer, and how to learn whom the request is served for:
+
+```js
+{
+  method: 'POST', path: '/crm/search', action: 'crm-search', valueFields: [], allowedFields: ['query'],
+  access: {
+    tenant: ['/results/*/accountId'],      // JSON Pointers; * = any key or index
+    user:   ['/results/*/owner/email'],
+    principal: async (request, req) => lookupPrincipal(request.agentDid), // or a fixed { tenantId, userId }
+  },
+}
+```
+
+- **Released:** a 2xx answer is released only when every field at those paths names `tenantId` / `userId`. Values
+  compare as text after NFC, so `42` matches `"42"`.
+- **`ACCESS_CONTEXT_MISMATCH`:** one row for anyone else withholds the whole answer with
+  `502 ACCESS_CONTEXT_MISMATCH`, naming the failing `path` and never its value. The upstream did run (`executed: true`),
+  so the hold settles as executed, and the `x-agentsafe-decision` header says `block`. The `path` is built from your
+  pointer: an array index is filled in, but an object key a `*` matched stays `*`, since it may be another tenant's name.
+- **`ACCESS_CONTEXT_UNCHECKABLE`:** a named field that is missing, a value that is not a string or number, or an answer
+  that is not strict JSON is withheld as `502 ACCESS_CONTEXT_UNCHECKABLE`, with a `detail` when the answer itself is the
+  problem. Strict JSON means no duplicate keys, no integer past 2^53, and no nesting past 64. More than 100,000 fields
+  to check is also uncheckable. A `*` over an empty list matches nothing, so an answer with no records passes, and an
+  empty answer (a `204` from a write) is released.
+- **`ACCESS_PRINCIPAL_UNAVAILABLE`:** the principal is resolved before anything is forwarded. A resolver that throws or
+  names no id refuses the call with `502 ACCESS_PRINCIPAL_UNAVAILABLE`, sends nothing, and releases the hold.
+- **Non-2xx answers:** an answer whose status is a number outside 2xx is an error, not records, and passes unchecked.
+  One from a `forward()` that reports no status is checked.
+- **Coverage:** only the fields you name are checked. Records nested elsewhere in the answer, or under fields you did
+  not list, are not.
+- **Startup:** a malformed `access` (a bad pointer, no fields, a fixed principal missing an id) fails startup. A routes
+  file can set a fixed principal; a resolver function needs the gateway embedded in code.
+
+**Never take the principal from anything the agent sends.** The agent calls this gateway directly and controls its own
+headers and body. Resolve it from what the operator trusts: a directory keyed by the agent's verified DID
+(`request.agentDid`), or a fixed principal for a gateway that serves one tenant. This is the plaintext form of ZKBC's
+access family (its identity match over the observed context fields).
+
 ## Credential Vault (`resolveCredential`) — fails CLOSED since 0.13.0
 
 The gateway can inject an upstream credential that the **agent never sees**, released just in time

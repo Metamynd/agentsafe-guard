@@ -20,6 +20,7 @@
 
 import { matchRoute } from './route-match.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
+import { assertAccessPolicy, checkAccessContext, resolveAccessPrincipal } from './access-context.mjs';
 /** A fetch() with a 60 s keep-alive (see keepalive-fetch.mjs) — e.g. for a `forward` that calls the upstream service. */
 export { keepAliveFetch } from './keepalive-fetch.mjs';
 
@@ -458,6 +459,37 @@ function requestArguments(req) {
   return text.trim() ? parseStrictJson(text) : {};
 }
 
+/**
+ * The access refusal for an upstream answer, or null to release it (route.access, access-context.mjs). The body is read
+ * from `rawBody` (bytes or text) or `body` (text or a parsed value) — the same one server.mjs writes — by the strict
+ * reader. An absent or empty body carries no records and is released (a 204 from a write that already ran is not a
+ * leak); one that is not strict JSON (duplicate keys, an integer past 2^53, nesting past 64) cannot be checked and is
+ * refused.
+ */
+function accessRefusal(upstream, access, principal) {
+  let body;
+  const raw = upstream?.rawBody || upstream?.body;
+  if (raw == null || raw === '' || (raw instanceof Uint8Array && raw.length === 0)) return null;
+  if (typeof raw === 'string' || raw instanceof Uint8Array) {
+    let text;
+    try {
+      text = typeof raw === 'string' ? raw : UTF8.decode(raw);
+    } catch {
+      return { reasonCode: 'ACCESS_CONTEXT_UNCHECKABLE', path: '', detail: 'the answer is not UTF-8' };
+    }
+    if (!text.trim()) return null;
+    try {
+      body = parseStrictJson(text);
+    } catch {
+      return { reasonCode: 'ACCESS_CONTEXT_UNCHECKABLE', path: '', detail: 'the answer is not strict JSON' };
+    }
+  } else {
+    body = raw;
+  }
+  const found = checkAccessContext(body, access, principal);
+  return found ? { reasonCode: found.reasonCode, path: found.path, ...(found.detail ? { detail: found.detail } : {}) } : null;
+}
+
 function withHeader(headers, name, value) {
   const out = {};
   for (const [k, v] of Object.entries(headers ?? {})) if (k.toLowerCase() !== name) out[k] = v;
@@ -721,6 +753,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
 
   for (const route of routes) {
     assertAllowedQuery(route);
+    assertAccessPolicy(route);
     if (Array.isArray(route?.allowedQuery) && route.allowedQuery.length > 0) {
       console.warn(
         `[gateway] route "${route.method ?? '*'} ${route.path}" forwards query parameter(s) ${route.allowedQuery.join(', ')} ` +
@@ -1028,6 +1061,19 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       const fields = ['rawBody', 'body'].filter((f) => req[f] != null);
       forwardReq = { ...forwardReq, ...Object.fromEntries(fields.map((f) => [f, rewrite(req[f])])), headers: withHeader(forwardReq.headers, 'content-length') };
     }
+    // Access check (route.access): learn which tenant and user this request is served for BEFORE anything is sent, from the
+    // operator's resolver. A resolver that fails means the response could not be checked, so nothing is forwarded and the
+    // hold is released, the same close-out as a vault that released no credential.
+    let accessPrincipal;
+    if (route.access) {
+      try {
+        accessPrincipal = await resolveAccessPrincipal(route, request, req);
+      } catch (err) {
+        console.warn(`[gateway] no access principal for "${route.method ?? '*'} ${route.path}" — refusing to forward:`, err?.message ?? err);
+        await releaseUnexecuted(decision, 'ACCESS_PRINCIPAL_UNAVAILABLE');
+        return { status: 502, body: { decision: 'block', reasonCode: 'ACCESS_PRINCIPAL_UNAVAILABLE', action: route.action, executed: false } };
+      }
+    }
     // Trusted Execution Gateway hook (Module G): resolve an upstream credential the agent
     // never sees, and inject it into a CLONE of the outbound headers — never the original req.
     // FAIL CLOSED: once a vault is configured, a call it did not release a credential for is never
@@ -1077,6 +1123,19 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
     const upstreamStatus = Number(upstream?.status);
     // The caller is answered now; the hold is closed after (settleHold).
     await settleHold(decision, request, route, Number.isFinite(upstreamStatus) ? upstreamStatus : undefined);
+    // A successful response under an access check is released only if every tenant and user field in it names the principal
+    // the request is served for. The upstream DID run (the hold settles as executed); what is withheld is its answer, and
+    // the agent learns which field failed, never the value in it. Only an answer whose status is a number outside 2xx (an
+    // error, not records) passes unchecked: a forward() that reports no status, or not a number, is checked, never trusted.
+    const upstreamError = Number.isFinite(upstreamStatus) && (upstreamStatus < 200 || upstreamStatus >= 300);
+    if (accessPrincipal && !upstreamError) {
+      const refusal = accessRefusal(upstream, route.access, accessPrincipal);
+      if (refusal) {
+        console.warn(`[gateway] withheld the response for "${route.method ?? '*'} ${route.path}": ${refusal.reasonCode} at ${refusal.path || '(body)'}`);
+        // The decision header follows the outcome: the call was permitted, its answer was not.
+        return { status: 502, body: { decision: 'block', ...refusal, action: route.action, executed: true }, governance: { ...decision, decision: 'block', reasonCode: refusal.reasonCode } };
+      }
+    }
     return { ...upstream, governance: decision };
   }
 

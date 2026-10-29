@@ -88,7 +88,26 @@ export interface Route {
   /** `false`: this route needs no upstream credential. */
   credential?: false;
   x402?: boolean;
+  /**
+   * The access check on what the upstream returns: a 2xx JSON answer is released only when every field at `tenant` /
+   * `user` (JSON Pointers, `*` for any key or index) names the principal the request is served for. Otherwise 502
+   * ACCESS_CONTEXT_MISMATCH or ACCESS_CONTEXT_UNCHECKABLE, with the failing path and never the value.
+   */
+  access?: RouteAccess;
   [key: string]: unknown;
+}
+
+/** The principal a request is served for. Never from anything the agent sends: it controls its own headers and body. */
+export interface AccessPrincipal {
+  tenantId?: string | number;
+  userId?: string | number;
+}
+
+export interface RouteAccess {
+  tenant?: string[];
+  user?: string[];
+  /** Fixed for a gateway dedicated to one principal, or resolved per request from what the operator trusts. */
+  principal: AccessPrincipal | ((request: SignedRequest, req: GatewayRequest) => AccessPrincipal | Promise<AccessPrincipal>);
 }
 
 export interface UpstreamCredential {

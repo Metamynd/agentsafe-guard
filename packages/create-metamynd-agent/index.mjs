@@ -236,7 +236,9 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // network) now sets `reportOutcomes: false`, so it does not log NO_ISSUER on its first refusal.
 // 0.33.0: hands the guard the JSON body for the owner's argument policy, forwards the sanitized body, and reads
 // AGENTSAFE_ARGUMENT_KEY; depends on agentsafe-mcp-guard ^0.32.0. Required with MCP_GUARD_VERSION above.
-const GATEWAY_VERSION = '^0.33.0';
+// 0.34.0: `route.access` withholds an upstream answer whose tenant or user fields name anyone but the principal the
+// request is served for (opt-in per route; nothing changes for a route without it).
+const GATEWAY_VERSION = '^0.34.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `
