@@ -21,6 +21,9 @@
 import { matchRoute } from './route-match.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
 import { assertAccessPolicy, checkAccessContext, resolveAccessPrincipal } from './access-context.mjs';
+
+/** The access codes an executed call's withheld answer carries (route.access); reported under that code, not EXECUTED. */
+const WITHHELD_CODES = new Set(['ACCESS_CONTEXT_MISMATCH', 'ACCESS_CONTEXT_UNCHECKABLE']);
 /** A fetch() with a 60 s keep-alive (see keepalive-fetch.mjs) — e.g. for a `forward` that calls the upstream service. */
 export { keepAliveFetch } from './keepalive-fetch.mjs';
 
@@ -855,12 +858,17 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
   function queueReport(trace, result, thrown) {
     if (!reportOutcomes || typeof guard?.reportOutcome !== 'function' || !trace.route || !trace.request) return;
     const executed = trace.forwarded === true;
+    // An answer route.access withheld: the upstream ran, so it is reported executed, under the access code — the owner's
+    // log shows that the call ran and its answer did not reach the agent, not a plain EXECUTED.
+    // Marked by decide() on the refusal it built, so an upstream body that merely carries the same fields is never read as one.
+    const withheld = executed && !thrown && WITHHELD_CODES.has(trace.withheld) ? trace.withheld : undefined;
     // A claimed authorization is on the effect chain already (claim → capture); reporting it again would only duplicate.
+    // A withheld answer is not on that chain, so it is reported even then (the issuer links it to the claim).
     const claimed = trace.decision?.authorizationId && (trace.decision.claimToken || trace.decision.counterpartyAuthenticated) ? trace.decision.authorizationId : undefined;
-    if (executed && claimed) return;
+    if (executed && claimed && !withheld) return;
     const status = Number(result?.status);
     const httpStatus = Number.isInteger(status) ? status : null;
-    const reasonCode = executed ? (thrown ? 'UPSTREAM_ERROR' : 'EXECUTED') : (result?.body?.reasonCode ?? trace.decision?.reasonCode ?? 'BLOCKED');
+    const reasonCode = executed ? (thrown ? 'UPSTREAM_ERROR' : withheld ?? 'EXECUTED') : (result?.body?.reasonCode ?? trace.decision?.reasonCode ?? 'BLOCKED');
     // Only an authorization this gateway CLAIMED is reported as the one the request ran under; one the request merely named
     // (a low-risk call allowed on its own merits, carrying an approved escalation's id) is reported as presented, never
     // attributed (since 0.26.1).
@@ -1132,6 +1140,7 @@ export function createHttpGateway({ guard, routes = [], forward, extractGovernan
       const refusal = accessRefusal(upstream, route.access, accessPrincipal);
       if (refusal) {
         console.warn(`[gateway] withheld the response for "${route.method ?? '*'} ${route.path}": ${refusal.reasonCode} at ${refusal.path || '(body)'}`);
+        trace.withheld = refusal.reasonCode;
         // The decision header follows the outcome: the call was permitted, its answer was not.
         return { status: 502, body: { decision: 'block', ...refusal, action: route.action, executed: true }, governance: { ...decision, decision: 'block', reasonCode: refusal.reasonCode } };
       }

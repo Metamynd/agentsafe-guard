@@ -191,7 +191,8 @@ const MCP_GUARD_PKG = '@metamynd/agentsafe-mcp-guard';
 // 0.31.0: ships TypeScript declarations (agentsafe-mcp-guard.d.mts).
 // 0.32.0: enforces the owner's per-tool argument policy (a mandate's `arguments`): unlisted argument paths are refused
 // and sensitive values redacted or keyed-hashed (`argumentKey`). Required: an older guard ignores the policy.
-const MCP_GUARD_VERSION = '^0.32.0';
+// 0.33.0: guardIncomingTool's `access` option withholds a tool answer that holds another tenant's or user's records.
+const MCP_GUARD_VERSION = '^0.33.0';
 /** A DID as it may appear inside a generated string literal (the gateway's allowedAgents pin): no quote, backslash or space. */
 const SAFE_DID = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/;
 const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
@@ -238,7 +239,8 @@ const GATEWAY_PKG = '@metamynd/agentsafe-http-gateway';
 // AGENTSAFE_ARGUMENT_KEY; depends on agentsafe-mcp-guard ^0.32.0. Required with MCP_GUARD_VERSION above.
 // 0.34.0: `route.access` withholds an upstream answer whose tenant or user fields name anyone but the principal the
 // request is served for (opt-in per route; nothing changes for a route without it).
-const GATEWAY_VERSION = '^0.34.0';
+// 0.35.0: a withheld answer is reported to the issuer under its access code, not as a plain EXECUTED.
+const GATEWAY_VERSION = '^0.35.0';
 
 /** Appended to every scaffolded gateway server: give hold settlements still running a bounded moment on shutdown. */
 const DRAIN_ON_SHUTDOWN = `

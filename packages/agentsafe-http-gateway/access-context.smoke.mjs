@@ -163,6 +163,29 @@ await check('a misconfigured route fails startup', () => {
   assert.throws(() => gatewayWith({ tenant: ['/t'] }));
 });
 
+await check('a withheld answer is reported executed under its access code, even on a claimed hold; a released one is not re-reported', async () => {
+  const reports = [];
+  const signed = { agentDid: 'did:x', action: 'read-records', nonce: 'n', issuedAt: '2026-10-29T00:00:00Z', signature: 's' };
+  const gw = createHttpGateway({ guard: { ...guard, reportOutcome: async (p) => { reports.push(p); return { ok: true }; } }, forward, settle: true, settleInBackground: false, reportOutcomes: true,
+    routes: [{ method: 'POST', path: '/records', action: 'read-records', bind: false, extract: () => signed, access: ACCESS }] });
+  upstreamBody = { items: [row('globex', 'alice@acme.example')] };
+  await call(gw);
+  upstreamBody = { items: [row('acme', 'alice@acme.example')] };
+  await call(gw);
+  await gw.drainSettlements(1000);
+  assert.deepEqual(reports.map((p) => [p.outcome, p.reasonCode, p.httpStatus, p.claimedAuthorizationId]), [['executed', 'ACCESS_CONTEXT_MISMATCH', 502, 'auth-1']]);
+});
+
+await check('the gateway and the MCP guard ship the same access-context.mjs', async () => {
+  const { readFile } = await import('node:fs/promises');
+  for (const name of ['access-context.mjs', 'access-context.d.mts']) {
+    const mine = await readFile(new URL(`./${name}`, import.meta.url), 'utf8');
+    const guards = await readFile(new URL(`../agentsafe-mcp-guard/${name}`, import.meta.url), 'utf8').catch(() => null);
+    if (guards === null) return; // a published copy of this package alone: nothing to compare
+    assert.equal(mine.replace(/\r\n/g, '\n'), guards.replace(/\r\n/g, '\n'), `edit both copies of ${name} together`);
+  }
+});
+
 console.warn = quiet;
 console.log(failed === 0 ? '\nPASS' : `\nFAIL (${failed})`);
 process.exit(failed === 0 ? 0 : 1);

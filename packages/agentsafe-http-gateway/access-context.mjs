@@ -1,16 +1,18 @@
-// access-context.mjs — the access check on what an upstream returns to an agent (route.access).
+// access-context.mjs — the access check on what a tool or an upstream returns to an agent (`access`).
 //
 // An agent acting for one tenant and one user must not be handed another's records, whatever it asked for: a query built
 // from injected text, an upstream filter that is wrong, or a shared index can each return rows that belong to someone
-// else. The operator names, per route, where the tenant and the user appear in the upstream's JSON response, and how
-// to learn which tenant and user the request is served for from something the operator trusts. The gateway then
-// releases a response only when every one of those fields names that tenant and that user.
+// else. The operator names, per tool or route, where the tenant and the user appear in the answer, and how to learn
+// which tenant and user the call is served for from something the operator trusts. The answer is then released only
+// when every one of those fields names that tenant and that user.
 //
-// It fails closed: a field the operator named that is missing, a value that is not a string or number, or a response
+// It fails closed: a field the operator named that is missing, a value that is not a string or number, or an answer
 // that is not JSON is withheld as uncheckable, never released unchecked. ZKBC's access family states the same relation
 // (identity match over the observed context fields); this is its plaintext pre-check.
 //
-// Zero dependencies.
+// Used by guardIncomingTool's `access` option here, by agentsafe-http-gateway's `route.access`, and by the OpenShell
+// adapter's response stage. Zero dependencies. The two packages ship identical copies (the gateway imports nothing from
+// the guard at runtime); agentsafe-http-gateway/access-context.smoke.mjs fails if they differ.
 
 const KEYS = new Set(['tenant', 'user', 'principal']);
 const MAX_NODES = 100_000;
@@ -57,11 +59,13 @@ export function valuesAt(body, segments) {
   return { values: nodes.map(({ node, path }) => ({ path, value: node })) };
 }
 
-/** A route's `access`, checked at startup: throws on anything the gateway could not enforce as written. */
-export function assertAccessPolicy(route) {
-  const access = route?.access;
+/**
+ * An `access` policy (a route's or a tool's), checked at startup: throws on anything that could not be enforced as
+ * written. `holder` carries it as `holder.access`; `where` names the holder in the error (a route by method and path).
+ */
+export function assertAccessPolicy(holder, where = `route "${holder?.method ?? '*'} ${holder?.path}"`) {
+  const access = holder?.access;
   if (access === undefined) return;
-  const where = `route "${route.method ?? '*'} ${route.path}"`;
   if (access === null || typeof access !== 'object' || Array.isArray(access)) throw new Error(`access for ${where} must be an object`);
   for (const k of Object.keys(access)) if (!KEYS.has(k)) throw new Error(`access for ${where} has an unknown key "${k}" (tenant, user, principal)`);
   for (const kind of ['tenant', 'user']) {
@@ -73,7 +77,7 @@ export function assertAccessPolicy(route) {
   if (access.tenant === undefined && access.user === undefined) throw new Error(`access for ${where} names no tenant or user field`);
   const p = access.principal;
   if (typeof p !== 'function' && (p === null || typeof p !== 'object' || Array.isArray(p))) {
-    throw new Error(`access.principal for ${where} must be a function (request, req) => { tenantId, userId }, or a fixed { tenantId, userId }`);
+    throw new Error(`access.principal for ${where} must be a function returning { tenantId, userId }, or a fixed { tenantId, userId }`);
   }
   if (typeof p !== 'function') {
     if (access.tenant && !idOk(p.tenantId)) throw new Error(`access.principal for ${where} names no tenantId`);
@@ -85,16 +89,21 @@ const canonicalId = (v) => String(v).normalize('NFC');
 const idOk = (v) => (typeof v === 'string' && v.trim() !== '') || (typeof v === 'number' && Number.isFinite(v));
 
 /**
- * The principal a request is served for, from the route's resolver, checked: an id for each kind the route compares.
- * Throws when the resolver throws or gives nothing usable, so the request is refused before it is forwarded.
+ * The principal a call is served for, from the holder's resolver (called with `args`: a route's `(request, req)`, a
+ * tool's `(signed, ...rest)`), checked: an id for each kind the policy compares. Throws when the resolver throws or gives
+ * nothing usable, so the call is refused before anything runs.
  */
-export async function resolveAccessPrincipal(route, request, req) {
-  const p = typeof route.access.principal === 'function' ? await route.access.principal(request, req) : route.access.principal;
+export async function resolveAccessPrincipal(holder, ...args) {
+  const { access } = holder;
+  const p = typeof access.principal === 'function' ? await access.principal(...args) : access.principal;
   if (p === null || typeof p !== 'object') throw new Error('the access principal resolver returned no principal');
-  if (route.access.tenant && !idOk(p.tenantId)) throw new Error('the access principal resolver returned no tenantId');
-  if (route.access.user && !idOk(p.userId)) throw new Error('the access principal resolver returned no userId');
+  if (access.tenant && !idOk(p.tenantId)) throw new Error('the access principal resolver returned no tenantId');
+  if (access.user && !idOk(p.userId)) throw new Error('the access principal resolver returned no userId');
   return { tenantId: p.tenantId, userId: p.userId };
 }
+
+/** The reason codes an access check can give; a withheld answer is reported under one of these. */
+export const ACCESS_REASON_CODES = Object.freeze(['ACCESS_PRINCIPAL_UNAVAILABLE', 'ACCESS_CONTEXT_MISMATCH', 'ACCESS_CONTEXT_UNCHECKABLE']);
 
 /**
  * Whether a response body may be released to a request served for `principal`. Null when every named field matches;
@@ -117,4 +126,24 @@ export function checkAccessContext(body, access, principal) {
     }
   }
   return null;
+}
+
+/**
+ * `checkAccessContext` over what a tool handler returned: a JavaScript value. It is checked as a JSON snapshot (its
+ * `toJSON`, no functions or undefined), and the snapshot is what the caller returns, so a getter or a later change
+ * cannot show the check one thing and the agent another. Returns { refusal, value }: `refusal` null to release
+ * `value`. `undefined` and `null` carry no records and are released as they are. A value JSON cannot carry (a BigInt,
+ * a cycle) cannot be checked and is refused.
+ */
+export function checkAccessValue(value, access, principal) {
+  if (value === undefined || value === null) return { refusal: null, value };
+  let snapshot;
+  try {
+    const text = JSON.stringify(value);
+    if (text === undefined) return { refusal: null, value: undefined };
+    snapshot = JSON.parse(text);
+  } catch {
+    return { refusal: { reasonCode: 'ACCESS_CONTEXT_UNCHECKABLE', path: '', detail: 'the answer cannot be written as JSON' } };
+  }
+  return { refusal: checkAccessContext(snapshot, access, principal), value: snapshot };
 }

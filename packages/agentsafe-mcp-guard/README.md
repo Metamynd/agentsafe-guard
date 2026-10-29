@@ -594,6 +594,43 @@ const guard = createMcpGuard({ serviceDid, serviceKey, issuerApi, policyPublicKe
   gatewayOwnerPrincipal, argumentKey: process.env.ARGUMENT_KEY });
 ```
 
+### Answers that belong to someone else are withheld (`access`) — since 0.33.0
+
+A tool acting for one tenant and one user must not hand the agent another's records, whatever it was asked: injected
+text can steer a query, a filter can be wrong, a shared index can return other people's rows. Name where the tenant and
+the user appear in what the handler returns, and whom the call is served for:
+
+```js
+const search = guard.guardIncomingTool('crm-search', (signed, args) => crm.search(args), {
+  access: {
+    tenant: ['/results/*/accountId'],      // JSON Pointers into the result's JSON form; * = any key or index
+    user:   ['/results/*/owner/email'],
+    principal: async (signed, args) => directory.principalFor(signed.agentDid), // or a fixed { tenantId, userId }
+  },
+});
+```
+
+- **Released:** the result is released only when every field at those paths names `tenantId` / `userId` (compared as
+  text after NFC). The tool returns the JSON snapshot that was checked, not the handler's live object, so a getter or a
+  later change cannot show the check one thing and the agent another. `undefined` and `null` are returned as they are.
+  The snapshot is plain JSON: a `Date` becomes its ISO string, a `Map` or `Set` becomes `{}`, a class instance loses its
+  prototype, and `undefined` fields are dropped, as they would be on the wire anyway.
+- **Withheld after the tool ran:** a row for anyone else throws `GovernanceBlocked` with `governance =
+  { decision: 'block', reasonCode: 'ACCESS_CONTEXT_MISMATCH', path, executed: true }`. A missing field, a value that is
+  not a string or number, or a result JSON cannot carry (a BigInt, a cycle) is `ACCESS_CONTEXT_UNCHECKABLE`. The `path`
+  is built from your pointer (an object key a `*` matched stays `*`) and never carries a value. With `{ settle: true }`
+  the hold is captured first: the tool did run.
+- **`ACCESS_PRINCIPAL_UNAVAILABLE`:** the principal is resolved after the request is verified and before the handler
+  runs. A resolver that throws or names no id refuses the call with `executed: false`, and a hold this guard settles is
+  released.
+- **Startup:** a malformed `access` throws when the tool is wrapped. A tool without `access` is unchanged.
+- **MCP results:** the pointers address what the handler returns. Return the records as `structuredContent` (or a plain
+  object) so the fields can be named; text content is not parsed.
+
+**Never take the principal from anything the agent sends** (its arguments, or a field of its request it chose). Resolve
+it from what the operator trusts, such as a directory keyed by the verified `signed.agentDid`. The same check is
+`route.access` in `@metamynd/agentsafe-http-gateway`; the module is exported as `@metamynd/agentsafe-mcp-guard/access-context`.
+
 ### Jurisdiction (signed, since 0.16.0)
 
 A request may carry a top-level `jurisdiction` (ISO 3166-1 alpha-2) that the agent **signed** — the v2 message

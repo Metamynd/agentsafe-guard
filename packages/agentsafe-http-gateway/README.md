@@ -555,6 +555,11 @@ tenant and the user appear in the upstream's JSON answer, and how to learn whom 
   not list, are not.
 - **Startup:** a malformed `access` (a bad pointer, no fields, a fixed principal missing an id) fails startup. A routes
   file can set a fixed principal; a resolver function needs the gateway embedded in code.
+- **Reporting (0.35.0):** with `reportOutcomes`, a withheld answer is reported `executed` under its access code
+  (`ACCESS_CONTEXT_MISMATCH` or `ACCESS_CONTEXT_UNCHECKABLE`), not a plain `EXECUTED`, and it is reported even for a hold
+  this gateway claimed, so the owner's log shows that the call ran and its answer did not reach the agent.
+- **Reuse:** the check itself is exported as `@metamynd/agentsafe-http-gateway/access-context` (0.35.0), for a proxy that
+  sees the answer some other way (the OpenShell adapter's response stage uses it).
 
 **Never take the principal from anything the agent sends.** The agent calls this gateway directly and controls its own
 headers and body. Resolve it from what the operator trusts: a directory keyed by the agent's verified DID

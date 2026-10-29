@@ -67,9 +67,31 @@ export interface GuardIncomingToolOptions extends Omit<VerifyOptions, 'payloadDi
   settle?: boolean;
   /** Digest the single argument after the signed request (true), or say what to digest. */
   bindPayload?: boolean | ((...args: any[]) => unknown);
+  /**
+   * Withhold an answer that holds another tenant's or user's records (0.33.0). The handler's result is released only when
+   * every named field (JSON Pointers into its JSON form, `*` any key or index) names the principal; otherwise the call
+   * throws GovernanceBlocked with `executed: true`.
+   */
+  access?: ToolAccess;
 }
 
-/** The error a guarded handler throws on a refusal. The handler did not run. */
+/** The principal a call is served for. Never from anything the agent sends: it controls its own request. */
+export interface AccessPrincipal {
+  tenantId?: string | number;
+  userId?: string | number;
+}
+
+export interface ToolAccess {
+  tenant?: string[];
+  user?: string[];
+  /** Fixed for a Service dedicated to one principal, or resolved per call (after verification) from what the operator trusts. */
+  principal: AccessPrincipal | ((signed: SignedRequest, ...args: any[]) => AccessPrincipal | Promise<AccessPrincipal>);
+}
+
+/**
+ * The error a guarded handler throws on a refusal. The handler did not run, except when `governance.executed` is true:
+ * an `access` check withheld the answer of a handler that did.
+ */
 export interface GovernanceBlocked extends Error {
   name: 'GovernanceBlocked';
   governance?: ServiceVerdict;
