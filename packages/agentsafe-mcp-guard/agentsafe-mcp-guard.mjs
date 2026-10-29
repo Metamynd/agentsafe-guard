@@ -1094,7 +1094,7 @@ export function createMcpGuard({ serviceDid, serviceKey, keyProvider: keyProvide
     if (accessHolder) assertAccessPolicy(accessHolder, `tool "${action}"`);
     // `output` (0.34.0): the tool runs only when the text the agent hands it has none of the operator's forbidden words
     // (output-filter.mjs). Checked here too.
-    if (output !== undefined) assertOutputPolicy({ output }, `tool "${action}"`);
+    if (output !== undefined) assertOutputPolicy({ output }, `tool "${action}"`, { request: false });
     const accessBlocked = (governance) => {
       const e = new Error(`MCP guard BLOCK "${action}": ${governance.reasonCode}`);
       e.name = 'GovernanceBlocked';

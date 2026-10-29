@@ -21,7 +21,7 @@
 import { matchRoute } from './route-match.mjs';
 import { payloadDigestOf, toWireJson } from './payload-binding.mjs';
 import { assertAccessPolicy, checkAccessContext, resolveAccessPrincipal } from './access-context.mjs';
-import { assertOutputPolicy, checkOutputBody, checkOutputQuery, checkOutputValue } from './output-filter.mjs';
+import { assertOutputPolicy, checkOutputBody, checkOutputHeaders, checkOutputPath, checkOutputQuery, checkOutputValue } from './output-filter.mjs';
 
 /** The access codes an executed call's withheld answer carries (route.access); reported under that code, not EXECUTED. */
 const WITHHELD_CODES = new Set(['ACCESS_CONTEXT_MISMATCH', 'ACCESS_CONTEXT_UNCHECKABLE']);
@@ -499,10 +499,13 @@ function accessRefusal(upstream, access, principal) {
  * output-filter.mjs). What is checked is what would leave: every name and value in the query string, and the body after
  * any argument rewrite, in BOTH fields when both are set (a forward() may read either). A body is read by its Content-Type
  * (checkOutputBody): a form decoded, JSON by the strict reader, anything else as text. A body that is not UTF-8, JSON
- * that is not strict, or a query string that does not decode cannot be checked and is refused.
+ * that is not strict, or a query string that does not decode cannot be checked and is refused. The path is checked too
+ * (unless `output.path` is false), and the headers `output.headers` names (since 0.37.0).
  */
 function outputRefusal(req, output) {
-  const found = checkOutputQuery(String(req.path ?? '').split('?').slice(1).join('?'), output);
+  const found = checkOutputPath(String(req.path ?? ''), output)
+    ?? checkOutputQuery(String(req.path ?? '').split('?').slice(1).join('?'), output)
+    ?? checkOutputHeaders(req.headers, output);
   if (found) return found;
   const type = Object.entries(req.headers ?? {}).find(([k]) => k.toLowerCase() === 'content-type')?.[1];
   for (const raw of [req.rawBody, req.body]) {

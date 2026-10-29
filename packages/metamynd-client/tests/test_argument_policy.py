@@ -151,6 +151,33 @@ class GuardTool(_Gate):
         governed("ap@acme", [{"sku": "X", "qty": Qty.TWO}])
         self.assertIs(type(self.ran[-1]["lines"][0]["qty"]), int)
 
+    def test_require_argument_policy_refuses_a_gate_that_states_none(self) -> None:
+        self.gate.argument_policies.clear()
+        self.assertEqual(guard_tool(self.client, "send-invoice", self.tool, LOW, require_argument_policy=True)("ap@acme", LINES), "sent")
+        self.gate.state_argument_policies = False  # a gate that predates them, or a field stripped on the way
+        self.assertEqual(guard_tool(self.client, "send-invoice", self.tool, LOW)("ap@acme", LINES), "sent")
+        with self.assertRaises(GovernanceBlocked) as ctx:
+            guard_tool(self.client, "send-invoice", self.tool, LOW, require_argument_policy=True)("ap@acme", LINES)
+        self.assertEqual(ctx.exception.verdict.reason_code, "ARGUMENTS_UNCHECKABLE")
+        self.assertEqual(len(self.ran), 2)
+        with self.assertRaises(ValueError):
+            guard_tool(self.client, "send-invoice", self.tool, LOW, check_defaults="yes")
+
+    def test_check_defaults_holds_the_tools_defaults_to_the_policy(self) -> None:
+        def tool(to: str, bcc: str = "audit@corp", note: str = "internal") -> str:
+            self.ran.append({"to": to, "bcc": bcc, "note": note})
+            return "sent"
+
+        self.gate.argument_policies["send-invoice"] = [{"allow": ["/to", "/note", "/bcc"], "sensitive": [{"path": "/note", "mode": "redact"}]}]
+        self.assertEqual(guard_tool(self.client, "send-invoice", tool, LOW)("ap@acme"), "sent")
+        self.assertEqual(self.ran[-1]["note"], "internal")  # off: a default is the tool's, unchecked
+        self.assertEqual(guard_tool(self.client, "send-invoice", tool, LOW, check_defaults=True)("ap@acme"), "sent")
+        self.assertEqual(self.ran[-1], {"to": "ap@acme", "bcc": "audit@corp", "note": "[REDACTED]"})
+        self.gate.argument_policies["send-invoice"] = [{"allow": ["/to"]}]
+        with self.assertRaises(GovernanceBlocked) as ctx:
+            guard_tool(self.client, "send-invoice", tool, LOW, check_defaults=True)("ap@acme")
+        self.assertEqual((ctx.exception.verdict.reason_code, ctx.exception.verdict.raw.get("path")), ("ARGUMENT_NOT_ALLOWED", "/bcc"))
+
     def test_an_async_tool_is_held_to_it_too(self) -> None:
         async def tool(to: str, note: str = "") -> str:
             self.ran.append({"to": to, "note": note})

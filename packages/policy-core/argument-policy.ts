@@ -195,7 +195,14 @@ export function sanitizeArguments(
     }
     if (value === null || typeof value !== 'object') return;
     const [head, ...rest] = pattern;
-    const keys = head === '*' ? Object.keys(value as object) : Object.prototype.hasOwnProperty.call(value, head) ? [head] : [];
+    // An array's members are its indices only: `length` is an own property of every array, and naming it (`/items/length`)
+    // must match nothing, not try to overwrite the array's length.
+    const keys =
+      head === '*'
+        ? Object.keys(value as object)
+        : Array.isArray(value)
+          ? /^(0|[1-9]\d*)$/.test(head) && Number(head) < value.length ? [head] : []
+          : Object.prototype.hasOwnProperty.call(value, head) ? [head] : [];
     for (const k of keys) visit((value as Record<string, unknown>)[k], rest, [...at, k], mode);
   };
   for (const p of policies as ArgumentPolicy[]) {

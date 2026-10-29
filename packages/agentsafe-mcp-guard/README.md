@@ -643,13 +643,21 @@ const sendEmail = guard.guardIncomingTool('send-email', (signed, args) => mailer
 ```
 
 - **Matching:** every string in the tool's argument (the first after the signed request), values and object keys, is
-  folded (NFKC, invisible format characters removed, then case folding) and split at Unicode word boundaries (UAX #29),
-  with whitespace and punctuation dropped. A word, or a run of letters or digits inside one, equal to a forbidden word
-  folded the same way refuses the call. `SSN`, `ssn.`, fullwidth `ｓｓｎ`, `my_ssn`, `ssn123` and `s­sn` (soft hyphen)
-  all match `ssn`. Numbers are checked as their text.
+  folded (NFKC, then Unicode default case folding from a table pinned to the Unicode version `OUTPUT_CANONICALIZATION`
+  names, since 0.35.0) and split at Unicode word boundaries (UAX #29), with whitespace and punctuation dropped. A token
+  equal to a forbidden word folded the same way refuses the call: that is ZKBC's output relation exactly. It is also
+  matched more strictly: with invisible format characters removed first, and on each run of letters or digits inside a
+  word. `SSN`, `ssn.`, fullwidth `ｓｓｎ`, `my_ssn`, `ssn123`, `ﬀ` for `ff` and `s­sn` (soft hyphen) all match. Numbers are
+  checked as their text.
 - **Words, not substrings:** `ssn` does not match `lessons`, and it does not match `s s n` either. This catches a
-  mistake, not an agent that is trying to get a word past it. Scripts written without spaces (Chinese, Japanese, Thai,
-  Korean) are split by dictionary or not at all, so a forbidden word in them may not be found inside longer text.
+  mistake, not an agent that is trying to get a word past it.
+- **Scripts written without spaces (since 0.35.0):** a forbidden word in Chinese, Japanese, Thai, Lao, Khmer, Myanmar or
+  Tibetan (or Korean, where particles attach to words) is matched as a substring of the folded text, so `机密` is found
+  in `这是机密文件`. That part is outside ZKBC's token relation, and `canonicalForbiddenSet` lists such entries apart.
+- **ZKBC canonical form:** `canonicalOutputTokens(text)`, `zkbcFold(text)` and the descriptor `OUTPUT_CANONICALIZATION`
+  (`@metamynd/agentsafe-mcp-guard/output-filter`) are what an `output.canonicalization` commitment is made from.
+  `outputCanonicalizationMatchesRuntime()` says whether this Node's ICU is the pinned Unicode version; matching works
+  either way, but a receipt is faithful only when it is.
 - **Refused before the tool runs:** the call throws `GovernanceBlocked` with `governance =
   { decision: 'block', reasonCode: 'OUTPUT_FORBIDDEN_WORD', path, executed: false }`. The `path` is the JSON Pointer of
   the string in the agent's own argument (for a key, the object that holds it); the word is never named. Arguments JSON cannot carry (a BigInt, a cycle) are

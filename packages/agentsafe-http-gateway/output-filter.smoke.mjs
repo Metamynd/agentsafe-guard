@@ -82,6 +82,27 @@ await check('the query string is checked too, and one that does not decode is un
   assert.equal((await send(gw, '', '/messages?q=hello')).status, 200);
 });
 
+await check('the path is checked by default (unless path: false), and the headers the route names', async () => {
+  reset();
+  const pathGw = createHttpGateway({
+    guard, forward, settle: true, settleInBackground: false, reportOutcomes: false, denyByDefault: true,
+    routes: [{ method: 'POST', path: '/notes/*', action: 'send-message', bind: false, extract: () => ({ agentDid: 'did:x', action: 'send-message' }), output: { ...OUTPUT, headers: ['X-Note'] } }],
+  });
+  const send2 = (path, headers = {}) => pathGw({ method: 'POST', path, headers, rawBody: new TextEncoder().encode('{}') });
+  assert.deepEqual([(await send2('/notes/my%20ssn')).body.reasonCode, (await send2('/notes/my%20ssn')).body.path], ['OUTPUT_FORBIDDEN_WORD', '@path']);
+  assert.equal((await send2('/notes/100%')).status, 200); // a malformed escape is checked as far as it decodes, as the route matcher reads it
+  assert.equal((await send2('/notes/my%20ssn%')).body.path, '@path');
+  assert.equal((await send2('/notes/ss%256E')).body.path, '@path'); // double-encoded ssn, as an upstream that decodes twice reads it
+  assert.deepEqual([(await send2('/notes/1', { 'x-note': ['fine', 'the FALCON plan'] })).body.path], ['@headers/X-Note']);
+  assert.equal((await send2('/notes/1', { 'x-other': 'ssn' })).status, 200);
+  const off = createHttpGateway({
+    guard, forward, settle: true, settleInBackground: false, reportOutcomes: false, denyByDefault: true,
+    routes: [{ method: 'POST', path: '/ssn/lookup', action: 'send-message', bind: false, extract: () => ({ agentDid: 'did:x', action: 'send-message' }), output: { ...OUTPUT, path: false } }],
+  });
+  assert.equal((await off({ method: 'POST', path: '/ssn/lookup', headers: {}, rawBody: new TextEncoder().encode('{}') })).status, 200);
+  for (const bad of [{ ...OUTPUT, path: 'yes' }, { ...OUTPUT, headers: 'x-note' }, { ...OUTPUT, headers: ['bad header'] }]) assert.throws(() => gatewayWith(bad), undefined, JSON.stringify(bad));
+});
+
 await check('a body that is not UTF-8 is uncheckable; an empty body passes', async () => {
   reset();
   assert.equal((await send(gatewayWith(OUTPUT), new Uint8Array([0xff, 0xfe, 0x00]))).body.reasonCode, 'OUTPUT_UNCHECKABLE');
@@ -127,7 +148,7 @@ await check('a misconfigured route fails startup; a route without output is unch
 
 await check('the gateway and the MCP guard ship the same output-filter.mjs', async () => {
   const { readFile } = await import('node:fs/promises');
-  for (const name of ['output-filter.mjs', 'output-filter.d.mts']) {
+  for (const name of ['output-filter.mjs', 'output-filter.d.mts', 'casefold-data.mjs']) {
     const mine = await readFile(new URL(`./${name}`, import.meta.url), 'utf8');
     const guards = await readFile(new URL(`../agentsafe-mcp-guard/${name}`, import.meta.url), 'utf8').catch(() => null);
     if (guards === null) return; // a published copy of this package alone: nothing to compare

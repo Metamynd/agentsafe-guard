@@ -99,6 +99,7 @@ class FakeGate:
         self.html_200 = False  # answer every POST with a non-JSON 200, like a CDN error page
         # action -> the owner's argument policies (MAGP §8.3.14), named on a permit and an approved status as the real gate does.
         self.argument_policies: Dict[str, List[Any]] = {}
+        self.state_argument_policies = True  # a gate that predates them states nothing; False plays that gate
         self._server: Optional[ThreadingHTTPServer] = None
         self.base_url = ""
 
@@ -259,8 +260,8 @@ class FakeGate:
                     data["contextDigest"] = self._context_digest(e.get("itinerary"))
                 if self.resume_claim_version is not None:
                     data["resumeClaimVersion"] = self.resume_claim_version
-                if self.argument_policies.get(e.get("action", "")):
-                    data["argumentPolicies"] = self.argument_policies[e["action"]]
+                if self.state_argument_policies:
+                    data["argumentPolicies"] = self.argument_policies.get(e.get("action", ""), [])
             if e["status"] == "modified":
                 data["reasonCode"] = "MODIFIED"
                 data["nextEscalationId"] = "esc-next"
@@ -319,7 +320,7 @@ class FakeGate:
         # A DIFFERENT id from auth_id — the real gate's anchored evidence event and the mandate hold are
         # never the same id; a test that only ever saw one value here could not catch the two being confused.
         self.last_event_id = str(uuid.uuid4())
-        policies = {"argumentPolicies": self.argument_policies[action]} if self.argument_policies.get(action) else {}
+        policies = {"argumentPolicies": self.argument_policies.get(action, [])} if self.state_argument_policies else {}
         return 200, {"success": True, "data": {"decision": "allow", "reasonCode": "AUTHORIZED", "authorizationId": auth_id, "eventId": self.last_event_id, **self._ack(digest), **policies}}
 
     @staticmethod

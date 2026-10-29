@@ -7,7 +7,8 @@ import crypto from 'node:crypto';
 import { buildAuthMessage } from './policy-core.mjs';
 import { buildHederaDid } from './magp-did.mjs';
 import { createMcpGuard } from './agentsafe-mcp-guard.mjs';
-import { assertOutputPolicy, checkOutputValue, forbiddenSet, outputWords } from './output-filter.mjs';
+import { assertOutputPolicy, canonicalForbiddenSet, canonicalOutputTokens, checkOutputValue, forbiddenSet, OUTPUT_CANONICALIZATION, outputCanonicalizationMatchesRuntime, outputWords, zkbcFold } from './output-filter.mjs';
+import { CASEFOLD_UNICODE } from './casefold-data.mjs';
 
 function mint(topic) {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
@@ -109,6 +110,30 @@ console.log('\n— a misconfigured tool fails when it is wrapped; a request that
   const plain = guard.guardIncomingTool('send-email', (_s, a) => a);
   const args = { body: 'ssn' };
   ok((await plain(signedRequest(), args)) === args, 'no `output`: the arguments reach the handler as they are');
+}
+
+console.log('\n— ZKBC folding, the canonical form, and scripts without spaces —');
+{
+  // Default case folding (CaseFolding.txt C + F), which lower/upper case alone gets wrong.
+  ok(zkbcFold('ﬀ') === 'ff' && zkbcFold('ſ') === 's' && zkbcFold('ꭰ') === 'Ꭰ' && zkbcFold('ϐ') === 'β' && zkbcFold('ẞ') === 'ss' && zkbcFold('ΣΑΣ') === 'σασ', 'folds as Unicode default case folding does (ligature, long s, Cherokee, Greek, sharp s, final sigma)');
+  ok(zkbcFold('Ｓ​sn') === 's​sn', 'zkbcFold is exactly NFKC + casefold: it keeps a zero-width space (the stricter fold removes it)');
+  ok(JSON.stringify(canonicalOutputTokens('Customer SSN: 123-45, ok?')) === JSON.stringify(['customer', 'ssn', '123', '45', 'ok']), 'canonical tokens: UAX #29 words, whitespace and punctuation dropped', JSON.stringify(canonicalOutputTokens('Customer SSN: 123-45, ok?')));
+  ok(OUTPUT_CANONICALIZATION.unicode === CASEFOLD_UNICODE && OUTPUT_CANONICALIZATION.matching_form === 'nfkc+casefold' && OUTPUT_CANONICALIZATION.tokenizer === 'uax29-words' && Object.isFrozen(OUTPUT_CANONICALIZATION), 'the descriptor pins the case-folding Unicode version');
+  ok(outputCanonicalizationMatchesRuntime() === (process.versions.unicode === CASEFOLD_UNICODE || CASEFOLD_UNICODE.startsWith(`${process.versions.unicode}.`)), 'says whether this runtime is the pinned Unicode version', `${process.versions.unicode} vs ${CASEFOLD_UNICODE}`);
+  ok(checkOutputValue({ t: 'please sıgn here' }, { forbidden: ['sign'] })?.path === '/t', 'the stricter fold still merges dotless ı with i, as before 0.35.0');
+  ok(canonicalOutputTokens('sıgn')[0] === 'sıgn', 'while ZKBC canonical tokens keep it, as default case folding does');
+  const cjk = { forbidden: ['机密', 'ลับ', '비밀', 'ssn'] };
+  assertOutputPolicy({ output: cjk }, 'test', { request: false });
+  ok(checkOutputValue({ t: '这是机密文件' }, cjk)?.path === '/t', 'a Chinese forbidden word is found inside a longer run of text');
+  ok(checkOutputValue({ t: 'เอกสารลับมาก' }, cjk)?.reasonCode === 'OUTPUT_FORBIDDEN_WORD', 'a Thai forbidden word is found inside a run with no spaces');
+  ok(checkOutputValue({ t: '이것은 비밀입니다' }, cjk)?.reasonCode === 'OUTPUT_FORBIDDEN_WORD', 'a Korean word is found with a particle attached');
+  ok(checkOutputValue({ t: '这是公开文件 lessons' }, cjk) === null, 'text without them passes');
+  const canon = canonicalForbiddenSet({ forbidden: ['SSN', 'Ｆａｌｃｏｎ', '机密文件'] });
+  ok(JSON.stringify(canon.tokens.filter((t) => t !== '机密文件')) === JSON.stringify(['falcon', 'ssn']), 'canonicalForbiddenSet folds each one-token entry', JSON.stringify(canon));
+  let threw = false;
+  try { assertOutputPolicy({ output: { forbidden: ['ssn'], path: true } }, 'tool', { request: false }); } catch { threw = true; }
+  ok(threw, 'a tool policy refuses the request-only key `path`');
+  ok((() => { try { assertOutputPolicy({ output: { forbidden: ['机 密'] } }); return false; } catch { return true; } })(), 'a no-space-script entry with a space in it is refused');
 }
 
 console.warn = warn;

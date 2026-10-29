@@ -201,6 +201,14 @@ escalation), and `guard_tool` holds the call to it before the tool runs:
 - A resume is held to the policy before it takes the approval's one resume, so a refused call
   does not use the approval up.
 
+Two keyword options tighten it (0.26.0, both off by default):
+
+- `require_argument_policy=True` refuses (`ARGUMENTS_UNCHECKABLE`) when the gate states no policy at
+  all: a gate that predates it, or a field removed on the way. A current gate always states one
+  (`[]` for none).
+- `check_defaults=True` also checks and sanitizes the tool's default argument values, and passes
+  them explicitly. It is off by default because a default is the tool author's, not the agent's.
+
 Like the wrapper itself, this is cooperative: it holds a well-behaved agent to its owner's policy.
 The boundary is a separate process that runs the tool (`agentsafe-mcp-guard`, the HTTP gateway).
 A gate that predates this names no policy, and the call runs as given.

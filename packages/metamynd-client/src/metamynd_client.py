@@ -190,7 +190,7 @@ __all__ = [
     "HMAC_ARGUMENT_PREFIX",
 ]
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 
 DEFAULT_API = "https://metamynd.ai/api/v1"
 
@@ -2256,6 +2256,8 @@ def guard_tool(
     release_on_error: "Any" = False,
     resume_timeout: float = 600.0,
     on_verdict: "Any" = None,
+    require_argument_policy: bool = False,
+    check_defaults: bool = False,
 ) -> "Any":
     """Wrap a callable so it runs ONLY on a permit.
 
@@ -2340,6 +2342,14 @@ def guard_tool(
     `x-magp-request` header to attach. It is not a parameter, so the tool's signature — and
     the schema a framework builds from it — is unchanged.
 
+    The owner's argument policy (0.25.0, MAGP §8.3.14) is applied to every permitted call; two keyword options tighten it
+    (0.26.0, both off by default):
+      - `require_argument_policy=True`: refuse (ARGUMENTS_UNCHECKABLE) when the gate states no policy at all — a gate that
+        predates it, or a field removed on the way. A current gate always states one (`[]` for none).
+      - `check_defaults=True`: the tool's default argument values are checked and sanitized too, and passed explicitly.
+        Off by default because a default is the tool author's, not the agent's, and a policy that lists only what agents
+        send would otherwise refuse every call that leaves a default in place.
+
     functools.wraps here is load-bearing, not tidiness. Frameworks that build a tool schema
     from your function read `inspect.signature` and `typing.get_type_hints`; a wrapper that
     copies only __name__ and __doc__ presents itself as `(*args, **kwargs)` with no hints at
@@ -2374,6 +2384,8 @@ def guard_tool(
 
     if on_verdict is not None and not callable(on_verdict):
         raise ValueError(f"on_verdict must be a callable, not {on_verdict!r}")
+    if not isinstance(require_argument_policy, bool) or not isinstance(check_defaults, bool):
+        raise ValueError("require_argument_policy and check_defaults must be True or False")
 
     def _notify(verdict: "Verdict") -> None:
         try:
@@ -2409,6 +2421,10 @@ def guard_tool(
         arguments are the tool's parameters by name (a `**kwargs` parameter's keys at the top level). No policy (or a gate
         that predates them) = the call exactly as given."""
         policies = raw.get("argumentPolicies") if isinstance(raw, Mapping) else None
+        if policies is None and require_argument_policy:
+            # A current gate always states the policy (`[]` for none). Saying nothing means a gate that predates it, or
+            # something on the path that removed it: with require_argument_policy the call is refused, not run unchecked.
+            raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail="the gate stated no argument policy (it predates them, or the field was removed on the way)")
         if policies is None or policies == []:
             return args, kwargs
         if not isinstance(policies, list):
@@ -2419,6 +2435,9 @@ def guard_tool(
             bound = tool_signature.bind(*args, **kwargs)
         except TypeError as exc:
             raise ArgumentRefusal("ARGUMENTS_UNCHECKABLE", detail=str(exc)) from exc
+        if check_defaults:
+            # The values the tool would fall back to are held to the policy too, and passed explicitly.
+            bound.apply_defaults()
         params = tool_signature.parameters
         named: "dict[str, Any]" = {}
         for name, value in bound.arguments.items():
@@ -2838,6 +2857,8 @@ def guard_agent_tool(
     release_on_error: "Any" = False,
     resume_timeout: float = 600.0,
     on_verdict: "Any" = None,
+    require_argument_policy: bool = False,
+    check_defaults: bool = False,
 ) -> "Any":
     """Wrap a tool you hand to an AGENT FRAMEWORK so it runs ONLY on a permit (0.9.0).
 
@@ -2860,7 +2881,8 @@ def guard_agent_tool(
     Signature, type hints and sync/async-ness are preserved, so a framework builds the same tool schema it would
     for `fn` unguarded.
     """
-    return guard_tool(client, action, fn, map_args, on_refusal="return", settle=settle, release_on_error=release_on_error, resume_timeout=resume_timeout, on_verdict=on_verdict)
+    return guard_tool(client, action, fn, map_args, on_refusal="return", settle=settle, release_on_error=release_on_error, resume_timeout=resume_timeout, on_verdict=on_verdict,
+                      require_argument_policy=require_argument_policy, check_defaults=check_defaults)
 
 
 def guard_langchain_tool(
@@ -2873,6 +2895,8 @@ def guard_langchain_tool(
     release_on_error: "Any" = False,
     resume_timeout: float = 600.0,
     on_verdict: "Any" = None,
+    require_argument_policy: bool = False,
+    check_defaults: bool = False,
 ) -> "Any":
     """`guard_agent_tool` as a LangChain `StructuredTool` whose refusal is an ERROR tool message (0.23.0).
 
@@ -2906,6 +2930,8 @@ def guard_langchain_tool(
         release_on_error=release_on_error,
         resume_timeout=resume_timeout,
         on_verdict=on_verdict,
+        require_argument_policy=require_argument_policy,
+        check_defaults=check_defaults,
     )
     if is_async:
         return StructuredTool.from_function(coroutine=governed, name=fn.__name__, description=(fn.__doc__ or fn.__name__), handle_tool_error=True)

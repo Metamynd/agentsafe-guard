@@ -130,6 +130,10 @@ describe('sanitizeArguments', () => {
 
   it('skips a sensitive path the call does not carry', () => {
     expect(sanitizeArguments([{ allow: ['/to', '/cc'], sensitive: [{ path: '/cc', mode: 'hmac' }] }], { to: 'x' })).toEqual({ ok: true, value: { to: 'x' } });
+    // An array's `length` (or a non-index like `01`) is not a member: it matches nothing and never throws.
+    const items = { items: ['a', 'b'] };
+    expect(sanitizeArguments([{ allow: ['/items'], sensitive: [{ path: '/items/length', mode: 'redact' }, { path: '/items/01', mode: 'redact' }] }], items)).toEqual({ ok: true, value: items });
+    expect(sanitizeArguments([{ allow: ['/items'], sensitive: [{ path: '/items/1', mode: 'redact' }] }], items)).toEqual({ ok: true, value: { items: ['a', '[REDACTED]'] } });
   });
 });
 

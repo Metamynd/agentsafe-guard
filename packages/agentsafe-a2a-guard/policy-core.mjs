@@ -1080,7 +1080,7 @@ function sanitizeArguments(policies, args, { hmac } = {}) {
     }
     if (value === null || typeof value !== "object") return;
     const [head, ...rest] = pattern;
-    const keys = head === "*" ? Object.keys(value) : Object.prototype.hasOwnProperty.call(value, head) ? [head] : [];
+    const keys = head === "*" ? Object.keys(value) : Array.isArray(value) ? /^(0|[1-9]\d*)$/.test(head) && Number(head) < value.length ? [head] : [] : Object.prototype.hasOwnProperty.call(value, head) ? [head] : [];
     for (const k of keys) visit(value[k], rest, [...at, k], mode);
   };
   for (const p of policies) {
