@@ -120,7 +120,7 @@ const issuer = http.createServer((req, res) => {
     let body = {};
     try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* not JSON */ }
     // The two endpoints the hosted CLI calls before scaffolding (login, then one-call provisioning).
-    if (req.method === 'POST' && req.url === '/api/v1/auth/login') return res.end(JSON.stringify({ success: true, data: { accessToken: 'stand-in-token' } }));
+    if (req.method === 'POST' && req.url === '/api/v1/auth/login') return res.end(JSON.stringify({ success: true, data: { accessToken: '<stand-in access token>' } }));
     if (req.method === 'POST' && req.url === '/api/v1/onboarding/agent') {
       provisionBodies.push(body);
       return res.end(JSON.stringify({ success: true, data: { apiBase: ISSUER, agentDid: AGENT_DID, agentKey: privateKeyHex, identityId: 'stand-in', keyVerified: true, mandate: { scope: body.scope }, standards: [], bundleUrl: `${ISSUER}/policy/bundle/${AGENT_DID}` } }));

@@ -48,7 +48,7 @@ function startFakeBackend() {
     if (req.url.startsWith('/policy/bundle/')) { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ success: true, data: { ownerPrincipal: 'did:hedera:testnet:zStandInOwner_0.0.900' } })); }
     if (req.url === '/auth/login') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ success: true, message: 'ok', data: { accessToken: 'test-token' } }));
+      res.end(JSON.stringify({ success: true, message: 'ok', data: { accessToken: '<stand-in access token>' } }));
       return;
     }
 

@@ -59,7 +59,7 @@ const server = http.createServer((req, res) => {
     }
     if (req.method === 'POST' && req.url === '/api/v1/onboarding/requests') {
       seen.requests.push(body);
-      return res.end(JSON.stringify({ success: true, data: { requestId: 'req-42', claimToken: 'claim-tok', status: 'pending', ownerEmail: body.ownerEmail, ...(modern ? { financial: body.financial !== false } : {}) } }));
+      return res.end(JSON.stringify({ success: true, data: { requestId: 'req-42', claimToken: '<stand-in claim token>', status: 'pending', ownerEmail: body.ownerEmail, ...(modern ? { financial: body.financial !== false } : {}) } }));
     }
     if (req.method === 'GET' && /^\/api\/v1\/onboarding\/requests\/[^/]+\/claim$/.test(req.url)) {
       seen.claims++;
@@ -289,7 +289,7 @@ await check('a --config file drives the request the same way: a spend-free polic
 });
 
 // ================================================================= --claim
-const claimArgs = (out) => ['--claim', '--request-id', 'req-42', '--token', 'claim-tok', '--yes', '--out', out];
+const claimArgs = (out) => ['--claim', '--request-id', 'req-42', '--token', '<stand-in claim token>', '--yes', '--out', out];
 const nonFinancialConfig = () => ({ ...baseConfig('perform-action'), financial: false });
 
 await check('--claim of an approved NON-financial agent scaffolds a payment-free project', async () => {
@@ -344,7 +344,7 @@ await check('--claim --non-financial when the approved config does NOT say it is
 await check('--claim of a request the state file marks non-financial, approved with spend authority, STOPS and keeps the key', async () => {
   claimConfig = { ...baseConfig('flight-purchase'), financial: true };
   const dir = fresh(); const out = join(dir, 'proj');
-  writeFileSync(join(dir, 'metamynd-request.json'), JSON.stringify({ api: API, requestId: 'req-42', claimToken: 'claim-tok', byok: false, name: 'Notice Bot', scope: 'perform-action', financial: false }));
+  writeFileSync(join(dir, 'metamynd-request.json'), JSON.stringify({ api: API, requestId: 'req-42', claimToken: '<stand-in claim token>', byok: false, name: 'Notice Bot', scope: 'perform-action', financial: false }));
   const r = await cli(['--claim', '--request-file', join(dir, 'metamynd-request.json'), '--yes', '--out', out]);
   assert.match(r.out, /does not say it is one/);
   assertKeptNotScaffolded(r, out);
@@ -378,7 +378,7 @@ for (const [label, argv, state] of [
     claimConfig = nonFinancialConfig();
     const dir = fresh(); const out = join(dir, 'proj');
     const file = join(dir, 'metamynd-request.json');
-    writeFileSync(file, JSON.stringify({ api: API, requestId: 'req-42', claimToken: 'claim-tok', byok: false, name: 'Notice Bot', scope: 'perform-action', ...state }));
+    writeFileSync(file, JSON.stringify({ api: API, requestId: 'req-42', claimToken: '<stand-in claim token>', byok: false, name: 'Notice Bot', scope: 'perform-action', ...state }));
     seen.claims = 0;
     const r = await cli(['--claim', '--request-file', file, '--yes', '--out', out, ...argv]);
     assert.notEqual(r.code, 0);
@@ -390,7 +390,7 @@ for (const [label, argv, state] of [
 await check('--claim reads METAMYND_API like every other mode (with no --api flag and no state file)', async () => {
   claimConfig = nonFinancialConfig();
   const out = join(fresh(), 'proj');
-  const r = await cli(['--claim', '--request-id', 'req-42', '--token', 'claim-tok', '--yes', '--out', out], { envOnly: true });
+  const r = await cli(['--claim', '--request-id', 'req-42', '--token', '<stand-in claim token>', '--yes', '--out', out], { envOnly: true });
   assert.equal(r.code, 0, r.out);
   assert.doesNotMatch(r.out, /BLOCKED/);
 });
@@ -416,7 +416,7 @@ await check('--claim builds the demo in the currency the request was filed in (a
   claimConfig = { ...baseConfig('pay-invoice'), financial: true };
   const dir = fresh(); const out = join(dir, 'proj');
   const file = join(dir, 'metamynd-request.json');
-  writeFileSync(file, JSON.stringify({ api: API, requestId: 'req-42', claimToken: 'claim-tok', byok: false, name: 'Pay Bot', scope: 'pay-invoice', financial: true, perTxnMax: 250, currency: 'GBP' }));
+  writeFileSync(file, JSON.stringify({ api: API, requestId: 'req-42', claimToken: '<stand-in claim token>', byok: false, name: 'Pay Bot', scope: 'pay-invoice', financial: true, perTxnMax: 250, currency: 'GBP' }));
   const r = await cli(['--claim', '--request-file', file, '--yes', '--out', out]);
   assert.equal(r.code, 0, r.out);
   assert.deepEqual(demoCurrencies(out), ['GBP']);
@@ -427,7 +427,7 @@ await check('--claim from a request file that recorded no currency (filed before
   claimConfig = { ...baseConfig('pay-invoice'), financial: true };
   const dir = fresh(); const out = join(dir, 'proj');
   const file = join(dir, 'metamynd-request.json');
-  writeFileSync(file, JSON.stringify({ api: API, requestId: 'req-42', claimToken: 'claim-tok', byok: false, name: 'Pay Bot', scope: 'pay-invoice', financial: true, perTxnMax: 250 }));
+  writeFileSync(file, JSON.stringify({ api: API, requestId: 'req-42', claimToken: '<stand-in claim token>', byok: false, name: 'Pay Bot', scope: 'pay-invoice', financial: true, perTxnMax: 250 }));
   const r = await cli(['--claim', '--request-file', file, '--yes', '--out', out]);
   assert.equal(r.code, 0, r.out);
   assert.deepEqual(demoCurrencies(out), ['USD']);

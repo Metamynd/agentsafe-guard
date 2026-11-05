@@ -29,7 +29,7 @@ async function check(name, fn) {
 }
 const strip = (t) => t.replace(/\x1b\[[0-9;]*m/g, '');
 
-const PASSWORD = 'pw-never-written-3f9c';
+const PASSWORD = '<stand-in password, never written 3f9c>';
 const POLICY_KEY = 'ab'.repeat(32);
 const AGENT_DID = 'did:key:z6MkStandInAgentForOwnerSessionSmoke';
 
