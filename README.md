@@ -1,5 +1,7 @@
 # AgentSafe Guard
 
+[![HOL Guard](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Dmetamynd%252Fagentsafe-guard%26metric%3Drelease)](https://hol.org/registry/plugins/metamynd%2Fagentsafe-guard?utm_source=hol_marketplace&utm_medium=plugins_badge&utm_campaign=plugins&utm_content=metamynd%2Fagentsafe-guard&ref=plugin-author-27aa10b0)
+
 **Runtime governance for AI agents.** Wrap a tool in three lines; every call is signed and
 decided outside your process. Blocked calls never reach your code.
 
