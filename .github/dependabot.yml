@@ -1,0 +1,22 @@
+version: 2
+
+# Only what lives in this repository. packages/ and docs/protocol/ are synced from the AgentSafe monorepo on
+# release, so an update PR there would be overwritten by the next sync; those dependencies are updated at the source.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
