@@ -1,0 +1,19 @@
+{
+  "name": "metamynd",
+  "owner": {
+    "name": "MetaMynd",
+    "url": "https://metamynd.ai"
+  },
+  "metadata": {
+    "description": "MetaMynd plugins for governing what AI agents can do."
+  },
+  "plugins": [
+    {
+      "name": "agentsafe-guard",
+      "source": "./",
+      "description": "Add MetaMynd runtime governance to a Node agent: every tool call is allowed, refused or held for a person before it runs.",
+      "version": "0.1.0",
+      "license": "MIT"
+    }
+  ]
+}

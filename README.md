@@ -111,6 +111,21 @@ export const bookFlight = guard.guardTool("flight-purchase", rawBookFlight, (a) 
 
 No prompt changes, no tool changes, one config file.
 
+## Install as an AI coding plugin
+
+A small plugin teaches your coding agent to add this guard to a project: it finds the tools your
+agent can call, wraps them, and checks the result. It installs instructions only. It adds no MCP
+server, hooks or background process.
+
+Claude Code:
+
+```text
+/plugin marketplace add Metamynd/agentsafe-guard
+/plugin install agentsafe-guard@metamynd
+```
+
+Codex loads the same skill through `.codex-plugin/plugin.json`.
+
 ## Running the tests
 
 ```bash

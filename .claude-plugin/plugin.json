@@ -1,0 +1,13 @@
+{
+  "name": "agentsafe-guard",
+  "version": "0.1.0",
+  "description": "Add MetaMynd runtime governance to a Node agent: every tool call is allowed, refused or held for a person before it runs.",
+  "author": {
+    "name": "MetaMynd",
+    "url": "https://metamynd.ai"
+  },
+  "homepage": "https://docs.metamynd.ai",
+  "repository": "https://github.com/Metamynd/agentsafe-guard",
+  "license": "MIT",
+  "keywords": ["ai-agents", "governance", "authorization", "audit", "mcp", "security"]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "agentsafe-guard",
+  "version": "0.1.0",
+  "description": "Add MetaMynd runtime governance to a Node agent: every tool call is allowed, refused or held for a person before it runs.",
+  "author": {
+    "name": "MetaMynd",
+    "url": "https://metamynd.ai"
+  },
+  "homepage": "https://docs.metamynd.ai",
+  "repository": "https://github.com/Metamynd/agentsafe-guard",
+  "license": "MIT",
+  "keywords": ["ai-agents", "governance", "authorization", "audit", "mcp", "security"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "MetaMynd AgentSafe Guard",
+    "shortDescription": "Allow, refuse or hold an agent's tool calls before they run",
+    "longDescription": "Adds MetaMynd governance to a Node agent. Each tool call is checked against a mandate the agent cannot edit, and a refused call never reaches the tool.",
+    "developerName": "MetaMynd",
+    "category": "Security",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://metamynd.ai",
+    "privacyPolicyURL": "https://metamynd.ai/en/legal/privacy-policy",
+    "termsOfServiceURL": "https://metamynd.ai/en/legal/terms-of-service",
+    "composerIcon": "./assets/logo.png",
+    "logo": "./assets/logo.png",
+    "screenshots": ["./assets/demo.png"],
+    "defaultPrompt": ["Add MetaMynd governance to this agent's tools"]
+  }
+}
