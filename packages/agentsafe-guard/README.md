@@ -291,6 +291,39 @@ not the npm version of this package; the npm package the action runs is chosen b
 to run, default `latest`), `working-directory`. Output: `ok` (`"true"`/`"false"`), if a
 later step needs to branch on the result.
 
+### Readiness gate (since 0.38.0)
+
+Gate a build on the agent's **Agent Readiness Report**: the deployment status it was assessed at, and whether the report
+still applies (current, or superseded, needing reassessment, revoked, expired).
+
+```bash
+# Public: is this report authentic and still current? No token needed.
+npx @metamynd/agentsafe-guard readiness status <reportId> [--hash sha256:...]
+
+# Owner: fail unless the latest issued report is at least `conditional` and current.
+METAMYND_TOKEN=... npx @metamynd/agentsafe-guard readiness gate --programme <programmeId> --min conditional
+```
+
+`gate` needs an **owner API token** (dashboard: Settings > API tokens) with `readiness:read`, plus `readiness:issue` for
+`--issue`, which issues a fresh signed report first. The token is read only from `METAMYND_TOKEN`, never a flag, and is
+only ever sent over HTTPS (or to localhost). `--out report.html` saves the printable report. Exit codes: `0` pass, `1`
+the report says no, `2` the check could not run, which is never a pass.
+
+As an Action:
+
+```yaml
+- uses: Metamynd/agentsafe-guard/packages/agentsafe-guard/readiness@vX.Y.Z
+  with:
+    programme: <programmeId>
+    min: conditional
+    out: readiness-report.html
+    version: '0.38.0'   # pin it: the CLI runs with your token in its environment
+  env:
+    METAMYND_TOKEN: ${{ secrets.METAMYND_TOKEN }}
+```
+
+Outputs: `ok`, `report-id`, `status`, `grade`, `validity`. The status and the grade are separate: gates and evidence
+decide the status; the grade is an ordinal, uncalibrated risk index.
 ## Install
 
 ```bash

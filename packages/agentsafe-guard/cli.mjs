@@ -48,6 +48,37 @@ if (cmd === 'demo') {
     console.error(`verify could not run: ${e.message}`);
     process.exitCode = 2;
   }
+} else if (cmd === 'readiness') {
+  // Agent Readiness Reports: `status` (public) and `gate` (owner API token in METAMYND_TOKEN). See readiness.mjs.
+  const { readinessStatus, readinessGate, EXIT } = await import('./readiness.mjs');
+  const sub = process.argv[3];
+  const flags = {
+    api: flag('api'),
+    programme: flag('programme'),
+    target: flag('target'),
+    min: flag('min'),
+    edition: flag('edition'),
+    out: flag('out'),
+    issue: process.argv.includes('--issue'),
+    'allow-stale': process.argv.includes('--allow-stale'),
+  };
+  const json = process.argv.includes('--json');
+  try {
+    const result =
+      sub === 'status'
+        ? await readinessStatus({ reportId: process.argv[4] && !process.argv[4].startsWith('--') ? process.argv[4] : null, hash: flag('hash'), flags })
+        : sub === 'gate'
+          ? await readinessGate({ flags, writeFile: async (p, s) => (await import('node:fs/promises')).writeFile(p, s, 'utf8') })
+          : (() => { throw new Error('use: readiness status <reportId> | readiness gate --programme <id>'); })();
+    if (json) console.log(JSON.stringify({ ...result, lines: undefined }, null, 2));
+    else console.log(result.lines.join('\n'));
+    // exitCode, not exit(): see the note on `verify` above.
+    process.exitCode = result.ok ? EXIT.PASS : EXIT.FAIL;
+  } catch (e) {
+    // Not being able to check is not a pass, and CI must not read it as one.
+    console.error(`readiness could not run: ${e.message}`);
+    process.exitCode = EXIT.ERROR;
+  }
 } else if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
   console.log(`
   @metamynd/agentsafe-guard — runtime governance for Node AI agents
@@ -70,6 +101,25 @@ if (cmd === 'demo') {
     A control the mandate does not set is reported, never passed: an empty
     merchant allow-list permits every merchant, and this says so rather than
     calling it a pass.
+
+    npx @metamynd/agentsafe-guard readiness status <reportId>
+                                           Is this readiness report authentic and
+                                           still current? Public, no token.
+      --hash <sha256:…>   also check your copy is the one that was issued
+
+    npx @metamynd/agentsafe-guard readiness gate --programme <id>
+                                           Fail the build unless the latest issued
+                                           readiness report is good enough and
+                                           still current. Needs METAMYND_TOKEN
+                                           (owner API token, readiness:read).
+      --issue             issue a fresh signed report first (readiness:issue)
+      --min <status>      ready (default) | conditional | insufficient-evidence
+      --target <t>        autonomous-payments | supervised-payments | non-financial
+      --allow-stale       pass a report needing reassessment (never a revoked one)
+      --out <file.html>   save the printable report (--edition lite|full)
+      --api <url>         default https://metamynd.ai/api/v1 (or AGENTSAFE_API)
+      --json              machine-readable output
+    Exit 0 pass, 1 the report says no, 2 could not check.
 
   In your agent
     import { createGuard } from '@metamynd/agentsafe-guard';

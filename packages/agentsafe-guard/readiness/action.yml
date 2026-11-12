@@ -1,0 +1,112 @@
+name: 'AgentSafe readiness gate'
+description: >-
+  Fail the build unless the agent's latest Agent Readiness Report is good enough and still current (or issue a fresh
+  signed one first). Runs `npx @metamynd/agentsafe-guard readiness gate`.
+author: MetaMynd
+branding:
+  icon: shield
+  color: purple
+
+# Needs an owner API token (dashboard: Settings > API tokens) with readiness:read, plus readiness:issue for
+# `issue: true`. Pass it ONLY as the METAMYND_TOKEN secret, never as an input:
+#
+#   - uses: Metamynd/agentsafe-guard/packages/agentsafe-guard/readiness@vX.Y.Z  # a release tag of that repo, not the npm version
+#     with:
+#       programme: 6f1c...-programme-id
+#       min: conditional
+#       out: readiness-report.html
+#     env:
+#       METAMYND_TOKEN: ${{ secrets.METAMYND_TOKEN }}
+inputs:
+  programme:
+    description: 'The Controlled Testing programme id whose report is checked.'
+    required: true
+  min:
+    description: 'Lowest deployment status that passes: ready | conditional | insufficient-evidence | not-ready.'
+    required: false
+    default: 'ready'
+  issue:
+    description: '"true" to issue a fresh signed report first (needs readiness:issue).'
+    required: false
+    default: 'false'
+  target:
+    description: 'autonomous-payments | supervised-payments | non-financial. Empty = the report''s own target.'
+    required: false
+    default: ''
+  allow-stale:
+    description: '"true" to pass a report that needs reassessment (a revoked report never passes).'
+    required: false
+    default: 'false'
+  out:
+    description: 'Path to save the printable HTML report, e.g. readiness-report.html. Empty = do not save.'
+    required: false
+    default: ''
+  edition:
+    description: 'lite | full (full needs a paid tier).'
+    required: false
+    default: 'lite'
+  api:
+    description: 'API base URL.'
+    required: false
+    default: 'https://metamynd.ai/api/v1'
+  version:
+    description: 'The @metamynd/agentsafe-guard version (npm semver range) to run.'
+    required: false
+    default: 'latest'
+
+outputs:
+  ok:
+    description: '"true" when the report meets `min` and is current, else "false".'
+    value: ${{ steps.gate.outputs.ok }}
+  report-id:
+    description: 'The report that was checked.'
+    value: ${{ steps.gate.outputs.report-id }}
+  status:
+    description: 'Its deployment status.'
+    value: ${{ steps.gate.outputs.status }}
+  grade:
+    description: 'Its risk grade (ordinal, uncalibrated; reported separately from the status).'
+    value: ${{ steps.gate.outputs.grade }}
+  validity:
+    description: 'current | superseded | reassessment-required | revoked | expired.'
+    value: ${{ steps.gate.outputs.validity }}
+
+runs:
+  using: composite
+  steps:
+    - name: agentsafe-guard readiness gate
+      id: gate
+      shell: bash
+      # Inputs reach the script only through the environment, never spliced into it, so no input can inject a command.
+      env:
+        IN_PROGRAMME: ${{ inputs.programme }}
+        IN_MIN: ${{ inputs.min }}
+        IN_ISSUE: ${{ inputs.issue }}
+        IN_TARGET: ${{ inputs.target }}
+        IN_ALLOW_STALE: ${{ inputs.allow-stale }}
+        IN_OUT: ${{ inputs.out }}
+        IN_EDITION: ${{ inputs.edition }}
+        IN_API: ${{ inputs.api }}
+        IN_VERSION: ${{ inputs.version }}
+      run: |
+        set +e
+        if [ -z "${METAMYND_TOKEN:-}" ]; then
+          echo "::error::Set METAMYND_TOKEN (an owner API token) as a secret in the step's env."
+          exit 2
+        fi
+        ARGS=(readiness gate --programme "$IN_PROGRAMME" --min "$IN_MIN" --edition "$IN_EDITION" --api "$IN_API" --json)
+        [ "$IN_ISSUE" = "true" ] && ARGS+=(--issue)
+        [ "$IN_ALLOW_STALE" = "true" ] && ARGS+=(--allow-stale)
+        [ -n "$IN_TARGET" ] && ARGS+=(--target "$IN_TARGET")
+        [ -n "$IN_OUT" ] && ARGS+=(--out "$IN_OUT")
+        RAW=$(npx --yes "@metamynd/agentsafe-guard@${IN_VERSION}" "${ARGS[@]}")
+        CODE=$?
+        echo "$RAW"
+        node -e '
+          let r = {};
+          try { r = JSON.parse(process.argv[1] || "{}"); } catch {}
+          const out = { ok: String(r.ok === true), "report-id": r.reportId ?? "", status: r.status ?? "", grade: r.grade ?? "", validity: r.validity ?? "" };
+          for (const [k, v] of Object.entries(out)) console.log(`${k}=${String(v).replace(/[\r\n]/g, " ")}`);
+        ' "$RAW" >> "$GITHUB_OUTPUT"
+        if [ "$CODE" = "0" ]; then echo "::notice::Readiness gate passed"; elif [ "$CODE" = "1" ]; then echo "::error::Readiness gate failed: the report does not meet '$IN_MIN' or is not current"; else echo "::error::Readiness gate could not run"; fi
+        exit $CODE

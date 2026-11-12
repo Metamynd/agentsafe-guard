@@ -99,7 +99,9 @@ const GUARD_PKG = '@metamynd/agentsafe-guard';
 // 0.36.0: ships TypeScript declarations (agentsafe-guard.d.mts), so a TypeScript agent gets types with no @types package.
 // 0.37.0: a tool that hands its call to a gateway that then refuses it (the hold stays unclaimed) has its hold released, not
 // captured, so a refused payment is no longer booked as spend.
-const GUARD_VERSION = '^0.37.0';
+// 0.38.0: adds the readiness CLI (`agentsafe-guard readiness status|gate`) and the readiness GitHub Action, so a scaffolded
+// agent's CI can gate on its Agent Readiness Report.
+const GUARD_VERSION = '^0.38.0';
 /** The harness entry point's config load, shared by both harness templates: a fresh clone has no
  *  agent.metamynd.json (it is gitignored), so say what to do instead of a bare ENOENT. */
 function harnessConfigLoad() {
