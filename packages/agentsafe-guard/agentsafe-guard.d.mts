@@ -121,7 +121,11 @@ export interface GuardOptions {
   /** A portable agent config (agent.metamynd.json's contents) or its path. Explicit fields win. */
   config?: Record<string, unknown>;
   configPath?: string;
-  /** 'remote' (default) asks the gate; 'local' evaluates the signed bundle offline. */
+  /**
+   * 'local' (default; also read from the config's `mode`) decides the rule layer locally against the cached signed
+   * bundle: a refusal needs no network, and an allowed value action is still sealed by the gate. 'remote' sends every
+   * call to the gate, so every decision is in the gate's record (what a Controlled Testing run is judged on).
+   */
   mode?: 'remote' | 'local' | string;
   executionAdapter?: ExecutionAdapter;
   /** Sign the request's context (default true since 0.17.0). */
