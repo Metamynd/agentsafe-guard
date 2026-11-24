@@ -7,6 +7,7 @@ decided outside your process. Blocked calls never reach your code.
 
 [![npm](https://img.shields.io/npm/v/@metamynd/agentsafe-guard?label=%40metamynd%2Fagentsafe-guard)](https://www.npmjs.com/package/@metamynd/agentsafe-guard)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![AgentSafe Guard on StartupScores](https://startupscores.com/badge/agentsafe-guard.svg?style=shield&v=combo&theme=dark)](https://startupscores.com/open-source/agentsafe-guard)
 
 ```bash
 npx create-metamynd-agent --sandbox   # no account, no KYB
