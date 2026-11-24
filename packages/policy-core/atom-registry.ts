@@ -192,6 +192,13 @@ export function normalizeContextToken(s: string): string {
  * and choose which of the two the rule reads.
  */
 export function contextValueAt(ctx: Record<string, unknown> | null | undefined, path: string): unknown {
+  // Attested environment facts are flat `env.<fact>` keys (provenance.ts ENV_FACT_PREFIX), so in that namespace ONLY the
+  // exact flat key is read: the provenance check (`ctx[field]`) and this read then agree on one value. Safe there because
+  // buildRuleContext lets only the attested layer set `env.*` and drops any `env` key from every other source. Everywhere
+  // else a literal dotted key stays unaddressable, so an agent cannot pick which of two places a rule reads.
+  if (path.startsWith('env.')) {
+    return ctx && typeof ctx === 'object' && Object.prototype.hasOwnProperty.call(ctx, path) ? ctx[path] : undefined;
+  }
   let cur: unknown = ctx;
   for (const seg of path.split('.')) {
     if (seg === '' || cur === null || typeof cur !== 'object' || Array.isArray(cur)) return undefined;

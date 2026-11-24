@@ -12,6 +12,7 @@ import {
   riskFloorFor,
 } from './provenance.js';
 import { evaluateStandardRules, moleculeUnverifiable, validateMolecules, type Molecule } from './standards-rules.js';
+import { contextValueAt } from './atom-registry.js';
 import { evaluate } from './evaluate.js';
 import type { EvaluationContext } from './types.js';
 
@@ -334,5 +335,67 @@ describe('requiresPayloadBindingFor', () => {
     expect(requiresPayloadBindingFor(undefined, 'wire')).toBe(false);
     expect(requiresPayloadBindingFor({ permission: [null as never, 'x' as never, {}] }, 'wire')).toBe(false);
     for (const v of ['true', 'yes', 1, {}, [], null]) expect(requiresPayloadBindingFor({ permission: [{ target: 'wire', requirePayloadBinding: v }] }, 'wire')).toBe(false);
+  });
+});
+
+// Attested environment facts: an observer's signed fact about a target, never the agent's word.
+describe('attested environment facts', () => {
+  const restartOnlyWhenUnhealthy: Molecule = {
+    id: 'restart-only-when-unhealthy',
+    combinator: 'all',
+    atoms: [{ id: 'a1', predicate: 'context-value-not-in', config: { field: 'env.health', values: ['unhealthy'] } }],
+    decision: 'block',
+    reasonCode: 'TARGET_HEALTHY',
+    requireProvenance: { 'env.health': 'attested' },
+  };
+  const decide = (src: Parameters<typeof buildRuleContext>[0]) =>
+    evaluateStandardRules([restartOnlyWhenUnhealthy], buildRuleContext({ signed: { action: 'service.restart' }, ...src }) as EvaluationContext);
+
+  it('labels an attested env fact attested, and reads it by its dotted name', () => {
+    const ctx = buildRuleContext({ attested: { 'env.health': 'unhealthy' } });
+    expect(ctx['env.health']).toBe('unhealthy');
+    expect(provenanceOf(ctx, 'env.health')).toBe('attested');
+  });
+
+  it('allows when an observer attests the target is unhealthy, and blocks when it attests healthy', () => {
+    expect(decide({ attested: { 'env.health': 'unhealthy' } }).decision).toBe('allow');
+    expect(decide({ attested: { 'env.health': 'healthy' } })).toMatchObject({ decision: 'block', reasonCode: 'TARGET_HEALTHY' });
+  });
+
+  it('never takes the agent\'s word: an agent-sent env fact, flat or nested, is dropped and the rule escalates', () => {
+    for (const unsigned of [{ 'env.health': 'unhealthy' }, { env: { health: 'unhealthy' } }]) {
+      const ctx = buildRuleContext({ unsigned, signed: { action: 'service.restart' } });
+      expect(ctx['env.health']).toBeUndefined();
+      expect((ctx as Record<string, unknown>).env).toBeUndefined();
+      expect(decide({ unsigned })).toMatchObject({ decision: 'escalate', reasonCode: 'CONTEXT_UNVERIFIABLE' });
+    }
+    // Nor from the signed, gateway-derived or server-derived layers: the namespace is the observer's alone.
+    for (const layer of ['signed', 'gatewayDerived', 'serverDerived'] as const) {
+      expect(buildRuleContext({ [layer]: { 'env.health': 'unhealthy' } })['env.health']).toBeUndefined();
+    }
+  });
+
+  it('escalates when no fact is attested (missing or expired facts are simply absent)', () => {
+    expect(decide({})).toMatchObject({ decision: 'escalate', reasonCode: 'CONTEXT_UNVERIFIABLE' });
+  });
+
+  it('wins over an agent claim of the same fact, and reads only scalar env keys from the attested layer', () => {
+    const ctx = buildRuleContext({ unsigned: { 'env.health': 'unhealthy' }, attested: { 'env.health': 'healthy', 'env.bad': { x: 1 }, notEnv: 'x', 'env.': 'y' } });
+    expect(ctx['env.health']).toBe('healthy');
+    expect(ctx['env.bad']).toBeUndefined();
+    expect(ctx.notEnv).toBeUndefined();
+    expect(ctx['env.']).toBeUndefined();
+  });
+
+  it('reads an env fact only from its exact flat key, never from a nested env object', () => {
+    expect(contextValueAt({ env: { health: 'unhealthy' } }, 'env.health')).toBeUndefined();
+    expect(contextValueAt({ 'env.health': 'healthy' }, 'env.health')).toBe('healthy');
+    // Outside env, a literal dotted key stays unaddressable (context-value-atom.test.ts).
+    expect(contextValueAt({ 'params.op': 'read', params: { op: 'delete-all' } }, 'params.op')).toBe('delete-all');
+  });
+
+  it('leaves every context without facts exactly as before', () => {
+    const before = buildRuleContext({ unsigned: { op: 'read', params: { op: 'x' } }, signed: { action: 'a', amount: 5 } });
+    expect(before).toMatchObject({ op: 'read', params: { op: 'x' }, action: 'a', amount: 5 });
   });
 });

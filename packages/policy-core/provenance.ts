@@ -301,7 +301,20 @@ export interface RuleContextSources {
   serverDerived?: Record<string, unknown> | null;
   /** The mandate owner's risk tier for this action (`riskFloorFor`). `authoritative`. */
   riskFloor?: RiskLevel | null;
+  /**
+   * Environment facts signed by an observer the owner registered, verified by the issuer and unexpired
+   * (attested environment facts). Only `env.<fact>` keys with scalar values are read. `attested`.
+   */
+  attested?: Record<string, unknown> | null;
 }
+
+/**
+ * The reserved namespace for attested environment facts: flat keys `env.<fact>`. No other source may set a key in it, or
+ * a top-level `env` object (which a dotted rule path would also reach), so an agent can never state or shadow a fact.
+ */
+export const ENV_FACT_PREFIX = 'env.';
+const isEnvKey = (k: string) => k === 'env' || k.startsWith(ENV_FACT_PREFIX);
+const isScalar = (v: unknown) => typeof v === 'string' || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v));
 
 /**
  * Build the rule-evaluation context and label every field with where it came from.
@@ -335,11 +348,18 @@ export function buildRuleContext(src: RuleContextSources): Record<string, unknow
   ];
   for (const [layer, level] of layers) {
     for (const [k, v] of Object.entries(layer ?? {})) {
+      // The environment-fact namespace belongs to the attested layer alone (below).
+      if (isEnvKey(k)) continue;
       // A TRUSTED source that states an unusable riskLevel (a lookup that missed and returned undefined, a typo)
       // has said nothing: it must neither overwrite the agent's claim nor lend it the trusted source's label.
       if (k === 'riskLevel' && (level === 'gateway_derived' || level === 'authoritative') && normalizeRiskLevel(v) === null) continue;
       put(k, v, level);
     }
+  }
+
+  // Attested environment facts: only `env.<fact>` keys, only scalar values, the most trusted layer.
+  for (const [k, v] of Object.entries(src.attested ?? {})) {
+    if (k.startsWith(ENV_FACT_PREFIX) && k.length > ENV_FACT_PREFIX.length && isScalar(v)) put(k, v, 'attested');
   }
 
   // riskLevel: merge, never let the agent lower a trusted floor.

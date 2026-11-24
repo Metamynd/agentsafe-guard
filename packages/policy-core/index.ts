@@ -95,6 +95,7 @@ export { applySignedLast } from './context.js';
 // Trusted context provenance (spec §6.4.3)
 export {
   buildRuleContext,
+  ENV_FACT_PREFIX,
   provenanceOf,
   meetsProvenance,
   isProvenance,

@@ -145,6 +145,9 @@ function contextFieldProblem(ctx, field) {
 var ATOM_DEFAULT_REQUIRED_CONTEXT = {
   "risk-at-or-above": ["riskLevel"]
 };
+var ENV_FACT_PREFIX = "env.";
+var isEnvKey = (k) => k === "env" || k.startsWith(ENV_FACT_PREFIX);
+var isScalar = (v) => typeof v === "string" || typeof v === "boolean" || typeof v === "number" && Number.isFinite(v);
 function buildRuleContext(src) {
   const ctx = {};
   const prov = /* @__PURE__ */ Object.create(null);
@@ -160,9 +163,13 @@ function buildRuleContext(src) {
   ];
   for (const [layer, level] of layers) {
     for (const [k, v] of Object.entries(layer ?? {})) {
+      if (isEnvKey(k)) continue;
       if (k === "riskLevel" && (level === "gateway_derived" || level === "authoritative") && normalizeRiskLevel(v) === null) continue;
       put(k, v, level);
     }
+  }
+  for (const [k, v] of Object.entries(src.attested ?? {})) {
+    if (k.startsWith(ENV_FACT_PREFIX) && k.length > ENV_FACT_PREFIX.length && isScalar(v)) put(k, v, "attested");
   }
   const floors = [];
   const addFloor = (v, source) => {
@@ -373,6 +380,9 @@ function normalizeContextToken(s) {
   return s.normalize("NFKC").replace(INVISIBLE_RE, "").toLowerCase().normalize("NFKC").replace(LOOKALIKE_RE, (ch) => LOOKALIKE_FOLD[ch] ?? ch).replace(/[\s\-_‐-―−]+/g, "");
 }
 function contextValueAt(ctx, path) {
+  if (path.startsWith("env.")) {
+    return ctx && typeof ctx === "object" && Object.prototype.hasOwnProperty.call(ctx, path) ? ctx[path] : void 0;
+  }
   let cur = ctx;
   for (const seg of path.split(".")) {
     if (seg === "" || cur === null || typeof cur !== "object" || Array.isArray(cur)) return void 0;
@@ -1224,6 +1234,7 @@ export {
   CATALOGUED_ATOMS,
   CONTEXT_UNVERIFIABLE,
   DEFAULT_AMOUNT_SHARE_HIGH,
+  ENV_FACT_PREFIX,
   EU_MEMBER_STATES,
   HMAC_ARGUMENT_PREFIX,
   JURISDICTION_ATOM,
