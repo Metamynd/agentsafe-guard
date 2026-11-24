@@ -663,7 +663,35 @@ function resolveFinancial(args, fileConfig) {
       return { financial: false, why: `${String(args.config).split(/[\\/]/).pop()} sets no spend limit and contains no monetary rule` };
     }
   }
+  // Flags only, and the action is plainly an operation that moves no money (service.restart, deployment.rollback):
+  // a USD spend limit on it made MetaMynd's Controlled Testing treat an IT operations agent as a payment agent (found
+  // 2026-11-24). Narrow on purpose, because the mistake the other way is worse: a money action wrongly read as
+  // non-financial gets no spend limit. So it takes a known non-money verb, no money word anywhere in the action, and no
+  // spend input at all; anything else keeps the historical financial default.
+  const scope = typeof args.scope === 'string' ? args.scope : typeof fileConfig?.scope === 'string' ? fileConfig.scope : '';
+  if (!fileConfig && nonMoneyAction(scope) && !spendInputGiven(args)) {
+    return { financial: false, why: `${scope} is an operation that moves no money` };
+  }
   return { financial: true, why: null };
+}
+
+/** The last segment of an action name, e.g. 'restart' for service.restart or deployment/roll_back. */
+const actionVerb = (scope) => String(scope).toLowerCase().split(/[.:/]/).pop().replace(/_/g, '-');
+const NON_MONEY_VERBS = new Set([
+  'restart', 'reboot', 'scale', 'rollback', 'roll-back', 'redeploy', 'drain', 'cordon', 'uncordon', 'isolate', 'failover',
+  'clear-cache', 'flush-cache', 'disable', 'enable', 'read', 'get', 'list', 'inspect', 'describe', 'query', 'search',
+  'view', 'monitor', 'notify', 'summarise', 'summarize', 'classify', 'translate',
+]);
+const MONEY_WORD = /pay|purchase|buy|sell|order|book|charge|refund|transfer|invoice|billing|trade|withdraw|deposit|wallet|fund|price|checkout|subscri/i;
+
+/** Whether an action name is plainly an operation that moves no money: a known non-money verb and no money word. */
+function nonMoneyAction(scope) {
+  return Boolean(scope) && NON_MONEY_VERBS.has(actionVerb(scope)) && !MONEY_WORD.test(scope);
+}
+
+/** Any spend input on the command line: a limit, a currency or a payee list. */
+function spendInputGiven(args) {
+  return ['per-txn-max', 'max-amount', 'currency'].some((k) => typeof args[k] === 'string') || (typeof args.merchants === 'string' && args.merchants.trim() !== '');
 }
 
 const firstOf = (list, fallback) => (Array.isArray(list) && list.length ? String(list[0]) : fallback);

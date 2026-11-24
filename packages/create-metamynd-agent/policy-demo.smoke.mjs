@@ -288,6 +288,21 @@ await check('resolveFinancial: explicit wins; a policy file with no money in it 
   assert.equal(resolveFinancial({ config: 'c.json', financial: true }, comms).financial, true, '--financial forces it');
 });
 
+// An IT operations agent provisioned with flags only got a USD spend limit, so Controlled Testing treated its
+// service.restart as a payment (2026-11-24). Only a plainly non-money verb, with no money word and no spend input, flips it.
+await check('flags only: an operation that plainly moves no money is non-financial; anything money-shaped is not', () => {
+  for (const scope of ['service.restart', 'deployment.rollback', 'k8s/scale', 'cache.clear_cache', 'logs.read']) {
+    const r = resolveFinancial({ scope }, null);
+    assert.equal(r.financial, false, scope);
+    assert.match(r.why, /moves no money/);
+  }
+  assert.equal(resolveFinancial({ scope: 'service.restart', 'per-txn-max': '500' }, null).financial, true, 'a spend flag keeps it financial');
+  assert.equal(resolveFinancial({ scope: 'service.restart', merchants: 'svc-a' }, null).financial, true, 'a payee list keeps it financial');
+  for (const scope of ['payment.read', 'order.list', 'invoice.restart', 'flight-purchase', 'office_supplies.purchase', 'perform-action', 'deploy']) {
+    assert.equal(resolveFinancial({ scope }, null).financial, true, `${scope} stays financial`);
+  }
+});
+
 // Review finding: a key that LOOKS like a spend limit but is not one we read must never be read as "no money".
 await check('unrecognised money-like keys block the non-financial inference and say why', () => {
   for (const key of ['per_txn_max', 'budget', 'spendCap', 'monthlyLimit', 'maxPayment', 'invoiceTotal']) {
